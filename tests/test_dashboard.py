@@ -393,12 +393,10 @@ class TestRichest(unittest.TestCase):
 
 
 class TestFriendship(unittest.TestCase):
-    F = chronicle.FRIEND_AT
-
     def setUp(self):
         self.sim = Simulation(seed=1)
         self.a, self.b = self.sim.agents["dana"], self.sim.agents["omer"]
-        self.relate(RelationKind.ACQUAINTANCE, self.F - 5)
+        self.relate(RelationKind.ACQUAINTANCE, 35)
         self.sim.drain()
 
     def relate(self, kind, affinity, back=None):
@@ -408,14 +406,10 @@ class TestFriendship(unittest.TestCase):
     def tagged(self, tag) -> list[dict]:
         return [e for e in self.sim.drain()[0] if e["tag"] == tag]
 
-    def test_friend_at_is_30(self):
-        # Lowered from 40 by the main-screen review (F5): a pair turns friends sooner, the design's lever for majors.
-        self.assertEqual(self.F, 30)
-
-    def test_acquaintances_become_friends_at_friend_at(self):
-        self.sim._bump(self.a, self.b.id, 4.9)  # 29.9
+    def test_acquaintances_become_friends_at_40(self):
+        self.sim._bump(self.a, self.b.id, 4.9)  # 39.9
         self.assertEqual(self.tagged("new_friend"), [])
-        self.sim._bump(self.a, self.b.id, 0.1)  # 30
+        self.sim._bump(self.a, self.b.id, 0.1)  # 40
         (ev,) = self.tagged("new_friend")
         self.assertEqual((ev["importance"], ev["agents"], ev["text"]),
                          (2, [self.a.id, self.b.id], "Dana Cohen and Omer Katz have become friends."))
@@ -427,14 +421,14 @@ class TestFriendship(unittest.TestCase):
         self.assertEqual(self.tagged("new_friend"), [], "friends already")
 
     def test_coworkers_too_but_family_keeps_its_kind(self):
-        self.relate(RelationKind.COWORKER, self.F - 1)
+        self.relate(RelationKind.COWORKER, 39)
         self.sim._bump(self.a, self.b.id, 2)
         self.assertEqual(len(self.tagged("new_friend")), 1)
-        self.relate(RelationKind.ACQUAINTANCE, self.F - 1, back=RelationKind.FAMILY)
+        self.relate(RelationKind.ACQUAINTANCE, 39, back=RelationKind.FAMILY)
         self.sim._bump(self.a, self.b.id, 2)
         self.assertEqual(len(self.tagged("new_friend")), 1)
         self.assertEqual(self.b.relationships[self.a.id].kind, RelationKind.FAMILY)
-        self.relate(RelationKind.FAMILY, self.F - 1)
+        self.relate(RelationKind.FAMILY, 39)
         self.sim._bump(self.a, self.b.id, 2)
         self.assertEqual(self.tagged("new_friend"), [])
 
