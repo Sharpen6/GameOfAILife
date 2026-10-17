@@ -14,6 +14,7 @@ import socket
 import struct
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from gameofailife import server as server_module, ws
@@ -306,17 +307,19 @@ class TestFloods(ServerCase):
             c.ws.abort()  # the server is not reading it, so no close handshake
         await super().asyncTearDown()
 
-    async def slow_client(self, hello: dict) -> tuple[asyncio.StreamReader, ws.WebSocket]:
+    async def slow_client(self, hello: dict, sndbuf: int | None = 16384) -> tuple[asyncio.StreamReader, ws.WebSocket]:
         """A raw connection that says hello; returns its reader and the server's side of it.
 
         Both ends get small socket buffers, as on a slow link, where the kernel cannot soak up
-        seconds of frames the way it does on localhost.
+        seconds of frames the way it does on localhost. With sndbuf None, the server's end keeps
+        the buffer the kernel gives it, which grows to megabytes on localhost.
         """
         before = set(self.server._outboxes)
         reader, _ = await self.raw_ws(masked_frame(True, ws.OP_TEXT, json.dumps(hello).encode()), 16384)
         await wait_until(lambda: set(self.server._outboxes) - before)
         (theirs,) = set(self.server._outboxes) - before
-        theirs.writer.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+        if sndbuf:
+            theirs.writer.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
         return reader, theirs
 
     def flood(self, c: Client, agent_id: str, to: str) -> None:
@@ -373,8 +376,18 @@ class TestFloods(ServerCase):
             self.assertEqual([self.sim.agents[a].controller for a in ("tom", "ari")], ["victim", "victim"])
             r = await thief.reply_to('{"type": "claim", "agent_id": "tom", "req_id": "c"}', "c")
             self.assertFalse(r["ok"])
-            # Skipped texts are still in tom's inbox. A controller that stops reading is still dropped.
+            # Skipped texts are still in tom's inbox.
             self.assertEqual(self.sim.agents["tom"].inbox[-1]["text"], "é" * 500)
+            # A controller that stops reading is not dropped for texts, and they do not pile up for it...
+            outbox = self.server._outboxes[victim]
+            await asyncio.sleep(2)
+            queued = outbox.qsize()
+            await asyncio.sleep(1)
+            self.assertFalse(victim.closed, "texts alone never get a controller dropped")
+            self.assertLessEqual(outbox.qsize(), queued + 1, "texts must not pile up for a client that stopped reading")
+            self.assertGreater(self.server._skipped[victim].get("tom", 0), 20, "they are counted as skipped instead")
+            # ...but it is dropped once a push that matters has waited STALL_SECONDS.
+            self.sim.outbox.append(("victim", {"type": "fork", "fork_id": "f1", "agent_id": "tom"}))
             await wait_until(lambda: victim.closed, 5)
         await wait_until(lambda: self.sim.agents["tom"].controller is None)
 
@@ -402,6 +415,33 @@ class TestFloods(ServerCase):
         self.assertLess(loop.time() - asked[0], 1.5, "a fork must not wait behind texts")
         before = [m["type"] for m in got[:[m["type"] for m in got].index("fork")]]
         self.assertIn("messages_skipped", before, "it skips texts to get ahead, and says so")
+
+    async def test_floods_do_not_drop_a_controller_reading_100_kb_a_second(self):
+        # Round 6: on localhost the kernel took megabytes of texts at full speed, out of reach of
+        # skipping, so a victim reading 100 KB/s was dropped a few seconds into a flood from eight
+        # connections: one send waited behind those megabytes for over STALL_SECONDS. A fork waited
+        # behind them too, so not dropping a client for texts was not enough on its own.
+        reader, victim = await self.slow_client({"type": "hello", "role": "controller", "name": "victim",
+                                                 "characters": ["tom", "ari"]}, sndbuf=None)
+        await wait_until(lambda: self.sim.agents["tom"].controller == "victim")
+        thief, _ = await self.controller("thief", [])
+        for i, aid in enumerate([a.id for a in self.sim.living() if not a.controller][:8]):
+            self.flood((await self.controller(f"flooder{i}", [aid]))[0], aid, "tom")
+        loop = asyncio.get_running_loop()
+        asked: list[float] = []
+
+        def ask() -> None:  # what Simulation.director does for a character with a controller
+            self.sim.outbox.append(("victim", {"type": "fork", "fork_id": "f1", "agent_id": "tom"}))
+            asked.append(loop.time())
+
+        loop.call_later(2.0, ask)  # once the kernel has taken all it will
+        got: list[dict] = []
+        kept = await read_slowly(reader, 100_000, 12, got, until=lambda: any(m["type"] == "fork" for m in got))
+        self.assertTrue(kept and not victim.closed, "a controller that keeps reading must not be dropped")
+        self.assertTrue(any(m["type"] == "fork" for m in got), "the fork must arrive")
+        self.assertLess(loop.time() - asked[0], 4, "in time to answer it")
+        r = await thief.reply_to('{"type": "claim", "agent_id": "tom", "req_id": "c"}', "c")
+        self.assertFalse(r["ok"])
 
     async def test_skipped_texts_are_reported(self):
         # Round 5: texts skipped for a lagging controller vanished without a word, and `query inbox`
@@ -599,7 +639,7 @@ class TestReqId(ServerCase):
         for depth in self.depths_near_the_limit():
             await c.send('{"type": "nothing", "req_id": ' + nested(depth) + "}")
             r = await c.expect("error")
-            self.assertTrue(r["error"].startswith(("unknown message type", "messages must be JSON", "bad message")), r)
+            self.assertTrue(r["error"].startswith(("unknown message type", "messages must be JSON")), r)
             r = await c.reply_to('{"type": "query", "agent_id": "tom", "what": "attributes", "req_id": "ok"}', "ok")
             self.assertEqual(r["type"], "answer", depth)
         self.assertEqual(self.sim.agents["tom"].controller, "bot")
@@ -611,7 +651,11 @@ class TestReqId(ServerCase):
             c = await self.client()
             await c.send('{"type": "hello", "role": "controller", "name": "deep", "characters": ["tom"], "req_id": '
                          + nested(depth) + "}")
-            await c.expect(lambda m: m.get("type") in ("welcome", "error"))
+            r = await c.expect(lambda m: m.get("type") in ("welcome", "error"))
+            if r["type"] == "error":  # json.loads could not read it, so there was no hello
+                self.assertEqual(r["error"], "messages must be JSON", depth)
+            else:  # a hello that claimed tom says so, even when its req_id cannot be written back
+                self.assertEqual(r["characters"], ["tom"], depth)
             await c.close()
             await wait_until(lambda: self.sim.agents["tom"].controller is None and not self.server.controllers)
         _, welcome = await self.controller("next", ["tom"])
@@ -630,16 +674,39 @@ class TestReqId(ServerCase):
                              '"req_id": "h2"}', "h2")
         self.assertEqual((r["type"], r["name"], r["characters"]), ("welcome", "bot", ["tom"]))
 
-    async def test_reply_that_cannot_be_written_is_an_error(self):
-        # Findings 16 and 46 on any Python: a reply json.dumps cannot write is replaced by an error.
-        writer = FakeWriter()
+    async def test_hello_whose_req_id_cannot_be_written_back_still_welcomes(self):
+        # Round 6: such a hello got an error, although it had claimed tom. The controller did not know
+        # its name or that it held tom, and saying hello again got 'unknown message type'.
+        def dumps(obj, *args, **kwargs):  # as on Python 3.11, for a req_id nested just under the limit
+            if isinstance(obj, dict) and obj.get("req_id") == "too deep":
+                raise RecursionError("maximum recursion depth exceeded while encoding a JSON object")
+            return json.dumps(obj, *args, **kwargs)
+
+        c = await self.client()
+        with mock.patch.object(server_module, "json", SimpleNamespace(loads=json.loads, dumps=dumps)):
+            await c.send({"type": "hello", "role": "controller", "name": "bot", "characters": ["tom"],
+                          "req_id": "too deep"})
+            r = await c.expect(lambda m: m.get("type") in ("welcome", "error"))
+        self.assertEqual((r["type"], r["name"], r["characters"]), ("welcome", "bot", ["tom"]))
+        self.assertNotIn("req_id", r, "the welcome comes without the req_id it cannot write")
+        self.assertEqual(self.sim.agents["tom"].controller, "bot")
+        r = await c.reply_to('{"type": "query", "agent_id": "tom", "what": "attributes", "req_id": "ok"}', "ok")
+        self.assertEqual(r["type"], "answer")
+
+    async def test_reply_that_cannot_be_written_back(self):
+        # Findings 16 and 46 on any Python: a req_id json.dumps cannot write is left out of the reply,
+        # and a reply it cannot write even so is replaced by an error.
         deep: list = []
         for _ in range(100_000):
             deep = [deep]
-        await self.server._reply(ws.WebSocket(None, writer, mask=False), {"req_id": deep}, {"type": "answer"})
-        frame = writer.sent[0]
-        payload = frame[2:] if frame[1] < 126 else frame[4:]
-        self.assertEqual(json.loads(payload)["type"], "error")
+        for msg, reply, sent in (({"req_id": deep}, {"type": "answer"}, {"type": "answer"}),
+                                 ({"req_id": 1}, {"type": "released", "agent_id": deep},
+                                  {"type": "error", "error": "bad message: nested too deeply to echo back"})):
+            writer = FakeWriter()
+            await self.server._reply(ws.WebSocket(None, writer, mask=False), msg, reply)
+            frame = writer.sent[0]
+            payload = frame[2:] if frame[1] < 126 else frame[4:]
+            self.assertEqual(json.loads(payload), sent)
 
 
 class TestShutdown(ServerCase):
