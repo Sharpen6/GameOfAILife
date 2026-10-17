@@ -158,6 +158,7 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         """Put a real, non-obvious hunger fork to the character, as the sim would."""
         agent = self.sim.agents[agent_id]
         agent.needs["hunger"] = 20
+        self.sim.clock.tick = max(self.sim.clock.tick, 6 * 60)  # the cafes open at 06:00 (the world starts at 05:00)
         fork = forks.hunger_fork(self.sim, agent)
         scores = sorted(forks.default_scores(agent, fork, self.sim), reverse=True)
         self.assertLess(scores[0] - scores[1], forks.OBVIOUS_MARGIN, "precondition: the fork must not be obvious")

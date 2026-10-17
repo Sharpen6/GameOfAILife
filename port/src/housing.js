@@ -1233,8 +1233,11 @@
   // The money term of default_scores (housing.md 10.3).
   //
   // Free options score 0. A household-paid cost is weighed against the household's spare funds (funds less two
-  // weeks of outgo): -1.5 above spare, else -thrift x (cost / spare)^2. Any other cost: -2 above the
-  // character's money, else -thrift x cost / max(money, 50). Thrift counts triple while the household is
+  // weeks of outgo): -1.5 above spare, else -thrift x (cost / spare)^2. Any other cost is weighed against what
+  // the character can pay it with: their own money and savings, else the household's spare funds (the pool the
+  // Sunday charges draw on; a child's costs fall to an adult), as -thrift x cost / max(that, 50), and -2 when
+  // neither covers it. A cost not charged on deciding (the work fork's bus, whose fare is paid on boarding) is
+  // never out of reach: then it is -thrift x cost / 50. Thrift counts triple while the household is
   // belt-tightening.
   function afford_score(sim, agent, opt) {
     const cost = opt.cost;
@@ -1245,8 +1248,12 @@
       const spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh);
       return cost > spare ? -1.5 : -thrift * (cost / spare) ** 2;
     }
-    if (cost > agent.money) return -2.0;
-    return -cost / Math.max(agent.money, 50) * thrift;
+    const own = agent.money + agent.savings;
+    if (cost <= own) return -cost / Math.max(own, 50) * thrift;
+    const spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh);
+    if (cost <= spare) return -cost / Math.max(spare, 50) * thrift;
+    if (!(opt.charge ?? true)) return -cost / 50 * thrift;
+    return -2.0;
   }
 
   G.housing = {

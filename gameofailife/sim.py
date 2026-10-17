@@ -24,9 +24,9 @@ from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
                     default_scores, luck_odds)
 from .rng import r2
-from .town import TownMap, build_map
+from .town import PARK, TownMap, build_map
 from .transit import BUS_FARE, FLIGHTS
-from .travel import ROAD_MODES, SPEEDS, TAXI_FARE
+from .travel import ROAD_MODES, SPEEDS, TAXI_FARE, USUAL
 
 ANSWER_SECONDS = 5.0  # a controller's answer applies if it arrives within this
 LEARN_SECONDS = 10.0  # a later answer is still saved and teaches the profile
@@ -39,7 +39,7 @@ CAR_BILL = 40.0  # weekly fuel and insurance for a car owner
 HOSPITAL_FEE = 50.0
 GROCERY_COST = 35.0  # ten meals from Fresh Market: the price of 'Buy groceries now' in the groceries fork
 SHIFT_MARGIN = 10  # minutes spare a character keeps before setting off for a shift
-LEISURE = ("idle", "relax_home", "read", "side_project", "text", "rest")  # activities that can be interrupted
+LEISURE = ("idle", "relax_home", "read", "side_project", "text", "rest", "board_game")  # activities that can be interrupted
 HISTORY_SIZE, NEWS_SIZE, HEADLINES_SIZE = 300, 300, 100  # events kept: all, importance >= 1, importance 2
 LLM_LOG_SIZE = 500  # the city's ring of fork summaries decided by a model or a timeout
 AGENT_LLM_FORKS = 30  # ... and each character's
@@ -77,6 +77,9 @@ ACTIVITIES = {
     "family_dinner": Activity(90, {"hunger": 50, "social": 30, "fun": 10}),
     "phone_call": Activity(30, {"social": 30}, inside=False),
     "walk_park": Activity(60, {"fun": 30, "social": 4}, inside=False),
+    "play": Activity(60, {"fun": 30, "social": 20}, inside=False),  # children playing in a park
+    "board_game": Activity(60, {"fun": 25, "social": 10}),
+    "leftovers": Activity(15, {"hunger": 35}),  # whatever is left in the cupboard
     "side_project": Activity(90, {"fun": 20}),
     "idle": Activity(20, {}),
     "hospital": Activity(180, {"hunger": 40}),  # the ward feeds its patients
@@ -97,6 +100,10 @@ STOP_AT_LIGHTS = ("car", "taxi")  # they wait at a red light on entering a junct
 ONE_WAY = ("taxi", "ambulance")  # vehicles that take a character to one place: on arrival they are on foot again
 BUS_GIVE_UP = 26  # minutes at a stop (two headways, which the exact timetable never allows) before walking instead
 FLIGHT_MINUTES = 12  # the daily planes (transit.FLIGHTS) take this long to cross the sky
+WANDER = ("walk_park", "play")  # activities that stroll around their park
+WANDER_EVERY = 2  # minutes per tile of a stroll in the park
+MEET = ("hang_out", "play")  # activities an invite meets at: the host waits doing it, the guest comes to do it
+NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
 
 
 def _r1(x: float) -> float:
@@ -136,6 +143,7 @@ class Simulation:
         self._event_seq = 0
         self._invite_ids = 0
         self._host_hold: dict[str, int] = {}  # host id -> tick they wait at an invite place until
+        self._lawns: dict[str, list[tuple[int, int]]] = {}  # park id -> its lawn tiles, where a stroll heads
         self._roll_weather()
 
     # --- lookups used by the fork builders -----------------------------------
@@ -316,6 +324,9 @@ class Simulation:
         if self.clock.day % (DAYS_PER_SEASON * len(SEASONS)) == 0 and self.clock.day:
             for agent in self.living():
                 agent.age += 1
+        for agent in self.living():
+            if getattr(agent, "car_at", None) and not travel.car_here(self, agent):
+                agent.car_at = None  # type: ignore[attr-defined]  # a car left elsewhere is fetched home overnight
         housing.nightly(self)
         self.stats.reset_day()
 
@@ -394,6 +405,7 @@ class Simulation:
         home = self.home_of(agent)
         if agent.inside != home:
             agent.plan = [("idle", "home")]
+            agent.usual_plan = True  # type: ignore[attr-defined]  # home the usual way: by car, bus or on foot
         else:
             agent.plan = [("idle", None)]
         self._start_step(agent, *agent.plan.pop(0))
@@ -422,12 +434,18 @@ class Simulation:
 
     def _start_step(self, agent: Agent, activity: str, where: str | None) -> None:
         place_id = self._resolve_place(agent, where)
+        home = self.home_of(agent)
+        if place_id and agent.inside != place_id and getattr(agent, "usual_plan", False):
+            agent.vehicle = travel.trip_mode(self, agent, place_id)  # a plan the usual way picks it trip by trip
+            agent.speed = SPEEDS[agent.vehicle]
         agent.activity = activity
         agent.activity_place = place_id
         agent.trip = agent.riding = None  # a new step is a new trip (a bus ride in progress ends here too)
         if place_id and agent.inside != place_id:
             place = self.town.places[place_id]
             start = (agent.x, agent.y)
+            if agent.vehicle == "car":  # the car goes where they go (and stays there when they leave on foot)
+                agent.car_at = None if place_id == home else place_id  # type: ignore[attr-defined]
             if agent.vehicle == "bus" and self._take_bus(agent, place_id):
                 return
             if agent.vehicle in ROAD_MODES:
@@ -524,6 +542,12 @@ class Simulation:
             agent.vehicle, agent.speed = "walk", SPEEDS["walk"]
         act = ACTIVITIES[agent.activity]
         place_id = agent.activity_place
+        home = self.home_of(agent)
+        if (agent.vehicle == "car" and (place_id == home or agent.activity in WANDER)
+                and (not agent.plan or getattr(agent, "usual_plan", False))):
+            agent.vehicle, agent.speed = "walk", SPEEDS["walk"]  # parked: on the driveway, or at the park gate
+        if agent.inside != home:  # out of the house until now (forks.cooped_up)
+            agent.out_tick = self.clock.tick  # type: ignore[attr-defined]
         paid, agent.paid = getattr(agent, "paid", None), None  # type: ignore[attr-defined]
         place = self.town.places.get(place_id or "")
         if place and place.hours and agent.activity != "work":
@@ -561,7 +585,12 @@ class Simulation:
             agent.busy_until = tick + minutes
         else:
             agent.busy_until = tick + act.minutes
-        if agent.activity == "hang_out" and self._host_hold.get(agent.id, 0) > tick:
+        if (agent.activity == "coffee" and agent.job and place_id == agent.job.place_id
+                and any(s[0] == "work" for s in agent.plan)):
+            # A cup at one's own workplace never holds up the shift: drunk by its start (today's, at once if late).
+            start = tick - self.clock.minute_of_day + agent.job.start_hour * 60
+            agent.busy_until = max(tick, min(agent.busy_until, start))
+        if agent.activity in MEET and self._host_hold.get(agent.id, 0) > tick:
             agent.busy_until = max(agent.busy_until, self._host_hold.pop(agent.id))
         # Nothing runs into today's shift (a coffee on the way to work is the player's own risk).
         start = self._shift_start_tick(agent)
@@ -573,6 +602,8 @@ class Simulation:
         if agent.activity == "eat_home":
             hh = self.household(agent)
             hh.groceries = max(0, hh.groceries - 1)
+        if agent.busy_until <= tick:  # nothing to stay for (the cup at work as the shift starts): straight on
+            self._end_activity(agent)
 
     def _do_activity(self, agent: Agent) -> None:
         act = ACTIVITIES[agent.activity]
@@ -586,7 +617,7 @@ class Simulation:
             agent.adjust("energy", 0.17 * scale)
         elif agent.activity == "hospital":
             agent.health = min(100.0, agent.health + 0.15)
-        elif agent.activity == "walk_park" and self.clock.tick % 3 == 0:
+        elif agent.activity in WANDER and self.clock.tick % WANDER_EVERY == 0:
             self._wander_park(agent)
         place = self.town.places.get(agent.activity_place or "")
         if place and place.hours and agent.activity != "work" and not place.is_open(self.clock.hour):
@@ -615,11 +646,41 @@ class Simulation:
         place = self.town.places.get(agent.activity_place or "")
         return place if place is not None and place.kind == "park" else self.town.places["park"]
 
+    def _lawns_of(self, park) -> list[tuple[int, int]]:
+        """The park's lawn tiles, row by row: where a stroll may head (cached per park)."""
+        lawns = self._lawns.get(park.id)
+        if lawns is None:
+            lawns = self._lawns[park.id] = [(x, y) for y in range(park.y, park.y + park.h)
+                                            for x in range(park.x, park.x + park.w) if self.town.tiles[y][x] == PARK]
+        return lawns
+
     def _wander_park(self, agent: Agent) -> None:
+        """One tile of a stroll: toward a lawn tile of the park picked at random, then another, and back to the
+        gate for the last stretch, so the visit ends where it began. A tree in the way sends them somewhere else.
+        The last stretch descends the gate's walk field (ties E, W, S, N), through the park where a shortest way
+        back allows."""
         park = self._park_of(agent)
-        x, y = agent.x + self.rng.choice((-1, 0, 1)), agent.y + self.rng.choice((-1, 0, 1))
-        if park.x <= x < park.x + park.w and park.y <= y < park.y + park.h and self.town.walkable(x, y):
-            agent.x, agent.y = x, y
+        gate = (park.entry[0], park.entry[1])
+        x, y = agent.x, agent.y
+        left = self.town.steps((x, y), gate)
+        if (agent.busy_until - self.clock.tick) // WANDER_EVERY <= left + 1:
+            down = [(nx, ny) for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+                    if self.town.walkable(nx, ny) and self.town.steps((nx, ny), gate) == left - 1]
+            if down:
+                agent.x, agent.y = next((t for t in down if park.x <= t[0] < park.x + park.w
+                                         and park.y <= t[1] < park.y + park.h), down[0])
+            return
+        goal = getattr(agent, "wander_to", None)
+        if goal is None or goal == (x, y):
+            goal = agent.wander_to = self.rng.choice(self._lawns_of(park))  # type: ignore[attr-defined]
+        dx, dy = goal[0] - x, goal[1] - y
+        sx, sy = (dx > 0) - (dx < 0), (dy > 0) - (dy < 0)
+        for nx, ny in (((x + sx, y), (x, y + sy)) if abs(dx) >= abs(dy) else ((x, y + sy), (x + sx, y))):
+            if ((nx, ny) != (x, y) and park.x <= nx < park.x + park.w and park.y <= ny < park.y + park.h
+                    and self.town.walkable(nx, ny)):
+                agent.x, agent.y = nx, ny
+                return
+        agent.wander_to = None  # type: ignore[attr-defined]  # there already, or blocked: pick another spot
 
     def _end_activity(self, agent: Agent) -> None:
         if agent.activity == "work" and agent.job:
@@ -637,8 +698,11 @@ class Simulation:
             by = "" if payer is agent else f" by {payer.name.split()[0]}"
             self.event(f"{agent.name} leaves City Hospital feeling better (paid ${HOSPITAL_FEE:.0f}{by}).",
                        agent, tag="discharged")
-        elif agent.activity == "walk_park":
-            agent.x, agent.y = self._park_of(agent).entry
+        elif agent.activity in WANDER:
+            agent.x, agent.y = self._park_of(agent).entry  # back at the gate (the stroll's last stretch heads there)
+            agent.wander_to = None  # type: ignore[attr-defined]
+        elif agent.activity == "sleep":
+            agent.woke_tick = self.clock.tick  # type: ignore[attr-defined]
         agent.state = "idle"
         agent.activity = "idle" if not agent.plan else agent.activity
 
@@ -715,7 +779,10 @@ class Simulation:
             minutes = None
             first = opt.steps[0][1] if opt.steps else None
             place_id = self._resolve_place(agent, first)
-            mode = opt.vehicle if opt.vehicle in SPEEDS else "walk"
+            if opt.vehicle == USUAL:  # the way the plan will go: by car, bus or on foot (travel.trip_mode)
+                mode = travel.trip_mode(self, agent, place_id) if place_id else "walk"
+            else:
+                mode = opt.vehicle if opt.vehicle in SPEEDS else "walk"
             if place_id and agent.inside != place_id:
                 minutes = self.travel_minutes(agent, place_id, mode)
             if place_id and agent.job and place_id != agent.job.place_id and any(s[0] == "work" for s in opt.steps):
@@ -857,9 +924,15 @@ class Simulation:
 
     def start_plan(self, agent: Agent, steps: list, vehicle: str = "walk") -> None:
         """Give the character a plan and start its first step now; with no steps the Director looks for the
-        next fork. Housing uses it too (moving a household, sending a helper)."""
-        agent.vehicle = vehicle if vehicle in SPEEDS else "walk"
-        agent.speed = SPEEDS[agent.vehicle]
+        next fork. Housing uses it too (moving a household, sending a helper).
+
+        `vehicle` travel.USUAL (an option's default) makes each trip of the plan the usual way, picked as it sets
+        off (travel.trip_mode: the car where it is parked, the bus, or on foot); any other mode is the plan's for
+        every trip, and an unknown one walks."""
+        agent.usual_plan = vehicle == USUAL  # type: ignore[attr-defined]
+        if not agent.usual_plan:
+            agent.vehicle = vehicle if vehicle in SPEEDS else "walk"
+            agent.speed = SPEEDS[agent.vehicle]
         agent.plan = list(steps)
         agent.state = "idle"
         if agent.plan:
@@ -920,6 +993,14 @@ class Simulation:
             elif isinstance(key, str):
                 housing.apply_effect(self, agent, key, value)  # home_condition, hh_money, buy, ... (P2)
         text, tag, importance = chronicle.outcome_event(agent.name, out.label, out.effects)
+        if out.id in NEWS_EVERY and importance >= 1:  # news once in a while: the rest stay in the history only
+            seen = getattr(agent, "news_ticks", None)
+            if seen is None:
+                seen = agent.news_ticks = {}  # type: ignore[attr-defined]  # outcome id -> tick it was last news
+            if out.id in seen and self.clock.tick - seen[out.id] < NEWS_EVERY[out.id]:
+                importance = 0
+            else:
+                seen[out.id] = self.clock.tick
         self.event(text, agent, tag=tag, importance=importance)
         for summary in agent.forks:
             if summary["id"] == pending["fork"]:
@@ -1005,6 +1086,7 @@ class Simulation:
                 payer = other if other.money >= GROCERY_COST else agent  # the asker covers it if the shopper can't
                 payer.money -= GROCERY_COST
                 other.plan = [("relax_home", "home")]
+                other.usual_plan = True  # type: ignore[attr-defined]  # there and back the usual way
                 self._start_step(other, "buy_groceries", market.id)  # started now so the paid shop happens
                 self.event(f"{other.name} heads to {market.name} for {agent.name.split()[0]}.", other, tag="errand",
                            agents=[agent.id])
@@ -1020,6 +1102,7 @@ class Simulation:
                 other = self.agents[m]
                 if other is not agent and other.alive and self._interruptible(other):
                     other.plan = [("family_dinner", where)]
+                    other.usual_plan = True  # type: ignore[attr-defined]
                     other.state = "idle"
                     family.append(other.id)
             self.event(f"{agent.name} takes the family out to dinner.", agent, tag="family_dinner", agents=family,
@@ -1037,13 +1120,14 @@ class Simulation:
         if not host.alive:
             return
         hold = self.clock.tick + self.walk_minutes(guest, place_id) + 60
-        if host.activity == "hang_out" and host.activity_place == place_id:
+        if host.activity in MEET and host.activity_place == place_id:
             if host.state == "busy":
                 host.busy_until = max(host.busy_until, hold)
             else:
                 self._host_hold[host.id] = hold
         elif self._interruptible(host):
-            host.plan = [("hang_out", place_id)]
+            host.plan = [("play" if self.town.places[place_id].kind == "park" else "hang_out", place_id)]
+            host.usual_plan = True  # type: ignore[attr-defined]
             host.state = "idle"
             self._host_hold[host.id] = hold + self.walk_minutes(host, place_id)
             self.event(f"{host.name} heads to {self.town.places[place_id].name} to meet {guest.name.split()[0]}.",
@@ -1072,7 +1156,7 @@ class Simulation:
                 inv["status"] = "expired"
             elif inv["status"] == "pending" and inv.get("host_goes"):
                 host = self.agents[inv["from"]]
-                if not host.alive or host.activity != "hang_out" or host.activity_place != inv["place"]:
+                if not host.alive or host.activity not in MEET or host.activity_place != inv["place"]:
                     inv["status"] = "expired"  # the host has already left
             if inv["status"] != "pending" and self.clock.tick - inv["tick"] > INVITE_MINUTES * 2:
                 del self.invites[inv["id"]]

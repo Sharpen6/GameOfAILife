@@ -452,9 +452,10 @@ class HousingHooksTest(unittest.TestCase):
         self.assertFalse(housing.apply_effect(sim, dana, "not_housing", 5))
         self.assertEqual(housing.activity_gain_scale(sim, dana), 1.0)
         thrift = dana.profile.traits["thrift"]
-        self.assertEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=1000)), -2.0)
-        self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=90)), -90 / 900 * thrift)
-        dana.money = 10
+        own = dana.money + dana.savings  # what she pays with (tests/test_housing.py pins the -2 beyond reach)
+        self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=1000)), -1000 / own * thrift)
+        self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=90)), -90 / own * thrift)
+        dana.money, dana.savings = 10, 0
         self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=5)), -5 / 50 * thrift)
         for builder in (housing_forks.repair_fork, housing_forks.housing_trouble_fork, housing_forks.house_hunt_fork,
                         housing_forks.upkeep_fork):

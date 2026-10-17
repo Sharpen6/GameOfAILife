@@ -134,8 +134,8 @@ class RunningCityTest(unittest.TestCase):
 
     def test_at_most_5_percent_of_shifts_start_late(self):
         run = self.runs[SEED]
-        # A shift starting as the run starts (06:00 on day 1) can't be made; every later one can.
-        shifts = [late for start, late in run.starts.values() if start > run.first]
+        # The world starts at 05:00, an hour before the earliest shifts, so day 1's can be made too.
+        shifts = [late for start, late in run.starts.values()]
         self.assertGreater(len(shifts), 200)
         late = [m for m in shifts if m > 0]
         self.assertLessEqual(len(late), 0.05 * len(shifts), sorted(late))
@@ -494,7 +494,8 @@ class CoffeeFirstTest(unittest.TestCase):
             self.assertEqual(coffee.label, f"Grab a coffee at {cafe.name} first")
             self.assertEqual((coffee.cost, coffee.steps), (4, [("coffee", cafe.id), ("work", "job")]))
             self.assertIn("meet_new", [o.id for o in coffee.outcomes])
-            late_by = max(0, self.way(agent, cafe) + forks.COFFEE_MINUTES - left)
+            cup = 0 if cafe.id == agent.job.place_id else forks.COFFEE_MINUTES  # a cup at work holds nothing up
+            late_by = max(0, self.way(agent, cafe) + cup - left)
             self.assertAlmostEqual({o.id: o.p for o in coffee.outcomes}["late"],
                                    forks.COFFEE_LATE + min(0.5, late_by / 40))
             self.assertEqual(coffee.base, round(0.35 - min(1.0, late_by / 20), 3) if late_by else 0.35)

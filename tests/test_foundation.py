@@ -281,7 +281,7 @@ class ForkMessageTest(unittest.TestCase):
     def test_travel_minutes_come_from_travel(self):
         sim = Simulation(seed=SEED)
         dana = sim.agents["dana"]
-        opts = [Option("Walk to the office", [("idle", "office")]),
+        opts = [Option("Walk to the office", [("idle", "office")], vehicle="walk"),
                 Option("Drive to the office", [("idle", "office")], vehicle="car"),
                 Option("Stay in", [("idle", "home")]), Option("Wait here", [("idle", None)])]
         fork = Fork(dana.id, "test", "?", opts, sim.clock.tick)
@@ -1057,6 +1057,7 @@ class PaydayShoppingTest(unittest.TestCase):
         clock = FakeClock()
         sim = Simulation(seed=SEED, now=clock)
         dana = sim.agents["dana"]
+        dana.owns_car = False  # on foot, as the walk-timed offer assumes (with her car she would get there in time)
         sim.clock.tick = 4 * MINUTES_PER_DAY + minute
         dana.last_payday, dana.money, dana.state, dana.plan = -1, 900.0, "idle", []
         fork = payday_fork(sim, dana)
@@ -1173,12 +1174,14 @@ class CafeClosingTest(unittest.TestCase):
         self.at(self.last + minutes_late)
         far.money = 500.0
         fork = Fork(far.id, "test", "What now?", [Option(f"Hang out {i}", [("hang_out", "cafe")], cost=cost,
+                                                         vehicle="walk",  # timed by the walk (no bus)
                                                          outcomes=[Outcome("fun", "Has fun", 1.0, +1, {"fun": 5})])
                                                   for i in range(4)], self.sim.clock.tick)
         self.sim._decide(far, fork, 0, "model", "")
         self.assertEqual(far.money, 500.0 - cost)
         minutes = 0
-        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):
+        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None), \
+                mock.patch.object(sim_module.transit, "fare", lambda age: 0):  # the bus home is not what is weighed
             for _ in range(self.walk + forks.HANG_OUT_MINUTES + 30):
                 self.sim.clock.advance()
                 self.sim._tick_agent(far)

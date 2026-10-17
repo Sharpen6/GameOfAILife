@@ -12,7 +12,7 @@
   const TICKS_PER_REAL_SECOND = MINUTES_PER_DAY / 600;
 
   class Clock {
-    constructor(tick = 6 * 60) { this.tick = tick; } // the world starts on Monday at 06:00
+    constructor(tick = 5 * 60) { this.tick = tick; } // the world starts on Monday at 05:00, an hour before the earliest shifts
 
     advance() { this.tick += 1; }
 

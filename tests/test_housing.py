@@ -852,9 +852,12 @@ class AffordScoreTest(unittest.TestCase):
     def test_own_costs(self):
         sim, dana = self.sim, self.sim.agents["dana"]
         thrift = dana.profile.traits["thrift"]
-        self.assertEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=dana.money + 1)), -2.0)
-        self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=90)), -90 / dana.money * thrift)
-        dana.money = 10
+        own = dana.money + dana.savings  # what she pays with: her money and her savings
+        cohen = sim.households["cohen"]
+        spare = housing.funds(sim, cohen) - 2 * housing.weekly_outgo(sim, cohen)  # else the household's spare funds
+        self.assertEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=max(own, spare) + 1)), -2.0)
+        self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=90)), -90 / own * thrift)
+        dana.money, dana.savings = 10, 0
         self.assertAlmostEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=5)), -5 / 50 * thrift)
 
 
