@@ -850,6 +850,7 @@ class Simulation:
             del self.llm_log[:-LLM_LOG_SIZE]
             agent.llm_forks.append(summary)
             del agent.llm_forks[:-AGENT_LLM_FORKS]
+            agent.llm_count += 1
         self.fork_log.append(summary)
         # The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave for work:
         # _begin_activity cuts it short (even once the shift has begun), and _next drops any later steps.

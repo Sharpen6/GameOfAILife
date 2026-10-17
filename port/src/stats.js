@@ -228,7 +228,8 @@
       const ring = rings.get(a.id);
       rows.push({ id: a.id, household: a.household_id, worth: p.worth,
         worth_24h: ring && ring.length ? ring[0] : p.worth, cash: p.cash, savings: p.savings,
-        home_equity: p.home, job: a.job ? a.job.title : null, health: _int(a.health) });
+        home_equity: p.home, job: a.job ? a.job.title : null, health: _int(a.health),
+        llm: a.llm_count });
     }
     return rows;
   }
@@ -304,8 +305,14 @@
       }
     }
 
-    // Midnight: today's counters start again from 0.
-    reset_day() { this.today = _zeros(); }
+    // Midnight: today's counters start again from 0, except `asked`, which starts at the forks asked before
+    // midnight and still open. They are decided today, so today keeps asked >= in_time + timeouts + withdrawn
+    // (dashboard.md 6.2). The totals know how many: every ask ends in time, timed out or withdrawn.
+    reset_day() {
+      const t = this.total;
+      this.today = _zeros();
+      this.today.asked = Math.max(0, t.asked - t.in_time - t.timeouts - t.withdrawn);
+    }
 
     // The samples recorded since the last call, oldest first; each one is handed out once.
     take_new_samples() {

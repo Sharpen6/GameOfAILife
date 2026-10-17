@@ -245,7 +245,8 @@ def _people_rows(sim: Simulation, people: list[_Person]) -> list[dict]:
         ring = rings.get(a.id)
         rows.append({"id": a.id, "household": a.household_id, "worth": p.worth,
                      "worth_24h": ring[0] if ring else p.worth, "cash": p.cash, "savings": p.savings,
-                     "home_equity": p.home, "job": a.job.title if a.job else None, "health": _int(a.health)})
+                     "home_equity": p.home, "job": a.job.title if a.job else None, "health": _int(a.health),
+                     "llm": a.llm_count})
     return rows
 
 
@@ -324,8 +325,12 @@ class CityStats:
                 block["seconds"] += seconds
 
     def reset_day(self) -> None:
-        """Midnight: today's counters start again from 0."""
+        """Midnight: today's counters start again from 0, except `asked`, which starts at the forks asked before
+        midnight and still open. They are decided today, so today keeps asked >= in_time + timeouts + withdrawn
+        (dashboard.md 6.2). The totals know how many: every ask ends in time, timed out or withdrawn."""
+        t = self.total
         self.today = _zeros()
+        self.today["asked"] = max(0, t["asked"] - t["in_time"] - t["timeouts"] - t["withdrawn"])
 
     def take_new_samples(self) -> list[dict]:
         """The samples recorded since the last call, oldest first; each one is handed out once."""

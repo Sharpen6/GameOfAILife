@@ -14,6 +14,12 @@
 // arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent. Both the rules run and the phone
 // run check the People ranking in its Adults, Everyone and Households segments: richest to poorest, ranks 1..n,
 // a net worth below zero written with a minus and ranked last, each row's 24 h change, one row per household.
+// The last runs check the main-screen review's fixes: the LLM log's "Load older" (also with hundreds of forks
+// arriving after the welcome, past what the server's ring keeps behind it), day separators, kept fetched forks and
+// the server's LLM decisions count, the Full page hand-off, the per-controller thinking counts, the 100% clamp,
+// one 24 h mood change, folded first meetings, the phone AI chip, and "Show on map" from a full phone sheet (the
+// view gets the half sheet's inset before the focus; with the real map, ?view=real, the place lands where it does
+// from a half sheet).
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
 // browser it can launch, the test prints SKIP and exits 0. Set DASH_SHOTS=<folder> to also save screenshots,
@@ -488,6 +494,415 @@ async function phone(browser, base) {
   await page.close();
 }
 
+// Captures every state frame and stats push in window.__lastState / __lastStats, waits for one of each, then
+// stops the host's frame loop (a paused host still sends the decisions it was waiting on); requests are still
+// answered.
+async function capturePaused(page) {
+  await page.evaluate(() => {
+    const on = devHost.onmessage;
+    devHost.onmessage = m => { if (m.type === "state") window.__lastState = m.state; if (m.type === "stats") window.__lastStats = m; on(m); };
+  });
+  await page.waitForFunction(() => window.__lastState && window.__lastStats, null, { timeout: 10000 });
+  await pause(page);
+  await page.evaluate(() => devHost.stop());
+}
+
+// A click that, when its target is missing, fails the check instead of stopping the run.
+async function tryClick(page, sel, what) {
+  try { await page.click(sel, { timeout: 4000 }); return true; } catch (e) { return check(false, `${what}: found ${sel}`); }
+}
+
+// A copy of the last state frame with n of the playing characters thinking (and nobody else), pushed to Dash,
+// then the last stats again (which redraws the HUD at once). Returns how many characters are played.
+const setThinking = (page, n, nobody) => page.evaluate(([n, nobody]) => {
+  const st = JSON.parse(JSON.stringify(window.__lastState));
+  let k = 0, playing = 0;
+  for (const a of st.agents) {
+    if (nobody) a.controller = null;
+    if (a.state === "deciding") a.state = "busy";
+    if (a.alive && a.controller) { playing += 1; if (k < n) { a.state = "deciding"; k += 1; } }
+  }
+  Dash.frame({ type: "state", speed: 0, state: st, events: [], forks: [] });
+  Dash.stats(window.__lastStats);
+  return playing;
+}, [n, !!nobody]);
+
+// The main-screen review's fixes (F1-F10, the phone AI chip) at a desktop size, on a city with 90 game hours of
+// decisions behind it (?backlog=90): the city's ring of 500 and most characters' rings of 30 are full.
+async function screenFixes(browser, base) {
+  console.log("desktop main-screen fixes 1440x900 ?backlog=90");
+  const { page, errors } = await openPage(browser, base, "?backlog=90&speed=4", { width: 1440, height: 900 });
+  await capturePaused(page);
+
+  // F1: "Load older" keeps showing older pages past the first 150 rows, down to the oldest in the server's ring.
+  await page.keyboard.press("3");
+  await page.waitForTimeout(350);
+  const forkRows = () => page.locator("#dash-llm .dash-llmlist li.dash-fork").count();
+  const counts = [await forkRows()];
+  for (let i = 0; i < 30; i++) {
+    if (!(await page.locator("#dash-llm .dash-older").isVisible())) break;
+    await page.evaluate(() => { const b = document.getElementById("dash-llm"); b.scrollTop = b.scrollHeight; });
+    await page.click("#dash-llm .dash-older");
+    await page.waitForFunction(() => { const b = document.querySelector("#dash-llm .dash-older"); return b.hidden || !b.disabled; },
+      null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(60);
+    counts.push(await forkRows());
+  }
+  const ring = await page.evaluate(() => { const r = devHost.world.llmRing.filter(f => f.decided_by === "model"); return { n: r.length, oldest: r[0].id }; });
+  const oldestShown = await page.evaluate(() => { const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].pop(); return li && li.dataset.key; });
+  check(counts[counts.length - 1] > 150 && counts[counts.length - 1] === ring.n, "F1: Load older pages past 150 rows to every decision in the server's ring",
+    { counts, ring: ring.n });
+  check(oldestShown === ring.oldest, "F1: the oldest row shown is the ring's oldest", [oldestShown, ring.oldest]);
+  check(await page.locator("#dash-llm .dash-older").isHidden(), "F1: Load older goes once the server has no more");
+
+  // F8: day separators, and a row's time names its day when it is not today.
+  const days = await page.evaluate(() => {
+    const W = devHost.world, today = Math.floor(W.tick / 1440), tick = {};
+    for (const f of W.llmRing) tick[f.id] = f.tick;
+    const seps = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-llmday")].map(li => li.innerText.trim());
+    const bad = [];
+    let other = 0;
+    for (const li of document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")) {
+      const t = li.querySelector(".dash-ftime").innerText.trim(), d = Math.floor(tick[li.dataset.key] / 1440);
+      const ok = d === today ? /^\d\d:\d\d( ·|$)/.test(t) : /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d\d:\d\d( ·|$)/.test(t);
+      if (d !== today) other += 1;
+      if (!ok && bad.length < 3) bad.push([li.dataset.key, d, today, t]);
+    }
+    const order = [...document.querySelectorAll("#dash-llm .dash-llmlist > li")].map(li => li.classList.contains("dash-llmday") ? "sep" : "row");
+    return { seps, bad, other, firstIsSep: order[0] === "sep" };
+  });
+  check(days.seps.length >= 2 && /^Today · Day \d+/.test(days.seps[0]) && /^Yesterday · Day \d+/.test(days.seps[1]) && days.firstIsSep,
+    "F8: the LLM log has a separator for each day", days.seps);
+  check(days.other > 0 && days.bad.length === 0, "F8: rows from another day show its weekday", days);
+
+  // F1: a filter change starts the list at 150 rows again.
+  await page.selectOption("#dash-llm .dash-llm-kind", "work");
+  await page.selectOption("#dash-llm .dash-llm-kind", "");
+  await page.waitForTimeout(100);
+  check(await forkRows() === 150, "F1: a filter change shows 150 rows again", await forkRows());
+
+  // F2: forks fetched for a character are never dropped, however many forks the frames bring after them.
+  const who = await page.evaluate(() => {
+    const a = devHost.world.agents.find(x => x.alive && x.controller && x.age >= 18 && x.llmForks.length === 30
+      && x.llmForks.filter(f => f.decided_by === "model").length >= 20);
+    return a ? { id: a.id, model: a.llmForks.filter(f => f.decided_by === "model").map(f => f.id) } : null;
+  });
+  if (!check(!!who, "F2: a character with a full ring of 30")) { await page.close(); return; }
+  await page.evaluate(() => { const b = document.getElementById("dash-llm"); b.scrollTop = 0; });
+  await page.selectOption("#dash-llm .dash-llm-agent", who.id);
+  await page.waitForFunction(() => { const b = document.querySelector("#dash-llm .dash-older"); return b.hidden || !b.disabled; },
+    null, { timeout: 5000 }).catch(() => {});
+  await page.evaluate(id => {
+    const W = devHost.world, st = window.__lastState, other = W.agents.find(x => x.alive && x.controller && x.id !== id);
+    const tpl = W.llmRing[W.llmRing.length - 1], forks = [];
+    for (let i = 0; i < 2400; i++) {
+      const model = i % 2 === 0;
+      forks.push(Object.assign({}, tpl, { id: `f${9000000 + i}`, agent: other.id, tick: st.tick, happened: [], late: null,
+        decided_by: model ? "model" : "habit", controller: model ? tpl.controller : null, model: model ? tpl.model : null }));
+    }
+    Dash.frame({ type: "state", speed: 0, state: st, events: [], forks });
+  }, who.id);
+  await page.waitForTimeout(450);
+  const kept = await page.evaluate(ids => ids.filter(id => document.querySelector(`#dash-llm .dash-llmlist li[data-key="${id}"]`)).length, who.model);
+  check(kept === who.model.length, "F2: a character's fetched decisions survive 2,400 newer forks", [kept, who.model.length]);
+  const held = (await inspect(page)).forks;
+  check(held <= 1000 + 1000 + 600, "F2: the fork store stays bounded", held);
+
+  // F2: "LLM decisions (n)" is the server's count (the people row's llm), not what the page holds.
+  await page.evaluate(id => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    st.people.find(p => p.id === id).llm = 77;
+    window.__lastStats = st;
+    Dash.stats(st);
+  }, who.id);
+  await page.keyboard.press("4");
+  await page.waitForTimeout(250);
+  await tryClick(page, `#dash-people .dash-rank > li[data-key="${who.id}"] .dash-nm`, "F2");
+  await page.waitForTimeout(150);
+  const rankBtn = await page.locator(`#dash-people .dash-rank > li[data-key="${who.id}"] [data-act="llm"]`).innerText().catch(() => "");
+  check(/\(77\)/.test(rankBtn), "F2: the ranking row's LLM decisions count comes from the server", rankBtn);
+
+  // F10: every Full page link leaves the character page the note that skips its takeover question.
+  await page.evaluate(() => {
+    window.__notes = [];
+    document.addEventListener("click", e => {
+      const a = e.target.closest && e.target.closest('a[href*="character.html"]');
+      if (!a) return;
+      window.__notes.push(sessionStorage.getItem("goal.character.from-city"));
+      sessionStorage.removeItem("goal.character.from-city");
+      e.preventDefault();
+    });
+  });
+  await tryClick(page, `#dash-people .dash-rank > li[data-key="${who.id}"] a[href*="character.html"]`, "F10");
+  await page.keyboard.press("3");
+  await page.selectOption("#dash-llm .dash-llm-agent", "");
+  await page.waitForTimeout(150);
+  await tryClick(page, "#dash-llm .dash-llmlist li.dash-fork .dash-fhead", "F10");
+  await page.waitForTimeout(100);
+  await tryClick(page, "#dash-llm .dash-llmlist li.dash-fork.open a[href*='character.html']", "F10");
+  await page.evaluate(id => Dash.selectAgent(id), who.id);
+  await page.waitForFunction(() => document.querySelector("#dash-people .dash-detail:not([hidden]) a[href*='character.html']"), null, { timeout: 5000 }).catch(() => {});
+  const detailBtn = await page.locator('#dash-people .dash-detail [data-act="llm"]').innerText().catch(() => "");
+  check(/\(77\)/.test(detailBtn), "F2: the person's LLM decisions count comes from the server", detailBtn);
+  await tryClick(page, "#dash-people .dash-detail a[href*='character.html']", "F10");
+  const notes = await page.evaluate(() => window.__notes);
+  check(notes.length === 3 && notes.every(n => n && Number(n) > 0), "F10: the ranking, LLM row and person links all hand God over", notes);
+  await page.evaluate(() => Dash.selectAgent(null));
+
+  // F7: each controller's line counts its own characters thinking; F6: answered in time never shows above 100%.
+  await setThinking(page, 3);
+  await page.evaluate(() => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    st.llm.controllers.push({ name: "second-bot", model: "m2", characters: 0 });
+    Object.assign(st.llm.today, { asked: 2, in_time: 3, timeouts: 3, late: 3, withdrawn: 0, against_habit: 0, avg_seconds: 2.1 });
+    Dash.stats(st);
+  });
+  await page.keyboard.press("1");
+  await page.waitForTimeout(150);
+  const strip = await page.evaluate(() => {
+    const lines = [...document.querySelectorAll("#dash-city .dash-ai > div")].map(d => d.innerText.trim());
+    const kpi = [...document.querySelectorAll("#dash-city .dash-kpi")].map(k => k.innerText.replace(/\s+/g, " ")).find(t => /^ai /i.test(t));
+    return { lines, kpi, hud: document.querySelector('#hud [data-k="ai"]').innerText.trim() };
+  });
+  const line = name => strip.lines.find(l => l.startsWith(name)) || "";
+  check(/· 3 thinking now$/.test(line("claude")) && !/thinking/.test(line("second-bot")), "F7: each controller line counts its own thinking", strip.lines);
+  check(/in time 3 \(100%\)/.test(strip.lines.join(" ")) && /100% answered in time today/.test(strip.kpi || ""), "F6: answered in time is held at 100%", strip);
+  check(/^AI: \d+ playing, 3 thinking$/.test(strip.hud), "the desktop AI chip says how many play and think", strip.hud);
+  await setThinking(page, 0);
+  const calm = await page.evaluate(() => document.querySelector('#hud [data-k="ai"]').innerText.trim());
+  check(/^AI: \d+ playing$/.test(calm), "the desktop AI chip drops the thinking count at 0", calm);
+
+  // F9: the HUD, the Mood tile and the mood trend give one change against 24 h ago, from the live mood.
+  const f9 = await page.evaluate(() => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    const last = Math.floor(st.tick / 60) * 60;
+    st.tick = last + 30;
+    st.full = true;
+    st.samples = [];
+    for (let i = 47; i >= 0; i--) st.samples.push(Object.assign({}, window.__lastStats.samples[0] || {}, { tick: last - i * 60, day: Math.floor((last - i * 60) / 1440),
+      mood: 55, wealth: st.city.wealth.total, pop: st.city.population }));
+    st.samples[st.samples.length - 1 - 24].mood = 50;   // the newest sample at least 24 h before the push
+    st.samples[st.samples.length - 1].mood = 60;        // the last hourly sample
+    st.city.mood = 63;                                   // now
+    Dash.stats(st);
+    const hud = document.querySelector('#hud [data-k="mood"]').title;
+    const tile = [...document.querySelectorAll("#dash-city .dash-kpi")].map(k => k.innerText.replace(/\s+/g, " ")).find(t => /^mood /i.test(t));
+    const spark = document.querySelector('#dash-city .dash-spark[data-spark="mood"]');
+    return { hud, tile, head: spark && spark.querySelector(".dash-spark-head b").innerText,
+      chg: spark && spark.querySelector(".dash-spark-axis").innerText.replace(/\s+/g, " ") };
+  });
+  check(/up 13 in 24 h/.test(f9.hud) && /▲13 in 24 h/.test(f9.tile || "") && /▲ 13 in 24 h/.test(f9.chg || "") && f9.head === "63",
+    "F9: HUD, Mood tile and trend line agree on the change in 24 h", f9);
+  await page.evaluate(() => Dash.stats(Object.assign({}, window.__lastStats, { full: true })));
+
+  // F5: first meetings fold into their day's digest line; search or a person chip shows them again.
+  await page.keyboard.press("2");
+  await page.waitForTimeout(350);
+  const news = () => page.evaluate(() => ({
+    met: [...document.querySelectorAll("#dash-news .dash-stream li.dash-ev")].filter(li => /for the first time/.test(li.innerText)).length,
+    digest: [...document.querySelectorAll("#dash-news .dash-stream li.dash-day")].map(li => li.innerText).filter(t => /\d+ first meetings?/.test(t)).length,
+  }));
+  const folded = await news();
+  check(folded.met === 0 && folded.digest > 0, "F5: first meetings are folded into the day's digest", folded);
+  await page.fill("#dash-news .dash-search", "first time");
+  await page.waitForTimeout(150);
+  const found = await news();
+  check(found.met > 0, "F5: searching shows the first meetings again", found);
+  await page.fill("#dash-news .dash-search", "");
+
+  check(errors.length === 0, "main-screen fixes: no console errors", errors);
+  await shot(page, "fixes-desktop");
+  await page.close();
+}
+
+// F1 on a page that stays open: `live` LLM forks reach the page after its welcome (?backlog=90: the city's ring of
+// 500 is full) before "Load older" is first clicked. With 300 the welcome's oldest fork is still in the server's
+// ring, 120 older behind it; with 450 it has left the ring, so the server has nothing older than what the page
+// holds. Either way the clicks reach every decision the page or the ring has, and the button goes only then.
+async function liveOlder(browser, base, live) {
+  console.log(`desktop Load older after ${live} live forks 1440x900 ?backlog=90`);
+  const { page, errors } = await openPage(browser, base, "?backlog=90&speed=4", { width: 1440, height: 900 });
+  await capturePaused(page);
+  const want = await page.evaluate(n => {
+    // Forks the city decides after the welcome: the fake host's rings take them as the server's would, and the
+    // page gets them in frames of 30. One in five timed out (the default filter hides those).
+    const W = devHost.world, st = window.__lastState, tpl = W.llmRing[W.llmRing.length - 1];
+    const played = W.agents.filter(a => a.alive && a.controller);
+    const forks = [];
+    for (let i = 0; i < n; i++) {
+      const a = played[i % played.length], timeout = i % 5 === 4;
+      const f = Object.assign({}, tpl, { id: `f${++W.forkSeq}`, agent: a.id, tick: st.tick, happened: [], late: null,
+        decided_by: timeout ? "timeout" : "model", answer_seconds: timeout ? null : 2.5, reason: timeout ? "" : tpl.reason || "live" });
+      a.llmForks.push(f);
+      if (a.llmForks.length > 30) a.llmForks.shift();
+      W.llmRing.push(f);
+      if (W.llmRing.length > 500) W.llmRing.shift();
+      forks.push(f);
+    }
+    for (let i = 0; i < forks.length; i += 30) Dash.frame({ type: "state", speed: 0, state: st, events: [], forks: forks.slice(i, i + 30) });
+    // Every model decision the page holds (the welcome's 80 and these) or the ring still has, newest first.
+    const seen = new Map();
+    for (const f of [].concat(W.llmBacklog, W.llmRing)) if (f.decided_by === "model") seen.set(f.id, f);
+    const all = [...seen.values()].sort((x, y) => (y.tick - x.tick) || (Number(y.id.slice(1)) - Number(x.id.slice(1))));
+    return { n: all.length, oldest: all[all.length - 1].id, inRing: W.llmRing.some(f => f.id === W.llmBacklog[0].id) };
+  }, live);
+  await page.keyboard.press("3");
+  await page.waitForTimeout(350);
+  const forkRows = () => page.locator("#dash-llm .dash-llmlist li.dash-fork").count();
+  const counts = [await forkRows()];
+  for (let i = 0; i < 40; i++) {
+    if (!(await page.locator("#dash-llm .dash-older").isVisible())) break;
+    await page.evaluate(() => { const b = document.getElementById("dash-llm"); b.scrollTop = b.scrollHeight; });
+    await page.click("#dash-llm .dash-older");
+    await page.waitForFunction(() => { const b = document.querySelector("#dash-llm .dash-older"); return b.hidden || !b.disabled; },
+      null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(60);
+    counts.push(await forkRows());
+  }
+  const oldestShown = await page.evaluate(() => { const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].pop(); return li && li.dataset.key; });
+  check(want.inRing === (live + 80 <= 500), `F1 (${live} live): the welcome's oldest fork is ${live + 80 <= 500 ? "still" : "no longer"} in the server's ring`, want);
+  check(counts[1] > counts[0] && counts[counts.length - 1] === want.n,
+    `F1 (${live} live): Load older shows every decision the page and the server's ring hold`, { counts, want: want.n });
+  check(oldestShown === want.oldest, `F1 (${live} live): the oldest row shown is the oldest decision there is`, [oldestShown, want.oldest]);
+  check(await page.locator("#dash-llm .dash-older").isHidden(), `F1 (${live} live): Load older goes once nothing older is left`);
+  check(errors.length === 0, `F1 (${live} live): no console errors`, errors);
+  await page.close();
+}
+
+// The phone: the AI chip says how many play, and every "Show on map" from a full sheet drops it to half (F3).
+async function phoneFixes(browser, base) {
+  console.log("phone main-screen fixes 390x844");
+  const { page, errors } = await openPage(browser, base, "?speed=4", { width: 390, height: 844 }, true);
+  await capturePaused(page);
+
+  const chip = () => page.evaluate(() => document.querySelector('#hud [data-k="ai"]').innerText.trim().replace(/\s+/g, " "));
+  let playing = await setThinking(page, 0);
+  let text = await chip();
+  check(playing > 0 && text === `AI ${playing}`, "the phone AI chip reads AI and the number playing", [text, playing]);
+  await setThinking(page, 3);
+  text = await chip();
+  check(text === `AI ${playing} 3`, "the phone AI chip adds the thinking count while anyone thinks", text);
+  await setThinking(page, 0, true);
+  text = await chip();
+  check(text === "AI: nobody", "the phone AI chip says nobody when nobody plays", text);
+  await setThinking(page, 0);
+
+  // F3: a full sheet drops to half on "Show on map", and the focus uses the half sheet's inset.
+  const toFull = async () => {
+    for (let i = 0; i < 3 && (await inspect(page)).sheet !== "full"; i++) {
+      await page.focus("#panel .dash-grip");
+      await page.keyboard.press("ArrowUp");
+      await page.waitForTimeout(350);
+    }
+  };
+  async function showFromFull(what, act) {
+    await toFull();
+    const before = (await calls(page, "focus")).length;
+    await act();
+    await page.waitForTimeout(500);
+    const info = await inspect(page);
+    const fs = await calls(page, "focus");
+    const inset = fs.length ? (fs[fs.length - 1][1] || {}).inset : null;
+    check(fs.length > before && info.sheet === "half", `F3: ${what} from a full sheet drops it to half`, [info.sheet, fs.length - before]);
+    check(!!inset && inset.bottom < 600 && Math.abs(inset.bottom - info.inset.bottom) <= 3,
+      `F3: ${what} focuses with the half sheet's inset`, [inset, info.inset]);
+    // The view centres its camera within its own inset: when the focus goes out, that inset is already the half
+    // sheet's (a focus against the full sheet's would land the target lower by half the difference).
+    const order = await page.evaluate(() => {
+      const c = devView.calls;
+      let i = c.length - 1;
+      while (i >= 0 && c[i][0] !== "focus") i--;
+      let j = i - 1;
+      while (j >= 0 && c[j][0] !== "setInset") j--;
+      return { focus: i >= 0 ? (c[i][1][1] || {}).inset : null, viewInset: j >= 0 ? c[j][1][0] : null };
+    });
+    check(!!order.focus && !!order.viewInset && order.viewInset.bottom === order.focus.bottom,
+      `F3: ${what} gives the view the half sheet's inset before the focus`, order);
+  }
+  await page.click("#dash-tab-news");
+  await page.waitForTimeout(350);
+  await showFromFull("a headline's Show on map", () => page.click("#dash-news .dash-heads .dash-link"));
+  await showFromFull("a news row", () => page.click("#dash-news .dash-stream li.dash-ev .dash-evtext"));
+  await page.click("#dash-tab-llm");
+  await page.waitForTimeout(350);
+  await toFull();
+  await page.click("#dash-llm .dash-llmlist li.dash-fork .dash-fhead");
+  await showFromFull("an LLM row's Show on map", () => page.click('#dash-llm .dash-llmlist li.dash-fork.open [data-act="map"]'));
+  await page.click("#dash-tab-people");
+  await page.waitForTimeout(350);
+  await toFull();
+  await page.click("#dash-people .dash-rank > li .dash-nm");
+  await showFromFull("a ranking row's Show on map", () => page.click('#dash-people .dash-rank > li.open [data-act="map"]'));
+  const id = await page.evaluate(() => devHost.world.agents.find(a => a.alive && a.age >= 18).id);
+  await page.evaluate(i => Dash.selectAgent(i), id);
+  await page.waitForFunction(() => document.querySelector('#dash-people .dash-detail:not([hidden]) [data-act="map"]'), null, { timeout: 5000 }).catch(() => {});
+  await showFromFull("the person's Show on map", () => page.click('#dash-people .dash-detail [data-act="map"]'));
+  await page.evaluate(() => Dash.openHome("park_66"));
+  await page.waitForFunction(() => document.querySelector('#dash-people .dash-card:not([hidden]) [data-act="map"]'), null, { timeout: 5000 }).catch(() => {});
+  await showFromFull("the home card's Show on map", () => page.click('#dash-people .dash-card [data-act="map"]'));
+  await shot(page, "fixes-phone");
+  check(errors.length === 0, "phone main-screen fixes: no console errors", errors);
+  await page.close();
+}
+
+// F3 with the real map (?view=real): "Show on map" on an LLM row with a place (the camera follows nobody) puts the
+// place at the same spot on the screen, in the map above the sheet, whether the sheet was full or half.
+async function phoneRealMap(browser, base) {
+  console.log("phone Show on map with the real view 390x844 ?view=real");
+  const { page, errors } = await openPage(browser, base, "?view=real&speed=4", { width: 390, height: 844 }, true);
+  if (!(await page.evaluate(() => !!(window.devView && !devView.stub && devView.screenOf)))) {
+    check(false, "F3: the real view loaded on the dev page");
+    await page.close();
+    return;
+  }
+  await capturePaused(page);
+  await page.click("#dash-tab-llm");
+  await page.waitForTimeout(350);
+  const key = await page.evaluate(() => {
+    const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].find(l => {
+      const f = devHost.world.llmRing.find(x => x.id === l.dataset.key);
+      return f && f.place;
+    });
+    return li ? li.dataset.key : null;
+  });
+  if (!check(!!key, "F3: an LLM row with a place")) { await page.close(); return; }
+  const place = await page.evaluate(k => devHost.world.llmRing.find(x => x.id === k).place, key);
+  const sheetTo = async want => {
+    for (let i = 0; i < 5 && (await inspect(page)).sheet !== want; i++) {
+      await page.focus("#panel .dash-grip");
+      await page.keyboard.press((await inspect(page)).sheet === "full" ? "ArrowDown" : "ArrowUp");
+      await page.waitForTimeout(350);
+    }
+    return (await inspect(page)).sheet === want;
+  };
+  const seen = {};
+  for (const start of ["half", "full"]) {
+    check(await sheetTo(start), `F3: the sheet goes to ${start}`);
+    // Move the camera away first, so each tap makes the same flight.
+    await page.evaluate(() => devView.focus({ tile: [2, 2] }, { ms: 1 }));
+    await page.waitForTimeout(150);
+    await page.evaluate(() => { document.getElementById("dash-llm").scrollTop = 0; });
+    const row = page.locator(`#dash-llm li.dash-fork[data-key="${key}"]`);
+    if (!(await row.evaluate(l => l.classList.contains("open")))) { await row.locator(".dash-fhead").click(); await page.waitForTimeout(200); }
+    await row.locator('[data-act="map"]').click();
+    await page.waitForTimeout(1500);
+    seen[start] = await page.evaluate(p => {
+      const s = devView.screenOf({ place: p }), i = Dash.inspect();
+      return { sheet: i.sheet, inset: i.inset, at: s ? s.map(Math.round) : null, h: document.getElementById("world").getBoundingClientRect().height };
+    }, place);
+    await shot(page, `f3-real-from-${start}`);
+  }
+  const h = seen.half, f = seen.full;
+  check(f.sheet === "half" && !!h.at && !!f.at, "F3: from a full sheet the tap ends with a half sheet", seen);
+  if (h.at && f.at) {
+    check(Math.abs(h.at[1] - f.at[1]) <= 4 && Math.abs(h.at[0] - f.at[0]) <= 4,
+      "F3: the place lands where it does from a half sheet", seen);
+    check(f.at[1] >= f.inset.top && f.at[1] <= f.h - f.inset.bottom, "F3: the place is in the map above the sheet", seen);
+  }
+  check(errors.length === 0, "F3 real map: no console errors", errors);
+  await page.close();
+}
+
 (async () => {
   const pw = findPlaywright();
   if (!pw || !pw.chromium) { console.log("SKIP: Playwright is not installed"); process.exit(0); }
@@ -504,6 +919,10 @@ async function phone(browser, base) {
     await slowAi(browser, base);
     await browserBuild(browser, base);
     await phone(browser, base);
+    await screenFixes(browser, base);
+    for (const live of [300, 450]) await liveOlder(browser, base, live);
+    await phoneFixes(browser, base);
+    await phoneRealMap(browser, base);
   } catch (e) {
     failures += 1;
     console.log(`  FAIL the run stopped: ${e && e.stack || e}`);

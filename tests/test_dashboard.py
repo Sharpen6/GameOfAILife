@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import math
+import random
 import re
 import sys
 import types
@@ -42,7 +43,7 @@ LLM_KEYS = {"controllers", "playing", "thinking", "today", "total", "habit_today
 COUNTER_KEYS = {"asked", "in_time", "timeouts", "late", "withdrawn", "against_habit", "avg_seconds"}
 DISTRICT_KEYS = {"id", "name", "people", "mood", "median_worth", "homes", "vacant", "shabby_plus"}
 HOUSEHOLD_KEYS = {"id", "name", "members", "home", "home_name", "place", "tier_label", "tenure", "weekly_cost"}
-PEOPLE_KEYS = {"id", "household", "worth", "worth_24h", "cash", "savings", "home_equity", "job", "health"}
+PEOPLE_KEYS = {"id", "household", "worth", "worth_24h", "cash", "savings", "home_equity", "job", "health", "llm"}
 SAMPLE_KEYS = {"tick", "day", "pop", "mood", "health", "wealth", "median", "top10", "in_debt", "working", "owned",
                "shabby_plus", "asked", "in_time"}
 
@@ -191,6 +192,7 @@ class TestStatsSchema(unittest.TestCase):
                     self.assertEqual(row["home_equity"], 0)
                 self.assertEqual(row["household"], a.household_id)
                 self.assertEqual(row["job"], a.job.title if a.job else None)
+                self.assertEqual(row["llm"], a.llm_count)
 
     def test_worth_counts_the_goal_pot_and_splits_an_owned_home(self):
         sim = Simulation(seed=1)
@@ -581,6 +583,114 @@ class TestLlmCounters(unittest.TestCase):
                          (sim.stats.today["habit"], sim.stats.today["default"]))
         self.assertGreater(llm["habit_today"] + llm["default_today"], 50)
         self.assertEqual((llm["controllers"], llm["playing"], llm["today"]["asked"]), ([], 0, 0))
+
+
+class TestLlmCount(unittest.TestCase):
+    """The people row's `llm`: every fork a controller was asked about, answered or missed, since the city began,
+    so the dashboard's "LLM decisions (n)" is right even when the page holds only a few of them (review F2)."""
+
+    def test_model_and_timeout_forks_count_past_the_ring_of_30(self):
+        sim = Simulation(seed=1)
+        dana, tom = sim.agents["dana"], sim.agents["tom"]
+        for i in range(45):
+            sim._decide(dana, plain_fork("dana", sim.clock.tick), 0, ("model", "timeout")[i % 2], "because")
+        for by in ("habit", "default"):
+            sim._decide(dana, plain_fork("dana", sim.clock.tick), 0, by, "")
+            sim._decide(tom, plain_fork("tom", sim.clock.tick), 0, by, "")
+        self.assertEqual((dana.llm_count, len(dana.llm_forks), tom.llm_count), (45, 30, 0))
+        rows = {p["id"]: p for p in sim.stats_json()["people"]}
+        self.assertEqual((rows["dana"]["llm"], rows["tom"]["llm"]), (45, 0))
+        self.assertEqual(len(sim.decisions("dana", limit=100)["forks"]), 30)  # the page holds 30; the count all 45
+
+    def test_an_answer_and_a_timeout_through_the_director(self):
+        clock = FakeClock()
+        sim = Simulation(seed=1, now=clock)
+        dana = sim.agents["dana"]
+        sim.claim("dana", "bot")
+        f1 = plain_fork("dana", sim.clock.tick, (0.0, 0.5, 0.1, 0.0))
+        sim.director(dana, f1)
+        self.assertEqual(dana.llm_count, 0, "asked is not decided")
+        clock.t += 1.0
+        sim.answer(f1.id, 2, "why not", controller="bot")
+        f2 = plain_fork("dana", sim.clock.tick, (0.0, 0.5, 0.1, 0.0))
+        sim.director(dana, f2)
+        clock.t += ANSWER_SECONDS + 1
+        sim._check_timeouts()
+        sim.answer(f2.id, 0, "late", controller="bot")  # a late answer is the same fork, not another one
+        self.assertEqual(dana.llm_count, 2)
+        self.assertEqual({p["id"]: p["llm"] for p in sim.stats_json()["people"]}["dana"], 2)
+
+
+class TestTodayAcrossMidnight(unittest.TestCase):
+    """Review F6: forks asked before midnight are decided after it. reset_day starts today's `asked` at the forks
+    still open, so today never decides more than it asked (dashboard.md 6.2's invariant, for today)."""
+
+    def test_a_fork_asked_before_midnight_is_asked_today(self):
+        clock = FakeClock()
+        sim = Simulation(seed=1, now=clock)
+        dana = sim.agents["dana"]
+        sim.claim("dana", "bot")
+        f = plain_fork("dana", sim.clock.tick, (0.0, 0.5, 0.1, 0.0))
+        sim.director(dana, f)
+        sim._new_day()
+        self.assertEqual(sim.stats_json()["llm"]["today"]["asked"], 1, "still open at midnight")
+        clock.t += 2.0
+        sim.answer(f.id, 1, "as usual", controller="bot")
+        today = sim.stats_json()["llm"]["today"]
+        self.assertEqual((today["asked"], today["in_time"], today["timeouts"]), (1, 1, 0))
+        self.assertEqual(sim.stats.total["asked"], 1, "the total counts it once")
+        sim._new_day()
+        self.assertEqual(sim.stats_json()["llm"]["today"]["asked"], 0, "nothing open at the next midnight")
+        sim.stats.reset_day()
+        self.assertEqual(sim.stats.today, stats._zeros())
+
+    def test_today_never_decides_more_than_it_asked_at_16x(self):
+        # Everyone played by a controller that answers 60% of forks in 0-4 s, 20% late and 20% never, with the
+        # real clock moving as at 16x (a game minute in 1/38 s, so the 5 s deadline spans about 3 game hours).
+        clock = FakeClock()
+        sim = Simulation(seed=2, now=clock)
+        ids = [a.id for a in sim.living()]
+        for aid in ids:
+            sim.claim(aid, "bot")
+        sim.controller_joined("bot", None, ids)
+        rng = random.Random(6)
+        due: list[tuple[float, str, int]] = []
+        open_at_midnight = []
+        while sim.clock.tick < MINUTES_PER_DAY + 3 * 60:
+            clock.t += 1 / 38
+            sim.step()
+            for _, msg in sim.drain()[2]:
+                if msg.get("type") != "fork":
+                    continue
+                r = rng.random()
+                if r < 0.8:
+                    wait = rng.uniform(0, 4) if r < 0.6 else rng.uniform(6, 9)
+                    due.append((clock.t + wait, msg["fork_id"], rng.randrange(4)))
+            for item in [d for d in due if d[0] <= clock.t]:
+                due.remove(item)
+                sim.answer(item[1], item[2], "ok", controller="bot")
+            today, total = sim.stats.today, sim.stats.total
+            still_open = sum(1 for f in sim.forks.values() if f.status == "asked")
+            if sim.clock.minute_of_day == 0:
+                open_at_midnight.append(still_open)
+            for name, block in (("today", today), ("total", total)):
+                self.assertEqual(block["asked"], block["in_time"] + block["timeouts"] + block["withdrawn"] + still_open,
+                                 f"{name} at {sim.clock.stamp()}: {block}")
+        self.assertGreater(open_at_midnight[0], 0, "precondition: forks were still open at midnight")
+
+    def test_reset_day_starts_asked_at_the_asks_still_open(self):
+        s = stats.CityStats()
+        for name in ("asked",) * 5 + ("in_time", "timeouts", "withdrawn", "late", "against_habit", "habit"):
+            s.count(name)
+        s.reset_day()
+        self.assertEqual(s.today, {**stats._zeros(), "asked": 2}, "two of the five asks are still open")
+        s.count("in_time", 1.0)
+        s.count("timeouts")
+        s.reset_day()
+        self.assertEqual(s.today, stats._zeros(), "nothing open")
+        s.count("in_time", 1.0)  # a count with no ask behind it never makes asked negative
+        s.reset_day()
+        self.assertEqual(s.today["asked"], 0)
 
 
 class TestHeadlessSummary(unittest.TestCase):

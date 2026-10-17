@@ -889,6 +889,7 @@
         keepLast(this.llm_log, LLM_LOG_SIZE);
         agent.llm_forks.push(summary);
         keepLast(agent.llm_forks, AGENT_LLM_FORKS);
+        agent.llm_count += 1;
       }
       this.fork_log.push(summary);
       // The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave for work:
