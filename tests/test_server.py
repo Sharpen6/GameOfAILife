@@ -444,7 +444,9 @@ class TestRobustness(ServerCase):
         await c.send("{this is not json")
         r = await c.expect("error")
         self.assertIn("JSON", r["error"])
-        await c.send("[1, 2, 3]")  # valid JSON but not an object: ignored
+        await c.send("[1, 2, 3]")  # valid JSON but not an object
+        r = await c.expect("error")
+        self.assertIn("object", r["error"])
         await c.send({"type": "get_agent", "agent_id": "tom"})
         r = await c.expect("error")
         self.assertIn("hello", r["error"])

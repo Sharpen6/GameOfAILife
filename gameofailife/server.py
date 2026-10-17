@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import mimetypes
 from pathlib import Path
 
@@ -26,6 +27,7 @@ CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
+SEND_QUEUE = 100  # pushes (about 5 s of state frames) a client may fall behind before it is dropped
 
 
 class GameServer:
@@ -35,6 +37,8 @@ class GameServer:
         self.god: WebSocket | None = None
         self.observers: set[WebSocket] = set()
         self.controllers: dict[str, WebSocket] = {}
+        self._outboxes: dict[WebSocket, asyncio.Queue] = {}  # every session's pushes waiting to be sent
+        self._connections: set[asyncio.StreamWriter] = set()
         self._server: asyncio.base_events.Server | None = None
         self._loop_task: asyncio.Task | None = None
         self._pending_ticks = 0.0
@@ -49,11 +53,15 @@ class GameServer:
     async def stop(self) -> None:
         if self._loop_task:
             self._loop_task.cancel()
-        for ws in [self.god, *self.observers, *self.controllers.values()]:
-            if ws:
-                await ws.close()
         if self._server:
             self._server.close()
+        # ws.close() gives up on a client that has stopped reading, so none of them can hold this up.
+        await asyncio.gather(*(ws.close() for ws in list(self._outboxes)))
+        if self._server:
+            # Then drop what is left, such as idle or half-sent HTTP requests: wait_closed()
+            # waits for every connection (Python 3.12+).
+            for writer in list(self._connections):
+                writer.transport.abort()
             await self._server.wait_closed()
 
     async def _run(self) -> None:
@@ -67,30 +75,30 @@ class GameServer:
                 stepped = True
             if not stepped:
                 self.sim._check_timeouts()  # answers can time out while paused, too
-            await self._flush(stepped)
+            self._flush(stepped)
 
-    async def _flush(self, stepped: bool) -> None:
+    def _flush(self, stepped: bool) -> None:
         events, forks, outbox = self.sim.drain()
         for name, msg in outbox:
             ws = self.controllers.get(name)
             if ws:
-                await self._send(ws, msg)
+                self._push(ws, json.dumps(msg))
         viewers = [ws for ws in [self.god, *self.observers] if ws]
         if not viewers or not (stepped or events or forks):
             return
         frame = json.dumps({"type": "state", "speed": self.speed, "state": self.sim.state_json(),
                             "events": events, "forks": forks})
         for ws in viewers:
-            await self._send_raw(ws, frame)
+            self._push(ws, frame)
 
     # --- HTTP -----------------------------------------------------------------
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self._connections.add(writer)
         try:
             request = await reader.readline()
             parts = request.decode(errors="replace").split()
             if len(parts) < 2:
-                writer.close()
                 return
             headers = {}
             while True:
@@ -105,8 +113,11 @@ class GameServer:
                 await self._session(ws)
                 return
             await self._static(writer, path)
-        except (ConnectionError, asyncio.IncompleteReadError, ValueError):
-            writer.close()
+        except (OSError, asyncio.IncompleteReadError, ValueError):
+            pass
+        finally:
+            self._connections.discard(writer)
+            writer.close()  # after a session too: before Python 3.13 nothing else closes the socket
 
     async def _static(self, writer: asyncio.StreamWriter, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -132,25 +143,56 @@ class GameServer:
         except ConnectionClosed:
             pass
 
+    async def _reply(self, ws: WebSocket, msg: dict, reply: dict) -> None:
+        """Send the direct reply to msg, with its req_id if it had one."""
+        if "req_id" in msg:
+            reply["req_id"] = msg["req_id"]
+        await self._send(ws, reply)
+
+    def _push(self, ws: WebSocket, text: str) -> None:
+        """Queue a message the client did not ask for, without waiting on the client.
+
+        A client too far behind to take it (it stopped reading, or reads too slowly)
+        is dropped, so it can never hold up the city.
+        """
+        outbox = self._outboxes.get(ws)
+        if outbox is None or ws.closed:
+            return
+        try:
+            outbox.put_nowait(text)
+        except asyncio.QueueFull:
+            ws.abort()
+
+    async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
+        """Send one client's pushes in order, so a slow client only ever holds up itself."""
+        try:
+            while True:
+                await ws.send(await outbox.get())
+        except ConnectionClosed:
+            pass  # the connection is gone: the session's recv() sees that too and ends
+
     async def _session(self, ws: WebSocket) -> None:
         role, name = None, None
+        self._outboxes[ws] = outbox = asyncio.Queue(SEND_QUEUE)
+        sender = asyncio.create_task(self._sender(ws, outbox))
         try:
             while True:
                 try:
                     msg = json.loads(await ws.recv())
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):  # also bad UTF-8, a too-long number, deep nesting
                     await self._send(ws, {"type": "error", "error": "messages must be JSON"})
                     continue
                 if not isinstance(msg, dict):
+                    await self._send(ws, {"type": "error", "error": "messages must be JSON objects"})
                     continue
                 if role is None:
                     if msg.get("type") != "hello":
-                        await self._send(ws, {"type": "error", "error": "say hello first"})
+                        await self._reply(ws, msg, {"type": "error", "error": "say hello first"})
                         continue
                     try:
                         role, name = await self._hello(ws, msg)
                     except (ValueError, TypeError, AttributeError) as exc:
-                        await self._send(ws, {"type": "error", "error": f"bad hello: {exc}"})
+                        await self._reply(ws, msg, {"type": "error", "error": f"bad hello: {exc}"})
                     continue
                 watching = role == "god" and ws is not self.god
                 try:
@@ -160,21 +202,22 @@ class GameServer:
                         reply = self._god(msg)
                     else:
                         reply = self._controller(name, msg)
-                except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
                     reply = {"type": "error", "error": f"bad message: {exc}"}
                 if reply:
-                    if "req_id" in msg:
-                        reply["req_id"] = msg["req_id"]
-                    await self._send(ws, reply)
+                    await self._reply(ws, msg, reply)
         except ConnectionClosed:
             pass
         finally:
+            sender.cancel()
+            del self._outboxes[ws]
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
                 self.sim.release(name)
             if ws is self.god:
                 self.god = None
             self.observers.discard(ws)
+            await ws.close()
 
     async def _hello(self, ws: WebSocket, msg: dict) -> tuple[str, str | None]:
         role = msg.get("role")
@@ -182,11 +225,11 @@ class GameServer:
             # One God per city: the newest God view takes over and the old one keeps watching.
             if self.god:
                 self.observers.add(self.god)
-                await self._send(self.god, {"type": "demoted", "reason": "another God view took over"})
+                self._push(self.god, json.dumps({"type": "demoted", "reason": "another God view took over"}))
             self.god = ws
-            await self._send(ws, {"type": "welcome", "role": "god", "town": self.sim.town_json(),
-                                  "state": self.sim.state_json(), "history": self.sim.history[-80:],
-                                  "speed": self.speed})
+            await self._reply(ws, msg, {"type": "welcome", "role": "god", "town": self.sim.town_json(),
+                                        "state": self.sim.state_json(), "history": self.sim.history[-80:],
+                                        "speed": self.speed})
             return "god", None
         if role == "controller":
             name = str(msg.get("name") or "controller")[:40]
@@ -202,7 +245,7 @@ class GameServer:
                 raise TypeError('characters must be a list of ids or "all"')
             wanted = [str(w) for w in wanted]
             claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
-            await self._send(ws, {
+            await self._reply(ws, msg, {
                 "type": "welcome", "role": "controller", "name": name, "characters": claimed,
                 "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
                 "answer_seconds": 5, "time": self.sim.clock.stamp(),
@@ -211,14 +254,17 @@ class GameServer:
             for aid in claimed:
                 self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
             return "controller", name
-        await self._send(ws, {"type": "error", "error": "role must be god or controller"})
+        await self._reply(ws, msg, {"type": "error", "error": "role must be god or controller"})
         await ws.close()
         raise ConnectionClosed()
 
     def _god(self, msg: dict) -> dict | None:
         t = msg.get("type")
         if t == "set_luck":
-            ok = self.sim.set_luck(str(msg.get("agent_id")), float(msg.get("luck", 50)))
+            luck = msg.get("luck", 50)
+            if isinstance(luck, bool) or not isinstance(luck, (int, float)) or not math.isfinite(luck):
+                raise TypeError("luck must be a number")
+            ok = self.sim.set_luck(str(msg.get("agent_id")), float(luck))
             return {"type": "luck_set", "ok": ok, "agent_id": msg.get("agent_id"),
                     "luck": self.sim.agents[msg["agent_id"]].luck if ok else None}
         if t == "set_speed":
