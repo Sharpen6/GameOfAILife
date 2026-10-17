@@ -312,21 +312,30 @@
       out.sort((a, b) => b.depth - a.depth || a.near - b.near || b.x - a.x || b.y - a.y);
       return out;
     }
-    // The van takes the camera-nearest road lot tile; the board takes it too, or the next one when the van or
-    // the driveway (where the household's car parks) has it.
-    function lotSpots(p, i, moving) {
+    // The van takes the camera-nearest road lot tile; the board takes it too, or the next one while the van
+    // or a car parked on the driveway (carOn) has it.
+    function lotSpots(p, i, moving, carOn) {
       const front = frontTiles(p, i);
       const van = moving && front.length ? front[0] : null;
-      const sign = front.find(t => t !== van && !t.drive) || front.find(t => t !== van) || front[0] || null;
+      const sign = front.find(t => t !== van && !(carOn && t.drive)) || front.find(t => t !== van) || front[0] || null;
       return { front, van, sign };
     }
     scene.lotSpots = id => {
       const i = placeById.get(id), p = places[i];
       if (!p || p.kind !== "home") return null;
-      const l = scene.looks[p.id] || {}, s = lotSpots(p, i, !!l.moving);
+      const l = scene.looks[p.id] || {}, car = scene.parked.has(p.id), s = lotSpots(p, i, !!l.moving, car);
       const xy = t => t ? [t.x, t.y] : null;
       return { front: s.front.map(t => ({ x: t.x, y: t.y, depth: t.depth, drive: t.drive, road: t.road })), van: l.moving ? xy(s.van) : null,
-        sign: (isHouseLike(p) ? l.listing : l.anyListed) ? xy(s.sign) : null };
+        sign: (isHouseLike(p) ? l.listing : l.anyListed) ? xy(s.sign) : null, car };
+    };
+    // The homes with a car parked on the driveway now (the movers set it every frame). A listed home's board
+    // keeps off the driveway only while a car stands there, so a change at a listed home rebuilds the statics.
+    scene.parked = new Set();
+    let parkedKey = "";
+    scene.setParked = set => {
+      scene.parked = set;
+      const key = [...set].filter(id => { const l = scene.looks[id]; return l && (l.listing || l.anyListed); }).sort().join(",");
+      if (key !== parkedKey) { parkedKey = key; dirty = true; }
     };
     // The tile beside a home's door walk (a house's garden tile next to it, a block's apron), kept clear of lamps.
     function besideDoor(p, i) {
@@ -389,8 +398,8 @@
         if (p.entry) boards.add(p.entry[1] * W + p.entry[0]);
         const b = besideDoor(p, i);
         if (b) boards.add(b[1] * W + b[0]);
-        const t = p.kind === "home" ? lotSpots(p, i, false).sign : null;
-        if (t) boards.add(t.y * W + t.x);
+        // the board's tile with and without a car on the driveway, so a car coming home never moves a lamp
+        if (p.kind === "home") for (const car of [false, true]) { const t = lotSpots(p, i, false, car).sign; if (t) boards.add(t.y * W + t.x); }
       });
       lampPts = [];
       const nearJ = (x, y) => junctionSet.has(y * W + x) || junctionSet.has(y * W + x + 1) || junctionSet.has(y * W + x - 1) || junctionSet.has((y + 1) * W + x) || junctionSet.has((y - 1) * W + x);
@@ -432,7 +441,7 @@
         if (p.kind !== "home") return;
         const look = scene.looks[p.id] || { stage: 0 };
         const stage = look.stage | 0;
-        const spots = lotSpots(p, i, !!look.moving);
+        const spots = lotSpots(p, i, !!look.moving, scene.parked.has(p.id));
         const listed = isHouseLike(p) ? (look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null) : look.anyListed ? "let" : null;
         const taken = (x, y) => [spots.van, listed ? spots.sign : null].some(t => t && t.x === x && t.y === y);
         if (isHouseLike(p)) {

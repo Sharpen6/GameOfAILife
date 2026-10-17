@@ -3,14 +3,16 @@
 // exposes the methods game.js and the dashboard call (PLAN 3.12):
 //   setTown(town)                      welcome.town; older towns (40 x 25) are normalized
 //   setState(state, speed)             every frame; the last lots and homes are kept when a frame omits them
+//                                      (frames sent before setTown, and across a new setTown, included)
 //   select(id | null, {follow})        never calls onSelect
-//   focus(target, {inset, zoom})       target {agent} | {place} | {tile: [x, y]} | {district}; animated
+//   focus(target, {inset, zoom})       target {agent} | {place} | {tile: [x, y]} | {district}; animated; it stops
+//                                      following unless the target is the person followed
 //   highlight({agents, places} | null) outline glow, and x-ray through whatever covers the first of them
 //   setOverlay(name | null, colors)    "wealth" | "mood" | "condition"; {placeId: cssColor}, drawn every frame
 //   ping(target, topic)                rings on the map (and an arrow at the edge when off screen)
 //   setInset({top, right, bottom})     CSS px of page UI over the canvas
 //   setMode({projection})              "iso" | "flat", kept in localStorage["goal.view"]
-//   camera(), start(), stop()
+//   camera(), start(), stop()          camera() and onCamera: exactly {x, y, zoom, follow, projection}
 // A place in focus, ping, highlight or an overlay may also be a home id (resolved through town.homes). The
 // view pings only when told to, and it never sends messages. Classic script on window.CityView.
 "use strict";
@@ -32,6 +34,7 @@
     let scene = null, movers = null, cam = null, mini = null, town = null;
     let running = false, raf = 0, lastT = 0, lastCamSent = 0, camDirty = true, lastSave = 0;
     let selected = null, pendingState = null, pendingSpeed = 1, inset = { top: 0, right: 0, bottom: 0 };
+    let lastLots = null, lastHomes = null, seedHousing = false; // the last lots and homes any frame carried
     let lastClick = null, highlightRaw = null, overlayRaw = null, gaps = [], dprCap = 2, slowChecked = 0;
     let camLate = false, saveLate = false; // a camera report or a save held back by its rate limit, sent later
     const dynamic = opt.dynamicResolution !== false;
@@ -58,16 +61,16 @@
     bIn.addEventListener("click", () => cam && cam.zoomIn());
     bOut.addEventListener("click", () => cam && cam.zoomOut());
     bFit.addEventListener("click", () => cam && cam.fit());
-    bView.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.toggle("cv-open"); syncMenu(); });
+    bView.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.toggle("cv-open"); syncMenu(); placeMenu(); });
     document.addEventListener("click", ev => { if (!ctl.contains(ev.target)) menu.classList.remove("cv-open"); });
     mIso.addEventListener("click", () => { view.setMode({ projection: "iso" }); menu.classList.remove("cv-open"); });
     mFlat.addEventListener("click", () => { view.setMode({ projection: "flat" }); menu.classList.remove("cv-open"); });
-    mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); refreshReserved(); });
+    mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); });
     mHomes.addEventListener("click", () => {
       if (!mini) return;
       mini.setHomes(!mini.homesOn());
       if (mini.homesOn() && !mini.isOpen()) mini.setOpen(true);
-      prefs.homes = mini.homesPref(); syncMenu(); persist(true); refreshReserved();
+      prefs.homes = mini.homesPref(); syncMenu(); persist(true); placeControls(); refreshReserved();
     });
     chipX.addEventListener("click", () => { if (cam) cam.follow = null; syncChip(); emitCamera(true); });
     chipName.addEventListener("click", () => { if (cam && selected) cam.follow = selected; syncChip(); emitCamera(true); });
@@ -89,22 +92,72 @@
       chipX.style.display = cam.follow ? "" : "none";
       placeChip();
     }
-    // The zoom stack top-right under the page's top inset, the minimap bottom-right, the follow chip
-    // bottom-centre of the free area (PLAN decision 31), lifted over the minimap when the two would meet.
+    // The controls stay in the area the page leaves free (PLAN decision 31): the zoom stack top-right under
+    // the top inset, the minimap bottom-right, the follow chip bottom-centre. When the free area is too short
+    // for the stack above the minimap (a phone's sheet under the dashboard's toasts), the stack lies down in
+    // a row; when even that does not fit, the minimap moves to the bottom-left; failing that the minimap,
+    // and then the stack, wait out of sight until there is room again. The chip goes above or beside
+    // whatever it would cover. lay keeps the rects (canvas-relative CSS px) the chip and the menu avoid.
+    const M = 10, GAP = 6, SEP = 8;
+    let lay = { row: false, colH: 0, rowH: 0, ctl: null, mini: null, key: "" };
+    const freeArea = () => {
+      const W = canvas.clientWidth || host.clientWidth || 800, H = canvas.clientHeight || host.clientHeight || 600;
+      return { W, H, x1: W - inset.right, y0: inset.top, y1: H - inset.bottom };
+    };
+    const layoutKey = () => [canvas.clientWidth, canvas.clientHeight, bView.offsetWidth, bView.offsetHeight,
+      mini ? mini.el.offsetWidth : 0, mini ? mini.el.offsetHeight : 0, inset.top, inset.right, inset.bottom].join(",");
     function placeControls() {
-      ctl.style.top = (inset.top + 10) + "px"; ctl.style.right = (inset.right + 10) + "px";
-      if (mini) { mini.el.style.right = (inset.right + 10) + "px"; mini.el.style.bottom = (inset.bottom + 10) + "px"; }
-      placeChip();
+      const f = freeArea(), free = f.y1 - f.y0;
+      const btns = [bIn, bOut, bFit, bView], ws = btns.map(b => b.offsetWidth), hs = btns.map(b => b.offsetHeight);
+      const colW = Math.max(...ws), colH = hs.reduce((a, b) => a + b, 0) + GAP * (btns.length - 1);
+      const rowW = ws.reduce((a, b) => a + b, 0) + GAP * (btns.length - 1), rowH = Math.max(...hs);
+      const mw = mini ? mini.el.offsetWidth : 0, mh = mini ? mini.el.offsetHeight : 0;
+      let row = false, left = false, ctlOff = false, miniOff = false;
+      if (rowH > 0) { // nothing to measure while the canvas is out of the page
+        const fits = h => free >= M + h + M, under = mini ? SEP + mh : 0, rowOk = M + rowW + M <= f.x1;
+        if (fits(colH + under)) row = false;
+        else if (rowOk && fits(rowH + under)) row = true;
+        else if (rowOk && mini && fits(Math.max(rowH, mh)) && M + mw + SEP + rowW + M <= f.x1) row = left = true;
+        else if (rowOk && fits(rowH)) { row = true; miniOff = !!mini; }
+        else if (fits(colH)) miniOff = !!mini;
+        else { ctlOff = true; miniOff = !!mini; }
+      }
+      ctl.classList.toggle("cv-row", row); ctl.classList.toggle("cv-off", ctlOff);
+      ctl.style.top = (f.y0 + M) + "px"; ctl.style.right = (inset.right + M) + "px";
+      const cw = row ? rowW : colW, ch = row ? rowH : colH;
+      lay = { row, colH, rowH, ctl: ctlOff || !rowH ? null : [f.x1 - M - cw, f.y0 + M, f.x1 - M, f.y0 + M + ch], mini: null, key: "" };
+      if (mini) {
+        const el = mini.el;
+        el.classList.toggle("cv-left", left); el.classList.toggle("cv-off", miniOff);
+        el.style.bottom = (inset.bottom + M) + "px";
+        if (left) { el.style.left = M + "px"; el.style.right = "auto"; } else { el.style.left = ""; el.style.right = (inset.right + M) + "px"; }
+        if (!miniOff && mw) lay.mini = left ? [M, f.y1 - M - mh, M + mw, f.y1 - M] : [f.x1 - M - mw, f.y1 - M - mh, f.x1 - M, f.y1 - M];
+      }
+      lay.key = layoutKey();
+      placeMenu(); placeChip();
+    }
+    // The View menu drops below the stack, or opens beside it when the free area ends first.
+    function placeMenu() {
+      if (!menu.classList.contains("cv-open")) return;
+      menu.classList.remove("cv-side");
+      const f = freeArea(), below = f.y0 + M + (lay.row ? lay.rowH : lay.colH) + GAP;
+      if (below + menu.offsetHeight > f.y1 - 4) menu.classList.add("cv-side");
     }
     function placeChip() {
-      const w = canvas.clientWidth || host.clientWidth || 800, cx = (w - inset.right) / 2;
-      chip.style.left = Math.round(cx) + "px";
-      let bottom = inset.bottom + 10;
-      if (mini && chip.classList.contains("cv-show")) {
-        const half = (chip.offsetWidth || 160) / 2, mw = mini.el.offsetWidth, mh = mini.el.offsetHeight;
-        if (mw && cx + half + 8 > w - inset.right - 10 - mw) bottom += mh + 8;
+      const f = freeArea(), cw = chip.offsetWidth || 160, ch = chip.offsetHeight || 36;
+      const rect = (cx, b) => [cx - cw / 2, b - ch, cx + cw / 2, b];
+      const blocks = [lay.ctl, lay.mini].filter(Boolean);
+      const blocker = r => blocks.find(q => r[0] < q[2] + SEP && r[2] > q[0] - SEP && r[1] < q[3] + SEP && r[3] > q[1] - SEP) || null;
+      const ok = r => r[0] >= M && r[2] <= f.x1 - M && r[1] >= f.y0 + 4 && r[3] <= f.y1 - 4 && !blocker(r);
+      const home = rect(f.x1 / 2, f.y1 - M);
+      let pick = home;
+      const q = blocker(home);
+      if (q) { // above it, else slid left or right of it
+        pick = [rect(f.x1 / 2, q[1] - SEP), rect(q[0] - SEP - cw / 2, f.y1 - M), rect(q[2] + SEP + cw / 2, f.y1 - M)].find(ok) || home;
       }
-      chip.style.bottom = bottom + "px";
+      chip.classList.toggle("cv-off", f.y1 - f.y0 < ch + 8);
+      chip.style.left = Math.round((pick[0] + pick[2]) / 2) + "px";
+      chip.style.bottom = Math.round(f.H - pick[3]) + "px";
     }
     // The screen rects (CSS px, canvas-relative) the map's labels keep clear of: the view's own controls
     // and any page element marked data-cv-avoid (or matching opt.avoid). Refreshed a few times a second.
@@ -112,9 +165,10 @@
     function refreshReserved() {
       reservedAt = performance.now();
       if (!scene) return;
+      if (layoutKey() !== lay.key) placeControls(); // the minimap opened, grew a legend, or the page moved
       const cr = canvas.getBoundingClientRect(), rects = [];
       const add = e => {
-        if (!e || !e.isConnected) return;
+        if (!e || !e.isConnected || e.classList.contains("cv-off") || (e.parentElement && e.parentElement.classList.contains("cv-off"))) return;
         const r = e.getBoundingClientRect();
         if (r.width < 1 || r.height < 1) return;
         rects.push([r.left - cr.left, r.top - cr.top, r.right - cr.left, r.bottom - cr.top]);
@@ -272,6 +326,7 @@
     function build(t) {
       if (cam) cam.destroy();
       if (mini) mini.destroy();
+      mini = null;
       town = CV.normalizeTown(t);
       scene = CV.makeScene(canvas, town, { projection: prefs.projection === "flat" ? "flat" : "iso", rot: prefs.rot | 0 });
       scene.dpr = canvas.width / (canvas.clientWidth || canvas.width);
@@ -280,6 +335,7 @@
       if (opt.eager) scene.prewarm();
       if (opt.quality) scene.quality = opt.quality;
       movers = CV.makeMovers(scene);
+      seedHousing = true;
       cam = CV.makeCamera(canvas, scene, {
         click: onClick,
         hover: (x, y) => onHover(x, y, false),
@@ -291,7 +347,7 @@
         escape: () => { menu.classList.remove("cv-open"); if (selected == null) return; view.select(null); if (hooks.onSelect) hooks.onSelect(null); },
         change: () => { camDirty = true; },
       });
-      mini = opt.minimap === false ? null : CV.makeMinimap(host, scene, cam, { open: prefs.minimap, homes: prefs.homes, onToggle: () => { syncMenu(); persist(true); refreshReserved(); }, onFollowCancel: syncChip });
+      mini = opt.minimap === false ? null : CV.makeMinimap(host, scene, cam, { open: prefs.minimap, homes: prefs.homes, onToggle: () => { if (mini) mini.draw(performance.now(), true); syncMenu(); persist(true); placeControls(); refreshReserved(); }, onFollowCancel: syncChip });
       placeControls();
       // initial view: the stored camera, else Downtown's centre (the map centre for older towns)
       const fit = cam.fitZoom();
@@ -349,7 +405,14 @@
       setTown(t) { build(t); if (!running) frame(performance.now()); },
       setState(st, speed) {
         if (!st) return;
+        if (st.lots) lastLots = st.lots;
+        if (st.homes) lastHomes = st.homes;
         if (!scene) { pendingState = st; pendingSpeed = speed; return; }
+        // the first frame a new scene gets: the last lots and homes sent, when it does not carry its own
+        if (seedHousing) {
+          seedHousing = false;
+          if ((!st.lots && lastLots) || (!st.homes && lastHomes)) st = Object.assign({}, st, { lots: st.lots || lastLots, homes: st.homes || lastHomes });
+        }
         scene.state = st;
         if (st.minute != null) scene.minute = st.minute;
         if (st.season) scene.setSeason(st.season);
@@ -376,7 +439,8 @@
           wx += ((a.right || 0) - (b.right || 0)) / 2 / z;
           wy -= (((a.top || 0) - (b.top || 0)) - ((a.bottom || 0) - (b.bottom || 0))) / 2 / z;
         }
-        if (target.agent == null && cam.follow) { cam.follow = null; syncChip(); }
+        // following someone else would pull the camera back to them when the flight ends
+        if (cam.follow && target.agent !== cam.follow) { cam.follow = null; syncChip(); emitCamera(true); }
         cam.flyTo(wx, wy, z, o.ms || 600);
         return true;
       },
@@ -413,7 +477,7 @@
       camera() {
         if (!cam) return { x: 0, y: 0, zoom: 1, follow: null, projection: prefs.projection };
         const t = scene.proj.toTile(cam.x, cam.y);
-        return { x: t[0], y: t[1], zoom: cam.zoom, follow: cam.follow || null, projection: scene.proj.kind, rot: scene.proj.rot };
+        return { x: t[0], y: t[1], zoom: cam.zoom, follow: cam.follow || null, projection: scene.proj.kind };
       },
       start() { if (running) return; running = true; lastT = 0; raf = requestAnimationFrame(loop); },
       stop() { running = false; cancelAnimationFrame(raf); },

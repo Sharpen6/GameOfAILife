@@ -263,6 +263,7 @@
         items.push({ img: spr.c, sx: 0, sy: 0, sw: spr.c.width, sh: spr.c.height, wx: Math.round(p[0]) - spr.ax, wy: Math.round(p[1]) - spr.ay,
           depth: proj.depth(tx, ty) + 0.02, kind: "parked", id: "parked:" + a.id, lights: null, moving: false, cx: p[0], cy: p[1] });
       }
+      if (scene.setParked) scene.setParked(done);
       items.sort((a, b) => a.depth - b.depth);
       scene.movers = items;
     };

@@ -7,24 +7,31 @@
 // It serves client/ on 127.0.0.1 and checks in headless Chromium (P4.md TESTS and acceptance):
 // - globals: on a blank page the nine scripts add only window.CityView and the view adds no global of its
 //   own while it runs; every facade method exists; CityView.shirt and .hair use game.js's formulas; the
-//   page loads nothing but its own files and opens no socket; setMode before setTown is kept and stored
+//   page loads nothing but its own files and opens no socket; setMode before setTown is kept and stored;
+//   frames sent before setTown keep their lots and homes; camera() has exactly the 3.12 keys
 // - bench: the median draw is under 4 ms at zoom 1 on 1440x900 over 120 frames, in iso and in flat, both
 //   with no console errors, and the view never pings on its own
 // - picking: real clicks hit a known agent (ev {cssX, cssY, touch}), a roof in front of a pedestrian (then
 //   the pedestrian on a second click) and a stacked pair in turn; select() never calls onSelect and Esc
 //   deselects and calls onSelect(null); keys (arrows, WASD, + - 0, F) work and are ignored in a form
 //   field; drag, wheel, the zoom buttons, the View menu, the follow chip (bottom centre) and the minimap
-// - facade: focus (animated, a home id, a tile, a district, an agent, with an inset), highlight (glow
+// - facade: focus (animated, a home id, a tile, a district, an agent, with an inset, another person while
+//   following someone), highlight (glow
 //   and x-ray), setOverlay (a block of flats takes the tint by pixel check, drawn per frame and never baked
 //   into the ground chunks), ping (colours, false for unknown targets, the off-screen arrow flies there),
 //   setInset, setMode, camera(), onCamera, stop/start, and setState keeping lots and homes it was not sent
+//   (across a second setTown too)
 // - stages: all five neglect stages on screen at zoom 2, pixel-distinct on the one-palette specimen street;
-//   SALE / RENT / LET boards and moving vans on the camera-nearest road-touching lot tile
+//   SALE / RENT / LET boards and moving vans on the camera-nearest road-touching lot tile (a board steps
+//   off it only for the van, or for a car parked on the driveway while its owner is home)
 // - persistence: localStorage["goal.view"] keeps the projection and camera (never the rotation), and a
 //   throwing localStorage costs nothing
 // - today's 40 x 25 town and its state (one bus at state.bus) load and draw in iso and flat
 // - phone (390 x 844, touch): tap and long-press (ev.touch), pinch and one-finger pan, the 6 MP chunk
-//   budget, the collapsed minimap, no sideways scroll
+//   budget, the collapsed minimap, no sideways scroll; with a sheet over the bottom and toasts under the
+//   HUD, every control stays in the free area, clear of the others and tappable, or waits out of sight
+// - rotation (a tested parameter with no UI): at rotations 1-3 the projection round-trips, the camera
+//   keeps its tile, focus and picking find a known building, and nothing logs an error
 // - the dashboard's dev page with the real view (?view=real) runs with no errors and no failed view calls
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
@@ -298,10 +305,17 @@ async function runGlobals(browser) {
     const view = window.__v = CV.create(document.getElementById("c"), {});
     const missing = FAC.filter(n => typeof view[n] !== "function");
     view.setMode({ projection: "flat" }); // before the town: kept, used by setTown and stored
+    const keys0 = Object.keys(view.camera());
+    // two frames before the town, the second without lots and homes: the first one's are kept
+    const full = CITY_FIXTURE.state, bare = Object.assign({}, full, { tick: full.tick + 1 });
+    delete bare.lots; delete bare.homes;
+    view.setState(full, 1); view.setState(bare, 1);
     view.setTown(CITY_FIXTURE.town);
-    view.setState(CITY_FIXTURE.state, 1);
+    const looks = view.scene().looks, lotIds = Object.keys(full.lots);
+    const kept = { lots: lotIds.length, looked: lotIds.filter(id => looks[id] && (looks[id].stage | 0) === full.lots[id].stage).length,
+      staged: lotIds.filter(id => full.lots[id].stage > 0).length, listed: Object.values(looks).filter(l => l.listing || l.anyListed).length };
     view.start();
-    return { added, missing, cv: ["create", "shirt", "hair", "stageOf"].filter(n => typeof CV[n] !== "function"), proj: view.camera().projection,
+    return { added, missing, keys0, keys1: Object.keys(view.camera()), kept, cv: ["create", "shirt", "hair", "stageOf"].filter(n => typeof CV[n] !== "function"), proj: view.camera().projection,
       stored: localStorage.getItem("goal.view"), ctl: !!host.querySelector(":scope > .cv-ctl"), chip: !!host.querySelector(":scope > .cv-follow"),
       mini: !!host.querySelector(":scope > .cv-minimap"), ids: CITY_FIXTURE.state.agents.map(a => a.id),
       colours: CITY_FIXTURE.state.agents.map(a => [CV.shirt(a.id), CV.hair(a.id)]) };
@@ -311,6 +325,10 @@ async function runGlobals(browser) {
   check(g.cv.length === 0, "globals: CityView.create, shirt, hair and stageOf exist", g.cv);
   check(g.ctl && g.chip && g.mini, "globals: the view adds .cv-ctl, .cv-follow and .cv-minimap next to the canvas", g);
   check(g.proj === "flat", "globals: setMode before setTown is kept", g.proj);
+  const KEYS = JSON.stringify(["x", "y", "zoom", "follow", "projection"]);
+  check(JSON.stringify(g.keys0) === KEYS && JSON.stringify(g.keys1) === KEYS, "globals: camera() is exactly {x, y, zoom, follow, projection}, before and after setTown", [g.keys0, g.keys1]);
+  check(g.kept.lots > 0 && g.kept.looked === g.kept.lots && g.kept.staged > 0 && g.kept.listed > 0,
+    "globals: a frame without lots and homes before setTown keeps the earlier frame's", g.kept);
   let stored = null;
   try { stored = JSON.parse(g.stored); } catch (e) { /* checked below */ }
   check(stored && stored.projection === "flat", "globals: setMode before setTown is stored in goal.view", g.stored);
@@ -578,6 +596,27 @@ async function runFacade(browser) {
   check(await page.evaluate(() => __view.focus({ agent: "nobody" })) === false && await page.evaluate(() => __view.focus({ place: "nowhere" })) === false,
     "focus: unknown targets return false");
   check(await page.evaluate(() => __view.focus({ agent: "nobody" }) === false && __view.camera()) !== null, "focus: an unknown target leaves the camera be");
+  // focus on another person while following someone: the camera stays on the new person (no drift back);
+  // focusing the person followed keeps following
+  const ff = await page.evaluate(async ids => {
+    const v = __view, wait = ms => new Promise(r => setTimeout(r, ms));
+    v.setCamera({ x: 8, y: 8, zoom: 1 });
+    v.select(ids[0], { follow: true });
+    await wait(900);
+    const ok = v.focus({ agent: ids[1] });
+    await wait(1800);
+    const other = { ok, follow: v.camera().follow, at: __t.foot(ids[1]), mid: __t.centre() };
+    v.select(ids[0], { follow: true });
+    v.focus({ agent: ids[0] });
+    await wait(1000);
+    const same = { follow: v.camera().follow, at: __t.foot(ids[0]), mid: __t.centre() };
+    v.select(null);
+    return { other, same };
+  }, ids);
+  check(ff.other.ok && ff.other.follow === null && near(ff.other.at[0], ff.other.mid[0], 3) && near(ff.other.at[1], ff.other.mid[1], 3),
+    "focus {agent} while following someone else: stops following and stays on the new person", ff.other);
+  check(ff.same.follow === ids[0] && near(ff.same.at[0], ff.same.mid[0], 3) && near(ff.same.at[1], ff.same.mid[1], 3),
+    "focus {agent} on the person followed: keeps following", ff.same);
 
   // highlight: an outline glow, and x-ray through the office tower in front of City Hall
   const hl = await page.evaluate(() => {
@@ -682,7 +721,9 @@ async function runFacade(browser) {
     v.setMode({ projection: "iso" }); v.frame();
     return { a, b, c: v.camera(), stored: localStorage.getItem("goal.view") };
   });
-  check(["x", "y", "zoom", "follow", "projection"].every(k => k in md.a), "camera: camera() gives x, y, zoom, follow and projection", md.a);
+  check(JSON.stringify(Object.keys(md.a)) === JSON.stringify(["x", "y", "zoom", "follow", "projection"]), "camera: camera() gives exactly x, y, zoom, follow and projection", md.a);
+  check(await page.evaluate(() => { const c = __calls.cameraLast; return !!c && JSON.stringify(Object.keys(c)); }) === JSON.stringify(["x", "y", "zoom", "follow", "projection"]),
+    "camera: onCamera gets the same shape");
   check(md.b.projection === "flat" && near(md.b.x, md.a.x, 0.5) && near(md.b.y, md.a.y, 0.5), "setMode: flat keeps the camera over the same tile", md);
   check(md.c.projection === "iso" && near(md.c.x, md.a.x, 0.5) && near(md.c.y, md.a.y, 0.5), "setMode: iso again", md.c);
   check(await page.evaluate(() => __calls.camera) > 0, "camera: onCamera is called when the camera moves");
@@ -720,6 +761,13 @@ async function runFacade(browser) {
   check(ls.c.stage === 0 && ls.d.stage === 4, "setState: a lot without a stage takes it from its condition", ls);
   check(await page.evaluate(() => { try { __view.setState(null); __view.setTown(__fake.town); __view.setState(__state(), 1); return true; } catch (e) { return String(e); } }) === true,
     "setTown: a second town replaces the first");
+  const again = await page.evaluate(() => {
+    const v = __view, bare = Object.assign({}, __state()); delete bare.lots; delete bare.homes;
+    v.setTown(__fake.town); v.setState(bare, 1);
+    const l = v.scene().looks.main_47;
+    return l ? l.stage : null;
+  });
+  check(again === 4, "setTown: a frame without lots and homes after a second setTown keeps the last ones", again);
   noErrors(log, "facade");
   await ctx.close();
 }
@@ -751,7 +799,7 @@ async function runStages(browser) {
       if (p.kind !== "home") continue;
       const sp = s.lotSpots(p.id);
       if (!sp || (!sp.van && !sp.sign)) continue;
-      out.push({ id: p.id, van: sp.van, sign: sp.sign, front: sp.front,
+      out.push({ id: p.id, van: sp.van, sign: sp.sign, front: sp.front, car: sp.car,
         touch: sp.front.every(t => road(t.x - 1, t.y) || road(t.x + 1, t.y) || road(t.x, t.y - 1) || road(t.x, t.y + 1)),
         inLot: sp.front.every(t => !(t.x >= p.x && t.x < p.x + p.w && t.y >= p.y && t.y < p.y + p.h)) });
     }
@@ -764,11 +812,42 @@ async function runStages(browser) {
     check(l.touch && l.inLot, `lots ${l.id}: the candidate tiles are off the footprint and touch a road`, l.front);
     if (l.van) check(l.van[0] === l.front[0].x && l.van[1] === l.front[0].y && l.front[0].depth === top, `lots ${l.id}: the van stands on the camera-nearest road lot tile`, l);
     if (l.sign) {
+      // front[0], unless the van stands there or a car is parked on it (a driveway while the owner is home)
       const t = l.front.find(q => q.x === l.sign[0] && q.y === l.sign[1]);
-      const rest = l.front.filter(q => !(l.van && q.x === l.van[0] && q.y === l.van[1]) && !q.drive);
+      const rest = l.front.filter(q => !(l.van && q.x === l.van[0] && q.y === l.van[1]) && !(l.car && q.drive));
       const best = rest.length ? Math.max(...rest.map(q => q.depth)) : top;
-      check(!!t && t.depth >= best && !(l.van && l.van[0] === t.x && l.van[1] === t.y), `lots ${l.id}: the board stands on the nearest road lot tile the van and the driveway leave`, l);
+      check(!!t && t.depth >= best && (!rest.length || rest.includes(t)), `lots ${l.id}: the board stands on the camera-nearest road lot tile the van or a parked car leaves`, l);
+      if (!l.van && !l.car) check(t === l.front[0], `lots ${l.id}: with no van and no parked car the board stands on the camera-nearest road lot tile`, l);
     }
+  }
+  // a listed house whose camera-nearest road lot tile is its driveway: the board stands there until a car
+  // parks on it (the owner comes home), then steps to the next tile, and comes back when the car leaves
+  const car = await page.evaluate(() => {
+    const v = __view, s = v.scene(), town = s.town;
+    const p = town.places.find(q => {
+      if (q.kind !== "home" || q.style === "apartments") return false;
+      const sp = s.lotSpots(q.id);
+      return sp && sp.sign && !sp.van && sp.front.length > 1 && sp.front[0].drive;
+    });
+    if (!p) return null;
+    const home = town.homes.find(h => h.place === p.id), xy = sp => sp.sign && sp.sign.join(",");
+    const f0 = s.lotSpots(p.id).front[0], st = __state();
+    st.tick += 2000;
+    const a = st.agents.find(q => q.alive !== false && !q.car);
+    Object.assign(a, { car: true, home: home.id, inside: home.id, riding: null, vehicle: "walk", state: "busy", activity: "relax_home" });
+    for (const q of st.agents) if (q !== a && q.car && (q.home === home.id || q.home === p.id)) q.car = false;
+    __push(st); v.settle(); v.frame();
+    const parked = s.lotSpots(p.id), cars = s.movers.filter(m => m.kind === "parked" && m.id === "parked:" + a.id).length;
+    const away = __state(); away.tick = st.tick + 1;
+    const b = away.agents.find(q => q.id === a.id);
+    Object.assign(b, { car: true, home: home.id, inside: null });
+    __push(away); v.settle(); v.frame();
+    const gone = s.lotSpots(p.id);
+    return { id: p.id, f0: [f0.x, f0.y].join(","), parked: { car: parked.car, sign: xy(parked) }, cars, gone: { car: gone.car, sign: xy(gone) } };
+  });
+  if (check(!!car, "lots: a listed house's nearest road lot tile is its driveway", car)) {
+    check(car.parked.car && car.cars === 1 && car.parked.sign !== car.f0, "lots: a car parked on the driveway moves the board to the next road lot tile", car);
+    check(!car.gone.car && car.gone.sign === car.f0, "lots: when the car leaves the board stands on the driveway tile again", car);
   }
   noErrors(log, "stages");
   await ctx.close();
@@ -822,7 +901,7 @@ async function runPersist(browser) {
   await page.evaluate(() => localStorage.setItem("goal.view", JSON.stringify({ projection: "iso", rot: 2, zoom: 1, x: 40, y: 25 })));
   await page.reload();
   await page.waitForFunction(() => window.__view && __view.scene() && __view.scene().stats.frames > 3, null, { timeout: 20000 });
-  c = await page.evaluate(() => __view.camera());
+  c = await page.evaluate(() => ({ projection: __view.camera().projection, rot: __view.scene().proj.rot }));
   check(c.projection === "iso" && c.rot === 0, "persist: a stored rotation is never restored", c);
   noErrors(log, "persist");
   await ctx.close();
@@ -909,7 +988,103 @@ async function runPhone(browser) {
   const b = await cam(page);
   check(b.wy - a.wy > 150 / a.zoom, "phone: a one-finger drag pans", [a.wy, b.wy]);
   await shot(page, "phone");
+
+  // A sheet over the bottom of the map and toasts under the HUD, as the dashboard does on a phone: every
+  // control stays inside the free area, clear of the others, and a tap at its middle reaches it.
+  const top0 = await page.evaluate(() => __view.scene().inset.top);
+  await page.evaluate(id => __view.select(id, { follow: false }), ids[0]);
+  const layout = (ins, o) => page.evaluate(([ins, o]) => {
+    for (const id of ["__sheet", "__toasts"]) { const e = document.getElementById(id); if (e) e.remove(); }
+    const cr = document.getElementById("map").getBoundingClientRect();
+    const cover = (id, y0, y1) => { const e = document.createElement("div"); e.id = id; e.style.cssText = `position:fixed;left:0;right:0;top:${y0}px;height:${Math.max(0, y1 - y0)}px;z-index:40;background:rgba(30,36,50,0.92)`; document.body.appendChild(e); };
+    cover("__sheet", cr.bottom - ins.bottom, cr.bottom);
+    cover("__toasts", cr.top + ins.top - 70, cr.top + ins.top);
+    __view.setInset(ins);
+    const mini = document.querySelector(".cv-minimap");
+    if (o.mini != null && mini.classList.contains("cv-collapsed") === o.mini) document.querySelector(".cv-minimap-toggle").click();
+    const menu = document.querySelector(".cv-menu");
+    if (!!o.menu !== menu.classList.contains("cv-open")) document.querySelector(".cv-btn-view").click();
+    __view.frame();
+    const y0 = cr.top + ins.top, y1 = cr.bottom - ins.bottom;
+    const R = e => { const b = e.getBoundingClientRect(); return [b.left, b.top, b.right, b.bottom]; };
+    const out = { free: [y0, y1], row: document.querySelector(".cv-ctl").classList.contains("cv-row"), parts: {} };
+    const parts = { plus: ".cv-ctl > .cv-btn:nth-child(1)", minus: ".cv-ctl > .cv-btn:nth-child(2)", fit: ".cv-ctl > .cv-btn:nth-child(3)", view: ".cv-btn-view",
+      mini: ".cv-minimap", chip: ".cv-follow" };
+    if (o.menu) parts.menu = ".cv-menu";
+    for (const [k, sel] of Object.entries(parts)) {
+      const e = document.querySelector(sel), r = R(e), shown = getComputedStyle(e).visibility === "visible" && r[2] > r[0];
+      const tap = sel === ".cv-minimap" ? document.querySelector(".cv-minimap-toggle") : e, t = R(tap);
+      const hit = shown ? document.elementFromPoint((t[0] + t[2]) / 2, (t[1] + t[3]) / 2) : null;
+      out.parts[k] = { r: r.map(Math.round), shown, inside: r[0] >= 0 && r[2] <= innerWidth && r[1] >= y0 - 0.5 && r[3] <= y1 + 0.5, reached: !!hit && (hit === tap || tap.contains(hit)) };
+    }
+    const box = ks => { const rs = ks.map(k => out.parts[k]).filter(q => q.shown).map(q => q.r); return rs.length ? [Math.min(...rs.map(q => q[0])), Math.min(...rs.map(q => q[1])), Math.max(...rs.map(q => q[2])), Math.max(...rs.map(q => q[3]))] : null; };
+    const groups = { ctl: box(["plus", "minus", "fit", "view"]), mini: box(["mini"]), chip: box(["chip"]) };
+    const meet = (a, b) => !!a && !!b && a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    out.overlaps = [["ctl", "mini"], ["ctl", "chip"], ["mini", "chip"]].filter(([a, b]) => meet(groups[a], groups[b])).map(q => q.join("+"));
+    return out;
+  }, [ins, o]);
+  const good = (L, keys) => keys.every(k => L.parts[k].shown && L.parts[k].inside && L.parts[k].reached);
+  const CTL = ["plus", "minus", "fit", "view", "mini", "chip"];
+  let L = await layout({ top: top0 + 80, bottom: 464 }, { mini: false });
+  check(good(L, CTL) && L.overlaps.length === 0, "phone layout: a short free area keeps every control in it, apart and tappable (minimap shut)", L);
+  check(L.row, "phone layout: the zoom stack lies in a row when it is too tall for the free area", L.row);
+  L = await layout({ top: top0 + 80, bottom: 464 }, { mini: true });
+  check(good(L, CTL) && L.overlaps.length === 0, "phone layout: the same with the minimap open", L);
+  await shot(page, "phone-sheet");
+  L = await layout({ top: top0 + 80, bottom: 464 }, { mini: true, menu: true });
+  check(good(L, ["view", "menu"]) && L.parts.menu.inside, "phone layout: the View menu opens inside the free area", L.parts);
+  await shot(page, "phone-sheet-menu");
+  L = await layout({ top: top0 + 30, bottom: 640 }, { mini: true, menu: false });
+  check(CTL.every(k => !L.parts[k].shown || (L.parts[k].inside && L.parts[k].reached)) && L.overlaps.length === 0 && good(L, ["plus", "minus", "fit", "view"]),
+    "phone layout: a very short free area keeps the stack and hides what does not fit", L);
+  await shot(page, "phone-sheet-short");
+  L = await layout({ top: top0 + 30, bottom: 760 }, { mini: false });
+  check(CTL.every(k => !L.parts[k].shown), "phone layout: with no room at all the controls wait out of sight", L.parts);
+  L = await layout({ top: top0, bottom: 0 }, { mini: false });
+  check(good(L, CTL) && !L.row && L.overlaps.length === 0, "phone layout: with room again the stack stands in its column", L);
+  await page.evaluate(() => { for (const id of ["__sheet", "__toasts"]) { const e = document.getElementById(id); if (e) e.remove(); } __view.select(null); });
   noErrors(log, "phone");
+  await ctx.close();
+}
+
+// Rotation is a tested parameter of the iso projection with no UI: each quarter turn round-trips, keeps
+// the camera's tile, and focuses and picks a known building, with no console errors.
+async function runRotation(browser) {
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&dyn=0");
+  const tops = [];
+  for (const rot of [1, 2, 3, 0]) {
+    const r = await page.evaluate(async rot => {
+      const v = __view;
+      v.setCamera({ x: 33, y: 22, zoom: 1.5 }); v.frame();
+      const before = v.camera();
+      v.setMode({ projection: "iso", rot }); v.frame();
+      const after = v.camera(), p = v.scene().proj;
+      let err = 0;
+      for (const [x, y] of [[0, 0], [10, 5], [79, 49], [33.3, 12.7], [64, 3], [5, 44]]) {
+        const w = p.toWorld(x, y), t = p.toTile(w[0], w[1]);
+        err = Math.max(err, Math.abs(t[0] - x), Math.abs(t[1] - y));
+      }
+      const corners = [[0, 0], [p.w, 0], [p.w, p.h], [0, p.h]].map(([x, y]) => p.toWorld(x, y));
+      const top = corners.reduce((b, c, k) => c[1] < corners[b][1] ? k : b, 0); // the map corner drawn at the top
+      const ok = v.focus({ place: "bank" });
+      await new Promise(res => setTimeout(res, 1000));
+      const at = v.screenOf({ place: "bank" }), hit = at && v.pick(at[0], at[1]);
+      v.frame();
+      const c = document.getElementById("map"), g = c.getContext("2d"), seen = new Set();
+      for (let i = 0; i < 300; i++) { const d = g.getImageData((i * 97) % c.width, 60 + (i * 53) % (c.height - 60), 1, 1).data; seen.add(d[0] >> 4 << 8 | d[1] >> 4 << 4 | d[2] >> 4); }
+      return { rot: p.rot, kind: p.kind, err, before, after, top, ok, at, mid: __t.centre(), hit, colours: seen.size };
+    }, rot);
+    check(r.kind === "iso" && r.rot === rot, `rotation ${rot}: setMode({projection: "iso", rot}) turns the projection`, r);
+    check(r.err < 1e-6, `rotation ${rot}: toTile(toWorld(x, y)) round-trips`, r.err);
+    check(near(r.after.x, r.before.x, 0.5) && near(r.after.y, r.before.y, 0.5), `rotation ${rot}: the camera keeps its tile across the turn`, [r.before, r.after]);
+    tops.push(r.top);
+    check(r.ok && r.at && near(r.at[0], r.mid[0], 4) && near(r.at[1], r.mid[1], 4), `rotation ${rot}: focus lands on the bank`, r);
+    check(r.hit && r.hit.kind === "place" && r.hit.id === "bank", `rotation ${rot}: a click on the bank picks it`, r.hit);
+    check(r.colours > 12, `rotation ${rot}: the city is drawn`, r.colours);
+    await shot(page, `rot${rot}`);
+  }
+  check(new Set(tops).size === 4, "rotation: each quarter turn puts a different corner of the map at the top", tops);
+  noErrors(log, "rotation");
   await ctx.close();
 }
 
@@ -944,7 +1119,7 @@ async function runDashboard(browser) {
 }
 
 const RUNS = [["globals", runGlobals], ["bench", runBench], ["picking", runPicking], ["facade", runFacade], ["stages", runStages],
-  ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["dashboard", runDashboard]];
+  ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["rotation", runRotation], ["dashboard", runDashboard]];
 
 async function main() {
   const pw = findPlaywright();
