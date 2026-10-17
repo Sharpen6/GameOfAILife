@@ -1,6 +1,5 @@
-"""GameOfAILife: a tick-based simulation of agents living a life in a city."""
+"""GameOfAILife: a city of AI characters living full lives, watched over by God."""
 
-from .scenario import build_simulation
 from .sim import Simulation
 
-__all__ = ["Simulation", "build_simulation"]
+__all__ = ["Simulation"]

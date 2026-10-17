@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GameOfAILife</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>GameOfAILife</h1>
+    <div id="clock">Connecting…</div>
+    <div id="weather"></div>
+    <div id="speed" role="group" aria-label="Speed">
+      <button data-speed="0" title="Pause">⏸</button>
+      <button data-speed="1">1x</button>
+      <button data-speed="2">2x</button>
+      <button data-speed="4">4x</button>
+      <button data-speed="8">8x</button>
+      <button data-speed="16">16x</button>
+    </div>
+    <div id="role"></div>
+  </header>
+  <main>
+    <section id="world">
+      <canvas id="map" width="640" height="400"></canvas>
+      <div id="tooltip" hidden></div>
+      <p class="hint">Click a character or a building. You are God: you see everything, and the only thing you can change is luck.</p>
+    </section>
+    <aside>
+      <nav id="tabs">
+        <button data-tab="people" class="on">People</button>
+        <button data-tab="events">Events</button>
+        <button data-tab="forks">Decisions</button>
+      </nav>
+      <div id="tab-people" class="tab">
+        <ul id="roster"></ul>
+        <div id="detail" hidden></div>
+      </div>
+      <div id="tab-events" class="tab" hidden><ul id="events" class="feed"></ul></div>
+      <div id="tab-forks" class="tab" hidden><ul id="forks" class="feed"></ul></div>
+    </aside>
+  </main>
+  <script src="game.js"></script>
+</body>
+</html>

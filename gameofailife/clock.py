@@ -1,27 +1,32 @@
-"""Simulation time. One tick is a fixed slice of in-game minutes."""
+"""Game time. One tick is one in-game minute."""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
 
-MINUTES_PER_TICK = 15
-TICKS_PER_HOUR = 60 // MINUTES_PER_TICK
-TICKS_PER_DAY = 24 * TICKS_PER_HOUR
-DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+MINUTES_PER_DAY = 24 * 60
+DAYS_PER_SEASON = 90
+SEASONS = ("spring", "summer", "autumn", "winter")
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# At 1x speed one game day lasts about ten real minutes (like SimCity).
+TICKS_PER_REAL_SECOND = MINUTES_PER_DAY / 600
 
 
 @dataclass
 class Clock:
-    tick: int = 0
+    tick: int = 6 * 60  # the world starts on Monday at 06:00
 
     def advance(self) -> None:
         self.tick += 1
 
     @property
     def day(self) -> int:
-        return self.tick // TICKS_PER_DAY
+        return self.tick // MINUTES_PER_DAY
 
     @property
     def minute_of_day(self) -> int:
-        return (self.tick % TICKS_PER_DAY) * MINUTES_PER_TICK
+        return self.tick % MINUTES_PER_DAY
 
     @property
     def hour(self) -> float:
@@ -34,6 +39,10 @@ class Clock:
     @property
     def is_weekend(self) -> bool:
         return self.weekday >= 5
+
+    @property
+    def season(self) -> str:
+        return SEASONS[(self.day // DAYS_PER_SEASON) % 4]
 
     def stamp(self) -> str:
         m = self.minute_of_day
