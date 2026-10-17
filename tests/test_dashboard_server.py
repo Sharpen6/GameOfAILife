@@ -2,15 +2,17 @@
 watcher), the stats cadence, per-client coalescing (PLAN 3.14), and the God view's page.
 
 The real-time checks (a client reading 100 KB/s at 16x for 10 s; stats pushes 3 s apart at 1x, none while paused)
-run in a child process that starts when this module is imported, so their 10 s overlap the modules and tests
-that run before `CoalescingAndCadenceTest` collects the child's report (it runs last here). The child is
-`python3 -c` on `scenario_main()` below, with GOAL_DASHBOARD_SCENARIO=1 set, and can be run by hand the same way.
+run in a child process that starts when this module is imported, and `CoalescingAndCadenceTest` reads the child's
+report. load_tests holds that class's tests back until the whole run ends (see `_AtTheEnd`), so the child's 10 s
+overlap the rest of the suite instead of adding to it. The child is `python3 -c` on `scenario_main()` below, with
+GOAL_DASHBOARD_SCENARIO=1 set, and can be run by hand the same way.
 """
 
 from __future__ import annotations
 
 import asyncio
 import atexit
+import copy
 import json
 import os
 import socket
@@ -241,20 +243,26 @@ def _start_scenario() -> subprocess.Popen | None:
 
 
 SCENARIO = _start_scenario()
+_REPORT: dict = {}  # "report" once the child has answered, or "error" if it failed
+
+
+def scenario_report() -> dict:
+    """The child's report, waiting for it the first time."""
+    if SCENARIO is None:
+        raise unittest.SkipTest("this is the scenario's own process")
+    if not _REPORT:
+        out, err = SCENARIO.communicate(timeout=SCENARIO_SECONDS + 30)
+        _REPORT.update({"error": f"the scenario failed:\n{err}"} if SCENARIO.returncode else {"report": json.loads(out)})
+    if "error" in _REPORT:
+        raise AssertionError(_REPORT["error"])
+    return _REPORT["report"]
 
 
 class CoalescingAndCadenceTest(unittest.TestCase):
-    """PLAN 3.8 and 3.14 in real time; see the module docstring. load_tests runs it after this module's other
-    tests, which run meanwhile."""
+    """PLAN 3.8 and 3.14 in real time; see the module docstring. Its tests run when the whole run ends."""
 
-    @classmethod
-    def setUpClass(cls):
-        if SCENARIO is None:
-            raise unittest.SkipTest("this is the scenario's own process")
-        out, err = SCENARIO.communicate(timeout=SCENARIO_SECONDS + 30)
-        if SCENARIO.returncode:
-            raise AssertionError(f"the scenario failed:\n{err}")
-        cls.report = json.loads(out)
+    def setUp(self):
+        self.report = scenario_report()
 
     def test_a_100_kb_a_second_view_at_16x_is_kept_with_fresh_frames(self):
         slow = self.report["slow"]
@@ -501,13 +509,23 @@ class Client:
 
 
 class ServerCase(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.sim = Simulation(seed=1)
+    @classmethod
+    def setUpClass(cls):
+        # Built once and copied for each test, all outside the event loop: its debug mode reports any step that
+        # holds the loop for 0.1 s, and 600 steps do.
+        super().setUpClass()
+        sim = Simulation(seed=1)
         for _ in range(10 * 60):  # to 16:00: news, a headline or two, hourly samples
-            self.sim.step()
-        dana = self.sim.agents["dana"]
+            sim.step()
+        dana = sim.agents["dana"]
         for by in ("model", "timeout", "habit"):
-            self.sim._decide(dana, plain_fork("dana", self.sim.clock.tick), 1, by, "because")
+            sim._decide(dana, plain_fork("dana", sim.clock.tick), 1, by, "because")
+        cls.city = sim
+
+    def setUp(self):
+        self.sim = copy.deepcopy(self.city)
+
+    async def asyncSetUp(self):
         self.server = GameServer(self.sim, speed=0)
         self.port = await self.server.start("127.0.0.1", 0)
         self.clients: list[Client] = []
@@ -668,12 +686,42 @@ class TestPage(unittest.IsolatedAsyncioTestCase):
             await server.stop()
 
 
+class _AtTheEnd(unittest.TestSuite):
+    """Holds its tests back until the run ends. In the run it only wraps the result's stopTestRun, which
+    TextTestRunner (so `python3 -m unittest` in any form) calls once after all the tests: the held tests run there,
+    before the runner's own stopTestRun and its report, and count like any other. With any other result (a
+    caller that may never call stopTestRun), or in a debug run, they run in place. They run as bare test cases,
+    outside any suite's class and module fixtures (the run's last ones are torn down by then), so they need none."""
+
+    def _cases(self, suite):
+        for t in suite:
+            yield from (self._cases(t) if isinstance(t, unittest.TestSuite) else (t,))
+
+    def run(self, result, debug=False):
+        if debug or not isinstance(result, unittest.TextTestResult):
+            return super().run(result, debug)
+        stop = result.stopTestRun
+        held = list(self._cases(self))
+
+        def stop_test_run():
+            result.stopTestRun = stop
+            for test in held:
+                if result.shouldStop:
+                    break
+                test(result)
+            stop()
+
+        result.stopTestRun = stop_test_run
+        return result
+
+
 def load_tests(loader, tests, pattern):
-    """This module's tests, with the real-time report last: the child has the longest head start then."""
+    """This module's tests, with the real-time report's held until the whole run ends: by then the child is done
+    (when the suite outlasts it), or has had every other test's time as its head start."""
     rest, last = [], []
     for suite in tests:
         (last if any(isinstance(t, CoalescingAndCadenceTest) for t in suite) else rest).append(suite)
-    return unittest.TestSuite(rest + last)
+    return unittest.TestSuite(rest + [_AtTheEnd(last)])
 
 
 if __name__ == "__main__":

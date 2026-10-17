@@ -5,10 +5,11 @@
 //   node tests/browser/god_view_smoke.cjs
 //
 // At a desktop size (1440 x 900) and a phone size (390 x 844, touch) it checks: the page loads the view and the
-// dashboard with no console errors, the map is drawn, nothing scrolls sideways, a person can be selected from the
-// People ranking (the detail opens with the Owns block and a character page link) and Esc on the map clears the
-// selection (onSelect), the speed buttons reach the server, and a major event makes a News toast. The server is
-// told to make a major event every 2 s while a God view is connected, so the toast does not wait on luck.
+// dashboard with no console errors, the map is drawn, nothing scrolls sideways, the AI chip says nobody plays (the
+// phone too), a person can be selected from the People ranking (the detail opens with the Owns block and a
+// character page link) and Esc on the map clears the selection (onSelect), the speed buttons reach the server, and
+// a major event makes a News toast. The server is told to make a major event every 2 s while a God view is
+// connected, so the toast does not wait on luck.
 // A last run rewrites the welcome to the browser port's (host.kind "browser", no LLM log) on its way to the page:
 // the LLM log shows its empty state and no character page link is rendered.
 //
@@ -132,6 +133,10 @@ async function run(browser, base, name, size, touch) {
   const wide = await page.evaluate(() => ({ doc: document.documentElement.scrollWidth, body: document.body.scrollWidth,
     view: window.innerWidth }));
   check(wide.doc <= wide.view && wide.body <= wide.view, "no horizontal scroll", wide);
+
+  // Nobody plays this city: the AI chip says so as shown (innerText skips what the phone layout hides).
+  const ai = await page.evaluate(() => { const b = document.querySelector('#hud [data-k="ai"]'); return b && b.innerText.trim(); });
+  check(/^AI: nobody\b/.test(ai || "") && (touch || /nobody playing/.test(ai)), "the AI chip says nobody is playing", ai);
 
   // Select a person from the People ranking: the detail opens, with the Owns block and a character page link.
   await page.evaluate(() => Dash.openTab("people"));
