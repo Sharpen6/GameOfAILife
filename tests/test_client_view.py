@@ -2,7 +2,8 @@
 
 The view is a set of classic browser scripts that share one global, window.CityView. These tests keep
 it that way: every file is present, nothing uses ES module syntax, nothing reaches for the network or
-for image files (or data:image URIs), view.css styles only .cv-* classes, the dev fixture has the PLAN 3.2
+for image files (or data:image URIs), view.css styles only .cv-* classes, the page's ticker is marked for
+the view's labels to avoid, the view's stage palette is the dashboard's, the dev fixture has the PLAN 3.2
 and 3.3 shapes, and (when Node is installed) every script parses and the scripts define only CityView.
 With Node and Playwright installed and GOAL_SLOW=1, tests/browser/view_smoke.cjs runs the view in headless
 Chromium (about 80 s).
@@ -99,6 +100,25 @@ class ClientViewFiles(unittest.TestCase):
         text = (VIEW / "view.js").read_text()
         for name in FACADE:
             self.assertRegex(text, rf"\b{name}\b", f"view.js has no {name}")
+
+    def test_ticker_is_kept_clear_of_labels(self):
+        # name plates and badges keep off every element marked data-cv-avoid (review ART-4)
+        html = (ROOT / "client" / "index.html").read_text()
+        tag = re.search(r"<div\s+id=\"ticker\"[^>]*>", html)
+        self.assertIsNotNone(tag, "client/index.html has no #ticker")
+        self.assertRegex(tag.group(0), r"\sdata-cv-avoid\b", "the ticker is not marked data-cv-avoid")
+
+    def test_stage_palette_is_the_dashboards(self):
+        # one Condition palette for the map overlay, the minimap and the dashboard's legends (review H6)
+        palette = re.compile(r"const STAGE_COLOR = (\[[^\]]*\])")
+        dash = palette.search((ROOT / "client" / "dashboard.js").read_text())
+        own = re.search(r"CV\.STAGE_COLORS = (\[[^\]]*\])", (VIEW / "art.js").read_text())
+        self.assertIsNotNone(dash, "dashboard.js has no STAGE_COLOR")
+        self.assertIsNotNone(own, "art.js has no CV.STAGE_COLORS")
+        self.assertEqual(json.loads(own.group(1)), json.loads(dash.group(1)))
+        for name in VIEW_SCRIPTS:
+            if name != "art.js":
+                self.assertNotRegex((VIEW / name).read_text(), r"STAGE_COLS?\s*=", f"{name} keeps a stage palette of its own")
 
     def test_dev_page_loads_every_script(self):
         html = (DEV / "view.html").read_text()

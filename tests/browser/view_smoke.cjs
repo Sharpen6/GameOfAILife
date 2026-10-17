@@ -8,7 +8,8 @@
 // - globals: on a blank page the nine scripts add only window.CityView and the view adds no global of its
 //   own while it runs; every facade method exists; CityView.shirt and .hair use game.js's formulas; the
 //   page loads nothing but its own files and opens no socket; setMode before setTown is kept and stored;
-//   frames sent before setTown keep their lots and homes; camera() has exactly the 3.12 keys
+//   frames sent before setTown keep their lots and homes; camera() has exactly the 3.12 keys; the view's
+//   stage palette (CityView.stageColors, STAGE_COLORS) is dashboard.js's STAGE_COLOR
 // - bench: the median draw is under 4 ms at zoom 1 on 1440x900 over 120 frames, in iso and in flat, both
 //   with no console errors, and the view never pings on its own
 // - picking: real clicks hit a known agent (ev {cssX, cssY, touch}), a roof in front of a pedestrian (then
@@ -22,8 +23,9 @@
 //   setInset, setMode, camera(), onCamera, stop/start, and setState keeping lots and homes it was not sent
 //   (across a second setTown too)
 // - stages: all five neglect stages on screen at zoom 2, pixel-distinct on the one-palette specimen street;
-//   SALE / RENT / LET boards and moving vans on the camera-nearest road-touching lot tile (a board steps
-//   off it only for the van, or for a car parked on the driveway while its owner is home)
+//   SALE / RENT / LET boards and moving vans on the camera-nearest road-touching lot tile where a board
+//   shows (a board steps off it only for the van, or for a car parked on the driveway while its owner is
+//   home); 55 Main Street's board and van, which the Grand Arcade hid, show at zoom 1, 2 and 3
 // - persistence: localStorage["goal.view"] keeps the projection and camera (never the rotation), and a
 //   throwing localStorage costs nothing
 // - today's 40 x 25 town and its state (one bus at state.bus) load and draw in iso and flat
@@ -34,7 +36,15 @@
 //   keeps its tile, focus and picking find a known building, and nothing logs an error
 // - long task: pings made late in long main-thread tasks (a frame dated before the ping) never stop the
 //   map, and a page hook that throws in a frame reaches the page as an error but the map keeps drawing
-// - the dashboard's dev page with the real view (?view=real) runs with no errors and no failed view calls
+// - movers: a car turning a corner keeps to the road and a walker to the pavement and paths through every
+//   frame of an L-shaped move; a household walking one street keeps apart; two buses meeting at a junction
+//   or head-on never overlap (one gives way) and both get through, in their own lanes
+// - night: headlights behind a nearer building are hidden by it, like the lamp pools
+// - ticker: no name plate or badge is drawn under the page's ticker (it carries data-cv-avoid); without the
+//   mark the same sweep does draw there
+// - plane: the plane is outlined dark and drawn at its altitude over the city
+// - the dashboard's dev page with the real view (?view=real) runs with no errors and no failed view calls;
+//   the minimap's Homes legend and colours are the dashboard's Condition colours
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
 // browser it can launch, the test prints SKIP and exits 0. Set VIEW_SHOTS=<folder> to also save screenshots.
@@ -258,6 +268,22 @@ function HELPERS() {
     // draw until no ground chunk is left to build; returns the count built so far
     warm(max) { const s = __view.scene(); let b = -1; for (let i = 0; i < (max || 60) && b !== s.stats.built; i++) { b = s.stats.built; __view.frame(); __view.frame(); } return s.stats.built; },
     lastPick() { const c = __calls.pick; return c.length ? c[c.length - 1] : null; },
+    // a frame taken in as if it came at time T (performance.now() reads T meanwhile), for frames drawn at
+    // chosen times with __view.frame(T)
+    pushAt(st, T) { const pn = performance.now; performance.now = () => T; try { __push(st); } finally { performance.now = pn; } },
+    // a frame with everyone alive at home and no buses (a quiet city to move a few people and buses in)
+    quiet(dt) {
+      const st = __state();
+      st.tick += dt; st.buses = []; st.plane = null;
+      for (const a of st.agents) if (a.alive !== false) Object.assign(a, { inside: a.home, riding: null, vehicle: "walk", state: "busy", activity: "relax_home" });
+      return st;
+    },
+    // where a mover is drawn, in tile units: a vehicle's centre, a person's feet
+    tileOf(id) {
+      const s = __view.scene(), m = s.movers.find(q => q.id === id && q.kind !== "parked");
+      if (!m) return null;
+      return m.kind === "person" ? s.proj.toTile(m.wx + 8, m.wy + 28) : s.proj.toTile(m.cx, m.cy);
+    },
   };
 }
 
@@ -320,7 +346,8 @@ async function runGlobals(browser) {
     return { added, missing, keys0, keys1: Object.keys(view.camera()), kept, cv: ["create", "shirt", "hair", "stageOf"].filter(n => typeof CV[n] !== "function"), proj: view.camera().projection,
       stored: localStorage.getItem("goal.view"), ctl: !!host.querySelector(":scope > .cv-ctl"), chip: !!host.querySelector(":scope > .cv-follow"),
       mini: !!host.querySelector(":scope > .cv-minimap"), ids: CITY_FIXTURE.state.agents.map(a => a.id),
-      colours: CITY_FIXTURE.state.agents.map(a => [CV.shirt(a.id), CV.hair(a.id)]) };
+      colours: CITY_FIXTURE.state.agents.map(a => [CV.shirt(a.id), CV.hair(a.id)]),
+      stages: typeof CV.stageColors === "function" ? CV.stageColors() : null, STAGES: CV.STAGE_COLORS };
   }, FACADE);
   check(g.added.length === 1 && g.added[0] === "CityView", "globals: the nine scripts define only window.CityView", g.added);
   check(g.missing.length === 0, "globals: every facade method exists", g.missing);
@@ -336,6 +363,10 @@ async function runGlobals(browser) {
   check(stored && stored.projection === "flat", "globals: setMode before setTown is stored in goal.view", g.stored);
   const bad = g.ids.filter((id, i) => g.colours[i][0] !== gameShirt(id) || g.colours[i][1] !== gameHair(id));
   check(bad.length === 0, "globals: CityView.shirt and CityView.hair match game.js", bad.slice(0, 5));
+  // one stage palette (review H6): without the dashboard on the page the view's own copy is the dashboard's
+  const dashStages = (fs.readFileSync(path.join(CLIENT, "dashboard.js"), "utf8").match(/const STAGE_COLOR = (\[[^\]]*\])/) || [])[1];
+  check(!!dashStages && JSON.stringify(g.stages) === JSON.stringify(JSON.parse(dashStages)) && JSON.stringify(g.STAGES) === JSON.stringify(g.stages),
+    "globals: CityView.stageColors() and CityView.STAGE_COLORS are the dashboard's STAGE_COLOR", { view: g.stages, own: g.STAGES, dashboard: dashStages });
   await page.waitForTimeout(700);
   const later = await page.evaluate(() => {
     const before = new Set(window.__before);
@@ -809,17 +840,19 @@ async function runStages(browser) {
   });
   const vans = lots.filter(l => l.van), signs = lots.filter(l => l.sign);
   check(vans.length >= 1 && signs.length >= 2, "lots: the fixture has moving vans and boards to check", { vans: vans.map(l => l.id), signs: signs.map(l => l.id) });
+  // a tile where a nearer building would hide most of a board (hidden) is passed over while another shows
+  const shows = ts => { const o = ts.filter(t => !t.hidden); return o.length ? o : ts; };
   for (const l of lots) {
-    const top = Math.max(...l.front.map(t => t.depth));
+    const top = Math.max(...shows(l.front).map(t => t.depth));
     check(l.touch && l.inLot, `lots ${l.id}: the candidate tiles are off the footprint and touch a road`, l.front);
-    if (l.van) check(l.van[0] === l.front[0].x && l.van[1] === l.front[0].y && l.front[0].depth === top, `lots ${l.id}: the van stands on the camera-nearest road lot tile`, l);
+    if (l.van) check(l.van[0] === l.front[0].x && l.van[1] === l.front[0].y && l.front[0].depth === top && shows(l.front).includes(l.front[0]), `lots ${l.id}: the van stands on the camera-nearest road lot tile where a board shows`, l);
     if (l.sign) {
       // front[0], unless the van stands there or a car is parked on it (a driveway while the owner is home)
       const t = l.front.find(q => q.x === l.sign[0] && q.y === l.sign[1]);
-      const rest = l.front.filter(q => !(l.van && q.x === l.van[0] && q.y === l.van[1]) && !(l.car && q.drive));
+      const rest = shows(l.front.filter(q => !(l.van && q.x === l.van[0] && q.y === l.van[1]) && !(l.car && q.drive)));
       const best = rest.length ? Math.max(...rest.map(q => q.depth)) : top;
       check(!!t && t.depth >= best && (!rest.length || rest.includes(t)), `lots ${l.id}: the board stands on the camera-nearest road lot tile the van or a parked car leaves`, l);
-      if (!l.van && !l.car) check(t === l.front[0], `lots ${l.id}: with no van and no parked car the board stands on the camera-nearest road lot tile`, l);
+      if (!l.van && !l.car) check(t === l.front[0], `lots ${l.id}: with no van and no parked car the board stands on the camera-nearest road lot tile where it shows`, l);
     }
   }
   // a listed house whose camera-nearest road lot tile is its driveway: the board stands there until a car
@@ -850,6 +883,51 @@ async function runStages(browser) {
   if (check(!!car, "lots: a listed house's nearest road lot tile is its driveway", car)) {
     check(car.parked.car && car.cars === 1 && car.parked.sign !== car.f0, "lots: a car parked on the driveway moves the board to the next road lot tile", car);
     check(!car.gone.car && car.gone.sign === car.f0, "lots: when the car leaves the board stands on the driveway tile again", car);
+  }
+  // 55 Main Street (review H5): the Grand Arcade hides most of a board on its camera-nearest road lot tile,
+  // so the board and the moving van stand on the next one, where they read. The lot drawn with and without
+  // each at zoom 1, 2 and 3: at least 60% of the board's pixels, and of the van's, show
+  const sale = await page.evaluate(() => {
+    const v = __view, s = v.scene(), id = "main_55", home = s.town.homes.find(h => h.place === id);
+    if (!home || !s.lotSpots(id)) return null;
+    const area = spr => { const d = spr.c.getContext("2d").getImageData(0, 0, spr.c.width, spr.c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] >= 200) n++; return n; };
+    const front = s.lotSpots(id).front, road = front[0].road;
+    const out = { front, board: area(s.art.sign("sale")), van: area(s.art.van(road === "n" || road === "s" ? 0 : 1)), zooms: [] };
+    v.stop();
+    let n = 0;
+    const draw = (listing, moving) => {
+      const st = __t.quiet(30000 + n++);
+      st.homes[home.id] = Object.assign({}, st.homes[home.id], { listing });
+      st.lots[id] = Object.assign({}, st.lots[id], { moving });
+      __push(st); v.settle(); __t.warm(); v.frame(1e7);
+    };
+    const changed = (a, b) => { let c = 0; for (let i = 0; i < a.data.length; i += 4) if (Math.abs(a.data[i] - b.data[i]) + Math.abs(a.data[i + 1] - b.data[i + 1]) + Math.abs(a.data[i + 2] - b.data[i + 2]) >= 30) c++; return c; };
+    for (const zoom of [1, 2, 3]) {
+      const ws = front.map(t => s.proj.toWorld(t.x + 0.5, t.y + 0.5)), c = v.cam();
+      c.x = ws.reduce((m, w) => m + w[0], 0) / ws.length; c.y = ws.reduce((m, w) => m + w[1], 0) / ws.length; c.zoom = zoom;
+      draw(null, false);
+      const a = s.worldToCss(Math.min(...ws.map(w => w[0])) - 48, Math.min(...ws.map(w => w[1])) - 56), b = s.worldToCss(Math.max(...ws.map(w => w[0])) + 48, Math.max(...ws.map(w => w[1])) + 24);
+      const grab = () => __t.grab(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+      const bare = grab();
+      draw("for_sale", false);
+      const board = changed(bare, grab()), sign = s.lotSpots(id).sign;
+      draw(null, true);
+      const van = changed(bare, grab()), at = s.lotSpots(id).van;
+      out.zooms.push({ zoom, sign, board, at, van });
+    }
+    draw("for_sale", false);
+    v.start();
+    return out;
+  });
+  if (check(!!sale, "lots: the fixture has 55 Main Street", sale)) {
+    check(sale.front.some(t => t.hidden) && !sale.front[0].hidden && sale.front.every((t, n) => !n || sale.front[n - 1].hidden <= t.hidden),
+      "lots main_55: the road lot tile the Grand Arcade hides goes after those where a board shows", sale.front);
+    console.log(`  main_55: board ${sale.board} px, van ${sale.van} px; shown at zoom 1, 2, 3: board ${sale.zooms.map(q => q.board).join(", ")}, van ${sale.zooms.map(q => q.van).join(", ")}`);
+    for (const q of sale.zooms) {
+      const z2 = q.zoom * q.zoom;
+      check(q.board >= 0.6 * sale.board * z2, `lots main_55: its SALE board shows at zoom ${q.zoom}`, { ...q, boardPx: sale.board });
+      check(q.van >= 0.6 * sale.van * z2, `lots main_55: its moving van shows at zoom ${q.zoom}`, { ...q, vanPx: sale.van });
+    }
   }
   noErrors(log, "stages");
   await ctx.close();
@@ -1175,6 +1253,204 @@ async function runLongTask(browser) {
   }
 }
 
+// Moving things keep to where they may go (review ART-1, ART-3, ART-5, ART-6), on frames sent at chosen times
+// and drawn every 10.5 ms of each 417 ms tick:
+// - a car leaving its driveway diagonally turns onto the road instead of sliding along the lawn, and its next
+//   diagonal move runs down the road instead of through the house beside it
+// - a walker stepping diagonally in a park goes round the tree tile, not through it
+// - a household walking the same pavement together is drawn one behind another, never on one spot
+// - two buses crossing at a junction on the same minute never overlap (one waits short of the crossing and
+//   catches up without a jump), and two passing head-on keep to their lanes
+async function runMovers(browser) {
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0&hud=0&minimap=0&zoom=2&at=15,26");
+  const r = await page.evaluate(() => {
+    const v = __view, s = v.scene(), T = s.town;
+    v.stop();
+    const line = (x0, y0, dx, dy, n) => [...Array(n)].map((_, k) => [x0 + dx * k, y0 + dy * k]);
+    const people = {
+      ben: { veh: "car", path: [[14, 26], [15, 25], [16, 28], [16, 31]] }, // main_29's driveway onto Main Street, then south
+      neta: { veh: "walk", path: [[18, 5], [19, 4], [20, 5], [21, 4]] },  // Maple Park, round the trees at (19, 5) and (21, 5)
+      dana: { veh: "walk", path: line(20, 25, 1, 0, 6) }, yossi: { veh: "walk", path: line(20, 25, 1, 0, 6) }, noa: { veh: "walk", path: line(20, 25, 1, 0, 6) },
+    };
+    const buses = { "1a": { line: "1", dir: "e", path: line(-1, 25, 1, 0, 10) }, "2a": { line: "2", dir: "n", path: line(3, 29, 0, -1, 10) },
+      "1b": { line: "1", dir: "w", path: line(51, 36, -1, 0, 10) }, "2b": { line: "2", dir: "e", path: line(43, 36, 1, 0, 10) } };
+    const ext = d => d === "e" || d === "w" ? [0.725, 0.21] : [0.21, 0.725];
+    const tileAt = p => (T.tiles[Math.floor(p[1])] || "")[Math.floor(p[0])];
+    const out = { car: [], walk: [], family: Infinity, junction: -Infinity, headon: -Infinity, step: 0, samples: 0 };
+    const last = {};
+    for (let k = 0; k < 10; k++) {
+      const st = __t.quiet(5000 + k), t = 1e7 + k * 417;
+      for (const [id, m] of Object.entries(people)) {
+        const [x, y] = m.path[Math.min(k, m.path.length - 1)];
+        Object.assign(st.agents.find(a => a.id === id), { x, y, inside: null, vehicle: m.veh, state: "travelling", activity: "commute" });
+      }
+      st.buses = Object.entries(buses).map(([id, b]) => ({ id, line: b.line, x: b.path[k][0], y: b.path[k][1], dir: b.dir, at_stop: null, riders: 0 }));
+      __t.pushAt(st, t);
+      for (let j = 0; j < 40; j++) {
+        v.frame(t + j * 10.5);
+        out.samples++;
+        const car = __t.tileOf("ben"), c = tileAt(car);
+        if (c !== "#" && !(Math.floor(car[0]) === 14 && Math.floor(car[1]) === 26)) out.car.push([k, j, car.map(q => +q.toFixed(2)), c]);
+        const w = __t.tileOf("neta"), cw = tileAt(w);
+        if (!".#Pe".includes(cw)) out.walk.push([k, j, w.map(q => +q.toFixed(2)), cw]);
+        if (k >= 1 && k <= 5) {
+          const fam = ["dana", "yossi", "noa"].map(id => { const m = s.movers.find(q => q.id === id); return s.worldToCss(m.wx + 8, m.wy + 28); });
+          for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) out.family = Math.min(out.family, Math.hypot(fam[a][0] - fam[b][0], fam[a][1] - fam[b][1]));
+        }
+        const P = {};
+        for (const id of Object.keys(buses)) {
+          P[id] = __t.tileOf(id);
+          if (last[id]) out.step = Math.max(out.step, Math.hypot(P[id][0] - last[id][0], P[id][1] - last[id][1]));
+          last[id] = P[id];
+        }
+        const overlap = (a, b) => { const ea = ext(buses[a].dir), eb = ext(buses[b].dir); return Math.min(ea[0] + eb[0] - Math.abs(P[a][0] - P[b][0]), ea[1] + eb[1] - Math.abs(P[a][1] - P[b][1])); };
+        out.junction = Math.max(out.junction, overlap("1a", "2a"));
+        out.headon = Math.max(out.headon, overlap("1b", "2b"));
+      }
+    }
+    out.end = { "1a": __t.tileOf("1a"), "2a": __t.tileOf("2a") };
+    return out;
+  });
+  check(r.samples === 400, "movers: 400 frames drawn", r.samples);
+  check(r.car.length === 0, "movers: a car leaving its driveway diagonally keeps to the road (never the lawn or the house)", r.car.slice(0, 6));
+  check(r.walk.length === 0, "movers: a walker stepping diagonally in a park goes round the trees", r.walk.slice(0, 6));
+  check(r.family >= 8, "movers: a family walking the same pavement is drawn one behind another (8 px apart or more at zoom 2)", r.family);
+  check(r.junction <= 0, "movers: two buses crossing at a junction on the same minute never overlap", r.junction);
+  check(r.headon <= 0, "movers: two buses passing head-on keep to their lanes", r.headon);
+  check(r.step < 0.1, "movers: a bus that waits at a crossing catches up without a jump (tiles per 10.5 ms)", r.step);
+  check(r.end["1a"][0] > 6 && r.end["2a"][1] < 22, "movers: both buses have crossed by the end", r.end);
+  await shot(page, "movers");
+  noErrors(log, "movers");
+  await ctx.close();
+}
+
+// Night (review ART-2): headlight cones are cut by the buildings nearer the camera, like the lamp pools. A
+// car and a bus driving west behind the Savings Bank leave the bank's roof and walls as they are; a car in
+// an open street still lights the road ahead.
+async function runNight(browser) {
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0&hud=0&minimap=0&zoom=2&at=46,27&minute=180");
+  const r = await page.evaluate(() => {
+    const v = __view, s = v.scene();
+    v.stop();
+    const frame = (on, k) => {
+      const st = __t.quiet(7000 + k);
+      if (on) {
+        Object.assign(st.agents.find(a => a.id === "ben"), { x: 47 - k, y: 25, inside: null, vehicle: "car", state: "travelling", activity: "commute" });
+        Object.assign(st.agents.find(a => a.id === "yossi"), { x: 47 + k, y: 36, inside: null, vehicle: "car", state: "travelling", activity: "commute" });
+        st.buses = [{ id: "2c", line: "2", x: 50 - k, y: 25, dir: "w", at_stop: null, riders: 3 }];
+      }
+      return st;
+    };
+    const T = 1e7 + 417 + 400;
+    __t.pushAt(frame(true, 0), 1e7); __t.pushAt(frame(true, 1), 1e7 + 417);
+    v.frame(T); __t.warm(); v.frame(T);
+    const rec = s.buildingOf("bank"), z = s.cam.zoom * s.dpr, c = __t.spriteRect("bank");
+    const bank = () => __t.grab(c[0], c[1], rec.b.c.width * z / s.dpr, rec.b.c.height * z / s.dpr);
+    const road = () => { const a = v.cssOfTile(49.5, 36.5); return __t.grab(a[0] - 40, a[1] - 24, 80, 48); };
+    const lit = s.movers.filter(m => m.lights != null && m.moving).map(m => m.id).sort();
+    const a = bank(), ra = road();
+    __t.pushAt(frame(false, 2), 1e7 + 2 * 417);
+    v.frame(T);
+    const b = bank(), rb = road();
+    // the bank's own pixels (its sprite's opaque ones) that the vehicles' lights changed
+    const mask = rec.b.c.getContext("2d").getImageData(0, 0, rec.b.c.width, rec.b.c.height).data;
+    let n = 0, tot = 0;
+    for (let y = 0; y < a.height; y++) for (let x = 0; x < a.width; x++) {
+      const fx = Math.floor(x / z), fy = Math.floor(y / z);
+      if (fx >= rec.b.c.width || fy >= rec.b.c.height || mask[(fy * rec.b.c.width + fx) * 4 + 3] < 200) continue;
+      tot++;
+      const i = (y * a.width + x) * 4;
+      if (Math.abs(a.data[i] - b.data[i]) > 6 || Math.abs(a.data[i + 1] - b.data[i + 1]) > 6 || Math.abs(a.data[i + 2] - b.data[i + 2]) > 6) n++;
+    }
+    return { lit, bank: n, of: tot, road: __t.changed(ra, rb, 10), night: s.nightAlpha(s.minute) };
+  });
+  check(r.night === 1 && JSON.stringify(r.lit) === JSON.stringify(["2c", "ben", "yossi"]), "night: it is night and three vehicles have their lights on", r);
+  check(r.of > 10000 && r.bank <= 10, "night: headlights behind the Savings Bank never light its roof or walls", r);
+  check(r.road > 300, "night: a car in an open street still lights the road ahead", r.road);
+  await shot(page, "night");
+  noErrors(log, "night");
+  await ctx.close();
+}
+
+// The ticker (review ART-4): client/index.html marks the dashboard's #ticker data-cv-avoid, so name plates
+// and badges keep clear of it. The ticker is copied from index.html into the dev page, bottom-left as the
+// dashboard places it; a camera sweep records every label drawn and none lands under it (and, as a control,
+// the same sweep with the mark taken off does put labels there).
+async function runTicker(browser) {
+  const html = fs.readFileSync(path.join(CLIENT, "index.html"), "utf8");
+  const tag = (html.match(/<div\s+id="ticker"[^>]*>/) || [""])[0];
+  check(!!tag, "ticker: client/index.html has #ticker", tag);
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0");
+  await page.evaluate(tag => {
+    document.getElementById("world").insertAdjacentHTML("beforeend", tag + "</div>");
+    const t = document.getElementById("ticker");
+    t.style.cssText = "position:absolute;left:8px;bottom:8px;z-index:5;width:560px;height:34px;background:rgba(20,24,34,.8)";
+  }, tag);
+  const sweep = () => page.evaluate(async () => {
+    const v = __view, s = v.scene(), g = document.getElementById("map").getContext("2d"), k = s.dpr;
+    v.stop();
+    await new Promise(res => setTimeout(res, 300));
+    v.frame(); // takes in the page's marked elements (refreshed every 250 ms)
+    const r = document.getElementById("ticker").getBoundingClientRect(), cr = document.getElementById("map").getBoundingClientRect();
+    const box = [(r.left - cr.left) * k, (r.top - cr.top) * k, (r.right - cr.left) * k, (r.bottom - cr.top) * k];
+    const orig = g.fillText;
+    let all = 0, under = [];
+    g.fillText = function (text, x, y) { all++; if (x >= box[0] && x <= box[2] && y >= box[1] - 6 * k && y <= box[3] + 6 * k) under.push(text); return orig.apply(this, arguments); };
+    try {
+      for (const zoom of [1, 1.5, 2]) for (let ty = 4; ty < 50; ty += 3) for (let tx = 4; tx < 80; tx += 4) { v.setCamera({ x: tx, y: ty, zoom }); v.frame(performance.now()); }
+    } finally { g.fillText = orig; }
+    return { all, under: under.length, sample: [...new Set(under)].slice(0, 6) };
+  });
+  const marked = await sweep();
+  check(/\bdata-cv-avoid\b/.test(tag) && marked.all > 500 && marked.under === 0, "ticker: no name plate or badge is drawn under the ticker", { tag, marked });
+  await page.evaluate(() => document.getElementById("ticker").removeAttribute("data-cv-avoid"));
+  const bare = await sweep();
+  check(bare.under > 0, "ticker: (control) without the mark the same sweep does draw labels there", bare);
+  noErrors(log, "ticker");
+  await ctx.close();
+}
+
+// The plane (review ART-7): outlined dark so it reads as a craft overhead over pale roofs, at its altitude.
+async function runPlane(browser) {
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0&hud=0&minimap=0&zoom=1");
+  const r = await page.evaluate(() => {
+    const v = __view, s = v.scene(), spr = s.art.plane().c, d = spr.getContext("2d").getImageData(0, 0, spr.width, spr.height).data, W = spr.width, H = spr.height;
+    // every opaque pixel on the sprite's edge is dark
+    const A = (x, y) => x < 0 || y < 0 || x >= W || y >= H ? 0 : d[(y * W + x) * 4 + 3];
+    let edge = 0, light = 0;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (A(x, y) < 200 || Math.min(A(x - 1, y), A(x + 1, y), A(x, y - 1), A(x, y + 1)) >= 40) continue;
+      edge++;
+      const i = (y * W + x) * 4;
+      if (0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2] >= 90) light++;
+    }
+    // over the city at zoom 1 (over a bus shelter, as the review saw it), 420 px up
+    v.stop();
+    const prog = 0.583, tx = -12 + prog * 104, ty = 20 + prog * 10, top = s.proj.toWorld(tx, ty, 420);
+    const c = v.cam(); c.x = top[0]; c.y = top[1]; c.zoom = 1;
+    const st = __t.quiet(9000);
+    __t.pushAt(st, 1e7); __t.warm(); v.frame(1e7 + 100);
+    const at = s.worldToCss(top[0], top[1]), grab = () => __t.grab(at[0] - 40, at[1] - 30, 80, 60);
+    const a = grab();
+    const st2 = __t.quiet(9001); st2.plane = { progress: prog, flight: "08:00 Riverton to Lakeside" };
+    __t.pushAt(st2, 1e7 + 417); v.frame(1e7 + 500);
+    const b = grab();
+    let dark = 0, changed = 0, sx = 0, sy = 0;
+    for (let y = 0; y < b.height; y++) for (let x = 0; x < b.width; x++) {
+      const i = (y * b.width + x) * 4;
+      if (Math.abs(a.data[i] - b.data[i]) + Math.abs(a.data[i + 1] - b.data[i + 1]) + Math.abs(a.data[i + 2] - b.data[i + 2]) < 30) continue;
+      changed++; sx += x; sy += y;
+      if (0.3 * b.data[i] + 0.59 * b.data[i + 1] + 0.11 * b.data[i + 2] < 70) dark++;
+    }
+    return { edge, light, changed, dark, centre: changed ? [sx / changed - 40, sy / changed - 30].map(q => +q.toFixed(1)) : null };
+  });
+  check(r.edge > 50 && r.light === 0, "plane: the sprite has a dark outline all round", r);
+  check(r.changed > 300 && r.dark > 60, "plane: over the city at zoom 1 it is drawn with its dark outline", r);
+  check(r.centre && Math.abs(r.centre[0]) < 8 && Math.abs(r.centre[1]) < 8, "plane: it flies at its altitude (420 world px up)", r.centre);
+  noErrors(log, "plane");
+  await ctx.close();
+}
+
 // The dashboard's dev page with the real view: every call the dashboard makes goes through.
 async function runDashboard(browser) {
   if (!fs.existsSync(path.join(CLIENT, "dev", "dashboard.html"))) return;
@@ -1201,13 +1477,33 @@ async function runDashboard(browser) {
   const failed = log.warnings.filter(w => /view\.\w+ failed/.test(w));
   check(failed.length === 0, "dashboard: no view call fails", failed.slice(0, 3));
   await shot(page, "dashboard");
+  // the minimap's Homes colours are the dashboard's Condition colours (review H6): its legend and the homes
+  // drawn on it, zoomed out to 0.5 where it colours them by itself
+  await page.waitForFunction(() => !devView.cam().busy(), null, { timeout: 5000 }).catch(() => {});
+  await page.evaluate(() => {
+    const box = document.querySelector(".cv-minimap");
+    if (box && box.classList.contains("cv-collapsed")) box.querySelector(".cv-minimap-toggle").click();
+    devView.setCamera({ zoom: 0.5 });
+  });
+  await page.waitForTimeout(700);
+  const mm = await page.evaluate(() => {
+    const ramp = Dash.RAMPS.condition, s = devView.scene(), box = document.querySelector(".cv-minimap");
+    const rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+    const swatches = [...box.querySelectorAll(".cv-minimap-swatch")].map(e => getComputedStyle(e).backgroundColor);
+    const c = box.querySelector(".cv-minimap-canvas"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    const px = ramp.map(h => { const [r, g, b] = rgb(h); let n = 0; for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - r) + Math.abs(d[i + 1] - g) + Math.abs(d[i + 2] - b) <= 6) n++; return n; });
+    const stages = [...new Set(s.town.places.filter(p => p.kind === "home").map(p => (s.looks[p.id] || {}).stage | 0))].sort();
+    return { ramp, want: ramp.map(h => `rgb(${rgb(h).join(", ")})`), swatches, px, stages, homes: box.classList.contains("cv-homes"), zoom: devView.camera().zoom };
+  });
+  check(JSON.stringify(mm.swatches) === JSON.stringify(mm.want), "dashboard: the minimap's legend uses the dashboard's Condition colours", mm);
+  check(mm.homes && mm.stages.length >= 3 && mm.stages.every(k => mm.px[k] > 0), "dashboard: the minimap draws each home stage in the dashboard's Condition colour", mm);
   noErrors(log, "dashboard with the real view");
   await ctx.close();
 }
 
 const RUNS = [["globals", runGlobals], ["bench", runBench], ["picking", runPicking], ["facade", runFacade], ["stages", runStages],
   ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["rotation", runRotation], ["long task", runLongTask],
-  ["dashboard", runDashboard]];
+  ["movers", runMovers], ["night", runNight], ["ticker", runTicker], ["plane", runPlane], ["dashboard", runDashboard]];
 
 async function main() {
   const pw = findPlaywright();

@@ -2,8 +2,9 @@
 // with dots for people and buses and the camera's view box redrawn at 5 Hz. Click or drag to centre the
 // camera there. 200 px wide on desktop, 140 px on phones and short screens, where it starts collapsed and
 // collapses again when the view shrinks into that size (unless the user opened it there). The "Homes"
-// overlay colours every home by neglect stage (kept green to derelict red); it is on by itself while the
-// camera is zoomed out to 0.5 or less, where the stages are too small to read on the map.
+// overlay colours every home by neglect stage (kept green to derelict red) in the dashboard's Condition
+// colours, so the minimap, the map overlay and its legend agree; it is on by itself while the camera is
+// zoomed out to 0.5 or less, where the stages are too small to read on the map.
 // Classic script on window.CityView.
 "use strict";
 (function () {
@@ -11,8 +12,7 @@
   const KIND_COL = { home: "#c98a5a", office: "#7f9fc6", townhall: "#d8cfb8", hospital: "#eef0f2", school: "#c0644a", market: "#e0a040",
     cafe: "#d07aa0", shop: "#b88ad8", bank: "#c8c0a8", works: "#8a8478" };
   const STYLE_COL = { apartments: "#b07a62", big_house: "#e0c49a" };
-  const STAGE_COL = ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"];
-  CV.STAGE_COLORS = STAGE_COL;
+  const OTHER_COL = "#55585e"; // buildings other than homes under the Homes overlay, darker than worn grey
   const USE_COL = { 1: "#7fc65a", 2: "#8a7a44", 3: "#6a6e76", 4: "#8f8c84" };
 
   CV.makeMinimap = function (host, scene, cam, opt) {
@@ -30,7 +30,7 @@
     legend.setAttribute("aria-label", "Homes by condition, kept to derelict");
     const lab = t => { const s = document.createElement("span"); s.className = "cv-minimap-legend-label"; s.textContent = t; return s; };
     legend.appendChild(lab("kept"));
-    for (const col of STAGE_COL) { const s = document.createElement("span"); s.className = "cv-minimap-swatch"; s.style.background = col; legend.appendChild(s); }
+    const swatches = CV.stageColors().map(col => { const s = document.createElement("span"); s.className = "cv-minimap-swatch"; s.style.background = col; legend.appendChild(s); return s; });
     legend.appendChild(lab("derelict"));
     box.appendChild(c); box.appendChild(legend); box.appendChild(head);
     host.appendChild(box);
@@ -77,8 +77,9 @@
       const col = { ".": S.grass, "#": "#5d6068", P: S.park, T: S.leaf[1], e: "#b8b0a0", "~": "#3a78b8", B: "#a08870", D: "#a08870" };
       const pidx = new Map(), byId = new Map(t.places.map(p => [p.id, p]));
       t.places.forEach(p => { for (let y = p.y; y < p.y + p.h; y++) for (let x = p.x; x < p.x + p.w; x++) pidx.set(y * t.w + x, p); });
-      const looks = scene.looks || {};
-      const stageCol = p => STAGE_COL[Math.max(0, Math.min(4, ((looks[p.id] || {}).stage) | 0))];
+      const looks = scene.looks || {}, stages = CV.stageColors();
+      swatches.forEach((e, k) => { e.style.background = stages[k]; }); // the dashboard may have come after the view
+      const stageCol = p => stages[Math.max(0, Math.min(4, ((looks[p.id] || {}).stage) | 0))];
       for (let y = 0; y < t.h; y++) for (let x = 0; x < t.w; x++) {
         const ch = t.tiles[y][x], j = y * t.w + x;
         let f = col[ch] || S.grass;
@@ -86,7 +87,7 @@
         if (USE_COL[u] && ch !== "T") f = USE_COL[u];
         if (ch === "B" || ch === "D") {
           const p = pidx.get(j);
-          if (p) f = showHomes ? (p.kind === "home" ? stageCol(p) : "#7c7f86") : STYLE_COL[p.style] || KIND_COL[p.kind] || f;
+          if (p) f = showHomes ? (p.kind === "home" ? stageCol(p) : OTHER_COL) : STYLE_COL[p.style] || KIND_COL[p.kind] || f;
         } else if (showHomes && scene.lotAt && scene.lotAt(x, y)) f = mix(stageCol(byId.get(scene.lotAt(x, y))), S.grass, 0.45);
         g.fillStyle = f;
         const a = proj.toWorld(x, y), b = proj.toWorld(x + 1, y), cc = proj.toWorld(x + 1, y + 1), d = proj.toWorld(x, y + 1);

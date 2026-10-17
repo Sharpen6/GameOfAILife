@@ -49,6 +49,14 @@
 
   CV.STAGE_NAMES = ["kept", "worn", "shabby", "neglected", "derelict"];
   CV.stageOf = c => c >= 80 ? 0 : c >= 60 ? 1 : c >= 40 ? 2 : c >= 20 ? 3 : 4;
+  // The stage colours of the minimap's Homes overlay and of a "condition" overlay given by values: the
+  // dashboard's Condition ramp (window.Dash.RAMPS.condition) when the page has the dashboard, so the minimap,
+  // the map tint and the legend agree, else the same five colours (dashboard.js STAGE_COLOR).
+  CV.STAGE_COLORS = ["#0ca30c", "#9aa5b8", "#fab219", "#ec835a", "#d03b3b"];
+  CV.stageColors = () => {
+    const r = window.Dash && window.Dash.RAMPS && window.Dash.RAMPS.condition;
+    return Array.isArray(r) && r.length === 5 && r.every(c => typeof c === "string") ? r : CV.STAGE_COLORS;
+  };
 
   // --- canvases and the crisp polygon fill ----------------------------------------------------------
   function canvas(w, h) {

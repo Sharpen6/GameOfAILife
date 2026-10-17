@@ -225,8 +225,9 @@
       g.beginPath(); g.moveTo(p1[0] + ox, p1[1] + oy); g.lineTo(p2[0] + ox, p2[1] + oy); g.lineTo(p3[0] + ox, p3[1] + oy); g.lineTo(p4[0] + ox, p4[1] + oy); g.closePath(); g.fill();
     });
 
-    // The plane: a small airliner seen from above-left, and its shadow far below.
-    art.plane = () => item("plane", 64, 40, 32, 20, g => {
+    // The plane: a small airliner seen from above-left, outlined dark so it reads as a craft overhead even
+    // over a pale roof, and its shadow far below.
+    art.plane = () => item("plane", 64, 40, 32, 20, (g, c) => {
       const W = "#f4f6fa", D = "#c8ced8";
       g.fillStyle = D; g.fillRect(14, 19, 36, 5);
       g.fillStyle = W; g.fillRect(12, 17, 38, 5); g.fillRect(48, 18, 4, 3);
@@ -236,9 +237,10 @@
       g.fillStyle = W; g.fillRect(28, 10, 10, 8); g.fillRect(30, 7, 6, 3);
       g.fillStyle = W; g.fillRect(10, 12, 5, 6); g.fillStyle = "#4b6ea8"; g.fillRect(10, 12, 3, 5);
       g.fillStyle = D; g.fillRect(9, 20, 8, 2);
+      outline(c, "#2a3140");
     });
     art.planeShadow = () => item("planeS", 64, 24, 32, 12, g => {
-      g.fillStyle = "rgba(0,0,0,0.16)";
+      g.fillStyle = "rgba(0,0,0,0.28)";
       g.fillRect(12, 10, 38, 4); g.fillRect(26, 4, 10, 16); g.fillRect(10, 8, 6, 8);
     });
   });
