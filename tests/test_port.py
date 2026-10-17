@@ -16,7 +16,8 @@ port/build.py inlines it with the client into port/dist/millbrook.html. These te
 * when Playwright and Chromium are present, the built page runs: a person opens, with no character.html link and
   no console errors.
 
-The node tests skip when node is absent; the browser check skips without Playwright or a browser.
+The node tests skip when node is absent; the browser check skips without Playwright or a browser. The browser check
+and the 10-day and 8-day lockstep runs (about 17 s together) run only with GOAL_SLOW=1.
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ NODE = os.environ.get("NODE") or shutil.which("node")
 BROWSERS = "/opt/pw-browsers"
 
 needs_node = unittest.skipUnless(NODE, "node is not installed")
+# The longest runs (about 17 s together) run with GOAL_SLOW=1, like the city view's browser run and the housing soak.
+slow = unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "runs with GOAL_SLOW=1")
 
 # PLAN 3.12: what client/index.html loads, in this order.
 PLAN_STYLES = ["style.css", "view/view.css", "dashboard.css"]
@@ -526,12 +529,14 @@ class LockstepRun(unittest.TestCase):
         first_hour = py["hours"][0][1]  # 07:00: every taxi has arrived and gone, so its riders are on foot again
         self.assertEqual([r[0] for r in first_hour if r[12] == "taxi"], [])
 
+    @slow
     def test_ten_days_in_debt(self):
         # Every adult starts $3,000 in debt: the Sunday charges, arrears, hardship and the housing extras.
         js, py = self.assertLockstep(1, 10, 2, "debt")
         self.assertGreater(self.tags(py)["richest"], 0)  # a new richest person makes a headline
         self.assertEqual(len(py["stats"]["samples"]), 168)  # 7 days of hourly samples are kept, no more
 
+    @slow
     def test_eight_days_of_friendships_and_rifts(self):
         # Every acquaintance and coworker starts one point short of a friendship, every friend and partner one
         # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts.
@@ -774,6 +779,7 @@ class Build(unittest.TestCase):
         self.assertIsNone(re.search(r"https?://", page, re.I))
         self.assertNotIn('href="character.html', page)
 
+    @slow
     @needs_node
     def test_page_runs_in_a_browser(self):
         env = dict(os.environ)
