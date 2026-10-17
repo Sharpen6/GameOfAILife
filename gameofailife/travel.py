@@ -65,20 +65,30 @@ def weekly_commute_cost(sim: Simulation, agent: Agent) -> int:
     return len(job.workdays) * TRIP_COST.get(mode, 0)
 
 
-def _tile(sim: Simulation, where) -> tuple[int, int]:
-    """A tile for `where`: an (x, y) pair, a place id (its entry tile) or a character (their tile)."""
+def _spot(sim: Simulation, where) -> tuple[tuple[int, int], str | None]:
+    """Where a walk starts: (tile, the id of the place it starts inside, or None).
+
+    `where` is a Place or a place id (its entry tile, inside that place), a character (their tile, inside
+    `inside`) or an (x, y) tile (inside nothing). A Place is told from a character by its `entry`: its own
+    x and y are the building's corner, usually a tile nobody can walk from.
+    """
     if isinstance(where, str):
-        return tuple(sim.town.places[where].entry)
-    if isinstance(where, (tuple, list)):
-        return (where[0], where[1])
-    return (where.x, where.y)
+        where = sim.town.places[where]
+    if isinstance(where, (tuple, list)) and len(where) == 2:
+        return (where[0], where[1]), None
+    if hasattr(where, "entry"):
+        return tuple(where.entry), where.id
+    if hasattr(where, "x") and hasattr(where, "y"):
+        return (where.x, where.y), getattr(where, "inside", None)
+    raise TypeError(f"cannot walk from {where!r}: give a character, a Place, a place id or an (x, y) tile")
 
 
-def _walk(sim: Simulation, where, place: Place) -> int:
-    """Minutes on foot from `where` to a place: 0 for a character inside it or for the place itself."""
-    if where == place.id or getattr(where, "inside", None) == place.id:
+def _walk(sim: Simulation, spot: tuple[tuple[int, int], str | None], place: Place) -> int:
+    """Minutes on foot from a `_spot` to a place: 0 when the spot is inside that place."""
+    tile, inside = spot
+    if inside == place.id:
         return 0
-    return sim.town.walk_minutes(_tile(sim, where), place.id)
+    return sim.town.walk_minutes(tile, place.id)
 
 
 def nearest(sim: Simulation, agent: Agent, kinds: tuple[str, ...], origin=None, meet=None,
@@ -88,23 +98,27 @@ def nearest(sim: Simulation, agent: Agent, kinds: tuple[str, ...], origin=None, 
     A place qualifies when it is open by the time the character walks in from where they are and still
     open `stay` minutes later (the review fix's `_open_on_arrival`). The best one has the lowest
     walk(origin, place) + walk(meet, place), ties by id. `origin` defaults to the character; `origin` and
-    `meet` may each be a character (another Agent), a place id or an (x, y) tile.
+    `meet` may each be a character (another Agent), a Place (such as `town.places[job.place_id]` or an
+    earlier nearest() result), a place id or an (x, y) tile; anything else raises TypeError.
     """
     if isinstance(kinds, str):
         kinds = (kinds,)
+    here = _spot(sim, agent)
+    start = None if origin is None else _spot(sim, origin)
+    end = None if meet is None else _spot(sim, meet)
     best, best_key = None, None
     for place in sim.town.places.values():
         if place.kind not in kinds:
             continue
-        walk = _walk(sim, agent, place)
+        walk = _walk(sim, here, place)
         if walk >= UNREACHABLE:
             continue
         arrive = sim.clock.hour + walk / 60
         if not (place.is_open(arrive) and place.is_open(arrive + stay / 60)):
             continue
-        score = walk if origin is None else _walk(sim, origin, place)
-        if meet is not None:
-            score += _walk(sim, meet, place)
+        score = walk if start is None else _walk(sim, start, place)
+        if end is not None:
+            score += _walk(sim, end, place)
         if score >= UNREACHABLE:
             continue
         key = (score, place.id)

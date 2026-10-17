@@ -183,10 +183,12 @@ def make_event(seq: int, tick: int, time: str, text: str, tag: str = "other", ki
     """One event record in the section 3.7 shape, with the defaults filled in.
 
     `kind` and `importance` default to the tag's; `agents` always starts with `agent` when it is set (no
-    duplicates); `place` is a place id or None; `at` is the agent's tile or None.
+    duplicates); `place` is a place id or None; `at` is the agent's tile or None. An unknown tag raises
+    KeyError even when the call gives both `kind` and `importance`.
     """
-    kind = kind or kind_of(tag)
-    importance = importance_of(tag) if importance is None else importance
+    tag_kind, tag_importance = _spec(tag)
+    kind = kind or tag_kind
+    importance = tag_importance if importance is None else importance
     ids = [agent] if agent else []
     for other in agents or []:
         if other not in ids:

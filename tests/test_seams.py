@@ -111,6 +111,13 @@ class TestChronicle(unittest.TestCase):
             chronicle.kind_of("nope")
         with self.assertRaises(KeyError):
             chronicle.make_event(1, 0, "Day 1 Mon 00:00", "x", tag="nope")
+        # The tag is checked even when the call names the kind, the importance or both.
+        for kw in ({"kind": "life"}, {"importance": 0}, {"kind": "life", "importance": 0}):
+            with self.assertRaises(KeyError, msg=kw):
+                chronicle.make_event(1, 0, "Day 1 Mon 00:00", "x", tag="nope", **kw)
+        event = chronicle.make_event(1, 0, "Day 1 Mon 00:00", "x", tag="controller_left", kind="controller",
+                                     importance=0)  # a single release
+        self.assertEqual((event["tag"], event["kind"], event["importance"]), ("controller_left", "controller", 0))
 
     def test_thresholds(self):
         self.assertEqual((chronicle.BIG_MONEY, chronicle.MONEY_SWING, chronicle.INJURY), (150, 40, -8))
@@ -399,23 +406,28 @@ class TestTransit(unittest.TestCase):
 # --- fakes for travel: only what PLAN 3.10 says travel reads ------------------------------------
 
 class FakePlace:
+    """The building stands just north of its door: x, y is its corner, as on the real map, not its entry."""
+
     def __init__(self, place_id: str, kind: str, entry: tuple[int, int], hours: tuple[int, int] | None = None):
         self.id, self.kind, self.entry, self.hours = place_id, kind, entry, hours
+        self.x, self.y = entry[0], entry[1] - 1
 
     def is_open(self, hour: float) -> bool:  # the same rule as town.Place
         return self.hours is None or self.hours[0] <= hour < self.hours[1]
 
 
 class FakeTown:
-    """Walking is the Manhattan distance to a place's entry; places in `cut_off` can't be reached."""
+    """Walking is the Manhattan distance to a place's entry; places in `cut_off` can't be reached, and
+    nobody can walk from a building's corner tile (like a 'B' tile on the real map)."""
 
     def __init__(self, places: list[FakePlace], cut_off: tuple[str, ...] = ()):
         self.places = {p.id: p for p in places}
         self.cut_off = set(cut_off)
+        self.walls = {(p.x, p.y) for p in places}
 
     def walk_minutes(self, xy, place_id: str) -> int:
         assert isinstance(xy, tuple) and len(xy) == 2, xy
-        if place_id in self.cut_off:
+        if place_id in self.cut_off or xy in self.walls:
             return 65535
         ex, ey = self.places[place_id].entry
         return abs(xy[0] - ex) + abs(xy[1] - ey)
@@ -564,6 +576,41 @@ class TestTravel(unittest.TestCase):
         # Opening hours still count from where the character is, not from the origin.
         self.assertEqual(nearest_id(fake_sim(STREET, 10.0), me, ("cafe",), origin=(4, 0)), "corner")
 
+    def test_nearest_from_or_meeting_at_a_place(self):
+        """origin and meet may be a Place, such as town.places[job.place_id] or an earlier nearest() result."""
+        me = fake_agent()
+        for hour in (5.75, 10.0, 12.0, 19.0):
+            sim = fake_sim(STREET, hour)
+            places = sim.town.places
+            for pid in places:
+                for kinds in (("cafe",), ("shop", "market"), ("park",)):
+                    by_id = nearest_id(sim, me, kinds, origin=pid)
+                    self.assertEqual(nearest_id(sim, me, kinds, origin=places[pid]), by_id, (hour, pid, kinds))
+                    by_id = nearest_id(sim, me, kinds, meet=pid)
+                    self.assertEqual(nearest_id(sim, me, kinds, meet=places[pid]), by_id, (hour, pid, kinds))
+                    by_id = nearest_id(sim, me, kinds, origin=pid, meet="office")
+                    self.assertEqual(nearest_id(sim, me, kinds, origin=places[pid], meet=places["office"]), by_id)
+        sim = fake_sim(STREET)
+        places = sim.town.places
+        self.assertEqual(nearest_id(sim, me, ("cafe",), meet=places["market"]), "bakery")
+        self.assertEqual(nearest_id(sim, me, ("cafe",), origin=places["diner"]), "diner")  # 0 from inside it
+        self.assertEqual(nearest_id(sim, me, ("cafe",), origin=places["market"]), "bakery")
+        cafe = travel.nearest(sim, me, ("cafe",))
+        self.assertEqual(cafe.id, "noodles")
+        self.assertEqual(nearest_id(sim, me, ("cafe",), origin=cafe), "noodles")  # chained: 0 from inside it
+        # From the noodle bar on the way to the office: the arcade (8 + 2) beats the market (26 + 20).
+        self.assertEqual(nearest_id(sim, me, ("shop", "market"), origin=cafe, meet=places["office"]), "arcade")
+
+    def test_nearest_refuses_what_it_cannot_walk_from(self):
+        sim, me = fake_sim(STREET), fake_agent()
+        for where in (42, 4.5, object(), (1, 2, 3), {"x": 0, "y": 0}):
+            with self.assertRaises(TypeError, msg=repr(where)):
+                travel.nearest(sim, me, ("cafe",), meet=where)
+            with self.assertRaises(TypeError, msg=repr(where)):
+                travel.nearest(sim, me, ("cafe",), origin=where)
+        with self.assertRaises(KeyError):
+            travel.nearest(sim, me, ("cafe",), meet="nowhere")
+
 
 REAL_TOWN = getattr(town_module, "W", 0) == 80 and hasattr(town_module.TownMap, "walk_minutes")
 
@@ -603,6 +650,13 @@ class TestOnTheRealTown(unittest.TestCase):
         self.assertTrue(cafes)
         self.assertEqual(travel.nearest(sim, me, ("cafe",)).id, cafes[0][1])
         self.assertEqual(travel.nearest(sim, me, ("park",)).kind, "park")
+        for pid in ("office", "hospital", cafes[0][1]):
+            place = self.town.places[pid]
+            self.assertEqual(travel.nearest(sim, me, ("cafe",), meet=place),
+                             travel.nearest(sim, me, ("cafe",), meet=pid))
+            self.assertEqual(travel.nearest(sim, me, ("cafe",), origin=place),
+                             travel.nearest(sim, me, ("cafe",), origin=pid))
+        self.assertIsNotNone(travel.nearest(sim, me, ("cafe",), meet=self.town.places["office"]))
 
 
 if __name__ == "__main__":
