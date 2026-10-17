@@ -8,10 +8,14 @@
 // no console errors, no sideways scroll, the HUD, the tabs and their keys, picking and selecting a person,
 // a major event making a toast and a map ping, the map colours, the home card for a house and for a block of
 // flats, LLM decisions being asked for, the slow-AI chip, the browser build (no character pages, no LLM log)
-// and the phone bottom sheet with the inset it gives the map.
+// and the phone bottom sheet with the inset it gives the map. The "rules" run and the end of the phone run
+// check that arrows used by the tab bar or the sheet grip never pan the map, the debt stub on a positive net
+// worth, that a burst of majors is always shown or counted (and error cards push none out), the phone mood
+// arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent.
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
-// browser it can launch, the test prints SKIP and exits 0. Set DASH_SHOTS=<folder> to also save screenshots.
+// browser it can launch, the test prints SKIP and exits 0. Set DASH_SHOTS=<folder> to also save screenshots,
+// and DASH_VERBOSE=1 to print the toasts each burst leaves.
 "use strict";
 
 const http = require("http");
@@ -61,8 +65,8 @@ function check(ok, what, detail) {
   return false;
 }
 
-async function openPage(browser, base, query, size) {
-  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 });
+async function openPage(browser, base, query, size, touch) {
+  const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1, hasTouch: !!touch });
   const errors = [];
   page.on("console", m => { if (m.type() === "error") errors.push(m.text()); });
   page.on("pageerror", e => errors.push(String(e && e.message || e)));
@@ -86,6 +90,38 @@ async function shot(page, name) {
 
 const calls = (page, name) => page.evaluate(n => devView.calls.filter(c => c[0] === n).map(c => c[1]), name);
 const inspect = page => page.evaluate(() => Dash.inspect());
+
+// Stops the fake host's clock (no frames, no stats pushes, no random majors) and clears the toasts.
+async function pause(page) {
+  await page.evaluate(() => devHost.send({ type: "set_speed", speed: 0 }));
+  await page.waitForTimeout(150);
+  await page.evaluate(() => { for (const b of document.querySelectorAll("#toasts .dash-tx")) b.click(); });
+}
+
+// Five major events in one frame, after the toasts were cleared: every one is either on its own card or
+// counted by the "N more major events" card, within the slot limit (3 on desktop, 1 on a phone).
+async function majorBurst(page, what, slots) {
+  const res = await page.evaluate(() => {
+    const st = devHost.world && Dash.inspect() ? window.__lastState : null;
+    const events = [1, 2, 3, 4, 5].map(i => ({ seq: 900000 + i, tick: st.tick, time: st.time, kind: "home", tag: "home_bought",
+      importance: 2, major: true, text: `Major number ${i}`, agent: null, agents: [], place: null, at: null }));
+    Dash.frame({ type: "state", speed: 0, state: st, events, forks: [] });
+    const cards = Array.from(document.querySelectorAll("#toasts .dash-toast"));
+    const more = cards.find(c => c.classList.contains("more"));
+    return { kinds: cards.map(c => c.className.replace("dash-toast ", "")), texts: cards.map(c => c.innerText.split("\n")[0]),
+      majors: cards.filter(c => c.classList.contains("major") && /Major number/.test(c.innerText)).length,
+      more: more ? Number((/(\d+) more major/.exec(more.innerText) || [])[1]) : 0 };
+  });
+  if (process.env.DASH_VERBOSE) console.log(`  ${what} burst: ${JSON.stringify(res.texts)}`);
+  check(res.majors + res.more === 5, `${what}: five majors in a burst are shown or counted`, res);
+  check(res.kinds.length <= slots, `${what}: at most ${slots} toast${slots === 1 ? "" : "s"} for majors`, res.kinds);
+  check(res.more > 0, `${what}: the burst coalesces into one "N more" card`, res.texts);
+  await shot(page, `${what}-burst`);
+  await page.evaluate(() => Dash.notice("Not done: a test notice"));
+  const after = await page.evaluate(() => Array.from(document.querySelectorAll("#toasts .dash-toast")).map(c => c.className.replace("dash-toast ", "")));
+  check(after.includes("more") && after.includes("error"), `${what}: an error card does not push out the "more" card`, after);
+  check(after.filter(k => k === "more" || k === "major").length === res.kinds.length, `${what}: an error card pushes out no major`, [res.kinds, after]);
+}
 
 async function desktop(browser, base) {
   console.log("desktop 1440x900");
@@ -183,6 +219,74 @@ async function desktop(browser, base) {
   await page.close();
 }
 
+// The fixes after the first review: arrow keys stay with the tab bar, debt shows on a positive net worth,
+// toast bursts are counted, and the fixture's events keep agents[0] == agent.
+async function rules(browser, base) {
+  console.log("desktop rules 1440x900");
+  const { page, errors } = await openPage(browser, base, "?speed=4", { width: 1440, height: 900 });
+  await page.evaluate(() => {
+    const on = devHost.onmessage;
+    devHost.onmessage = m => { if (m.type === "state") window.__lastState = m.state; if (m.type === "stats") window.__lastStats = m; on(m); };
+  });
+  await page.waitForFunction(() => window.__lastState && window.__lastStats, null, { timeout: 10000 });
+  await pause(page);
+
+  // PLAN 3.12: the view owns the arrows; an arrow used by the tab bar must not also reach it.
+  const pans = async () => (await calls(page, "pan")).length;
+  await page.click("#dash-tab-city");
+  await page.focus("#dash-tab-city");
+  let before = await pans();
+  await page.keyboard.press("ArrowRight");
+  check((await inspect(page)).tab === "news", "ArrowRight on a focused tab moves to the next tab");
+  await page.keyboard.press("ArrowLeft");
+  check((await inspect(page)).tab === "city", "ArrowLeft moves back");
+  check(await pans() === before, "arrows used by the tab bar do not pan the map", [before, await pans()]);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  before = await pans();
+  await page.keyboard.press("ArrowRight");
+  check(await pans() === before + 1 && (await inspect(page)).tab === "city", "an arrow outside the panel still pans the map");
+
+  // Debt: a house-rich, cash-poor person (cash + savings < 0, net worth > 0) gets the red stub and "debt".
+  const who = await page.evaluate(() => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    const p = st.people.find(x => x.home_equity > 2000 && devHost.world.byId[x.id].age >= 18);
+    p.cash = -900; p.savings = 0; p.worth = p.cash + p.savings + p.home_equity;
+    Dash.stats(st);
+    return p.id;
+  });
+  await page.keyboard.press("4");
+  await page.waitForTimeout(300);
+  const row = await page.evaluate(id => {
+    const li = document.querySelector(`#dash-people .dash-rank > li[data-key="${id}"]`);
+    return li ? { indebt: !!li.querySelector(".dash-bar.indebt .dash-debtstub"), text: li.innerText,
+      fill: !!li.querySelector(".dash-bar.indebt .dash-barfill i.h") } : null;
+  }, who);
+  check(row && row.indebt && /debt/.test(row.text), "a positive net worth with negative cash shows the debt stub and word", row);
+  check(row && row.fill, "the home part still shows next to the debt stub", row);
+  await shot(page, "desktop-debt");
+
+  await majorBurst(page, "desktop", 3 + 2);
+
+  // The fixture follows PLAN 3.7: agents[0] == agent whenever agent is set (welcome backlogs and frames).
+  const bad = await page.evaluate(() => new Promise(resolve => {
+    const h = DASH_FIXTURE.createHost({ seed: 11, speed: 16, frameMs: 20 }), seen = [];
+    h.onmessage = m => {
+      if (m.type === "welcome") { seen.push(...m.history, ...m.news, ...m.headlines); h.start(); }
+      if (m.type === "state") seen.push(...(m.events || []));
+    };
+    h.send({ type: "hello", role: "god" });
+    setTimeout(() => {
+      h.stop();
+      const wrong = seen.filter(e => e.agent && (!e.agents || e.agents[0] !== e.agent)).map(e => e.tag);
+      resolve({ n: seen.length, wrong });
+    }, 2500);
+  }));
+  check(bad.n > 200 && bad.wrong.length === 0, "fixture events keep agents[0] == agent", bad);
+
+  check(errors.length === 0, "rules: no console errors", errors);
+  await page.close();
+}
+
 async function slowAi(browser, base) {
   console.log("desktop ?slow");
   const { page, errors } = await openPage(browser, base, "?slow", { width: 1280, height: 800 });
@@ -215,7 +319,11 @@ async function browserBuild(browser, base) {
 
 async function phone(browser, base) {
   console.log("phone 390x844");
-  const { page, errors } = await openPage(browser, base, "?speed=2", { width: 390, height: 844 });
+  const { page, errors } = await openPage(browser, base, "?speed=2", { width: 390, height: 844 }, true);
+  await page.evaluate(() => {
+    const on = devHost.onmessage;
+    devHost.onmessage = m => { if (m.type === "state") window.__lastState = m.state; on(m); };
+  });
   let info = await inspect(page);
   check(info.mode === "sheet" && info.phone === true && info.sheet === "peek", "a phone starts with the sheet at peek", info);
   await noSidewaysScroll(page, "phone peek");
@@ -248,6 +356,60 @@ async function phone(browser, base) {
   await page.waitForTimeout(450);
   check((await inspect(page)).sheet === "peek", "the grip lowers the sheet to peek");
   check(await page.locator("#hud .dash-chip:visible").count() === 4, "the phone HUD shows four chips");
+
+  // dashboard.md 8.2: the phone mood chip keeps its arrow (only the number is dropped).
+  const mood = await page.evaluate(() => {
+    const c = document.querySelector('#hud [data-k="mood"]'), m = c && c.querySelector(".dash-md");
+    const d = /(up|down) (\d+)/.exec(c ? c.title : "");
+    return { text: c ? c.innerText : "", arrow: m ? m.innerText.trim() : null, delta: d ? Number(d[2]) : null };
+  });
+  check(mood.delta === 0 || /^[▲▼]$/.test(mood.arrow || ""), "the phone mood chip shows its arrow", mood);
+  check(!/\d\s*[▲▼]\d/.test(mood.text), "the phone mood chip drops the delta number", mood);
+
+  // The sheet grip's arrows resize the sheet and do not pan the map.
+  const pans = async () => (await calls(page, "pan")).length;
+  let before = await pans();
+  await page.focus("#panel .dash-grip");
+  await page.keyboard.press("ArrowUp");
+  await page.waitForTimeout(300);
+  check((await inspect(page)).sheet === "half" && await pans() === before, "the grip's ArrowUp does not pan the map",
+    [(await inspect(page)).sheet, before, await pans()]);
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(300);
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+
+  // A touch long-press shows the tooltip (renderer.md 10); the next tap hides it, and so does a timeout.
+  await pause(page);
+  const tip = () => page.evaluate(() => { const t = document.getElementById("tooltip"); return { shown: !t.hidden, text: t.textContent }; });
+  await page.evaluate(() => Dash.hover({ kind: "place", id: "main_20" }, { cssX: 120, cssY: 300, touch: true }));
+  let t = await tip();
+  check(t.shown && /Main Street/.test(t.text), "a long-press hover shows the tooltip on a phone", t);
+  await page.evaluate(() => Dash.pick(null, { cssX: 10, cssY: 10, touch: true }));
+  check(!(await tip()).shown, "the next tap hides the long-press tooltip");
+  // The stub map turns a real 600 ms touch hold into onHover(hit, {touch: true}), as P4's camera does.
+  const spot = await page.evaluate(() => {
+    const r = document.getElementById("map").getBoundingClientRect();
+    for (let y = r.top + 120; y < r.bottom - 120; y += 6) for (let x = r.left + 8; x < r.right - 8; x += 6) {
+      const e = document.elementFromPoint(x, y);
+      if (e && e.id === "map" && Dash.tooltipText(devView.hitAt ? devView.hitAt(x - r.left, y - r.top) : null)) return [x, y];
+    }
+    return null;
+  });
+  if (spot) {
+    const cdp = await page.context().newCDPSession(page);
+    const point = [{ x: spot[0], y: spot[1], id: 1 }];
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: point });
+    await page.waitForTimeout(650);
+    t = await tip();
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    check(t.shown && t.text.length > 3, "a real touch hold on the map shows the tooltip", t);
+    await page.waitForTimeout(150);
+    check((await tip()).shown, "lifting the finger after a hold keeps the tooltip");
+    await page.waitForTimeout(4200);
+    check(!(await tip()).shown, "the long-press tooltip hides itself after a few seconds");
+  } else check(false, "found a spot on the stub map with a tooltip");
+
+  await majorBurst(page, "phone", 1 + 1);
   check(errors.length === 0, "phone: no console errors", errors);
   await page.close();
 }
@@ -264,6 +426,7 @@ async function phone(browser, base) {
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     await desktop(browser, base);
+    await rules(browser, base);
     await slowAi(browser, base);
     await browserBuild(browser, base);
     await phone(browser, base);

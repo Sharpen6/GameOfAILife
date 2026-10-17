@@ -23,7 +23,8 @@
 //   Dash.message(msg) -> bool        any message: routes welcome, state, stats and the replies above
 //   Dash.pick(hit, ev)               CityView onPick: a person; a bus's first rider; a home card for an empty
 //                                    home or a second tap on one; otherwise a place's first occupant
-//   Dash.hover(hit, ev)              CityView onHover: renders #tooltip (addresses and families on hover only)
+//   Dash.hover(hit, ev)              CityView onHover: renders #tooltip (addresses and families on hover only);
+//                                    ev.touch means a long-press: shown above the finger until the next tap or 4 s
 //   Dash.viewSelected(id|null)       CityView onSelect (Esc in the view): like the Back button
 //   Dash.selectAgent(id|null, {focus, follow})   open a person in the People tab; null closes them
 //   Dash.selected() -> id|null
@@ -74,7 +75,7 @@
   const TIER_LABEL = { flat: "flat", house: "house", big_house: "big house" };
   const KEEP = { notable: 600, routine: 300, forks: 1000, samples: 168 };
   const SHOW = { news: 200, llm: 150, headlines: 5 };
-  const TOAST_MS = 8000, NOTICE_MS = 6000, TICKER_DIM_MS = 20000, POLL_MS = 800;
+  const TOAST_MS = 8000, NOTICE_MS = 6000, TICKER_DIM_MS = 20000, POLL_MS = 800, TIP_TOUCH_MS = 4000;
   const MINUS = "−";
 
   const ICON = {
@@ -229,7 +230,7 @@
       toasts: [], majorTimes: [], coalesced: null, tickerEvent: null, tickerAt: 0,
       dirty: { hud: true, city: true, news: true, llm: true, people: true },
       at: { hud: 0, city: 0, news: 0, llm: 0, people: 0, ask: 0, mood: 0 },
-      req: 0, pending: new Map(), lastPick: null, hlTimer: 0, sparks: {}, timers: [], listeners: [],
+      req: 0, pending: new Map(), lastPick: null, hlTimer: 0, tipTimer: 0, tipTouch: false, sparks: {}, timers: [], listeners: [],
     });
     if (S.toastBox) { S.toastBox.setAttribute("aria-live", "polite"); S.toastBox.setAttribute("role", "status"); }
     if (S.tooltip) S.tooltip.hidden = true;
@@ -256,6 +257,8 @@
   }
   function teardown() {
     for (const t of S.timers) clearInterval(t);
+    clearTimeout(S.tipTimer);
+    clearTimeout(S.hlTimer);
     for (const [target, type, fn, opt] of S.listeners) target.removeEventListener(type, fn, opt);
     if (S.ro) S.ro.disconnect();
     S = null;
@@ -311,11 +314,13 @@
     });
     el(".dash-tabs", P).addEventListener("keydown", ev => {   // arrow keys move between tabs
       if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight" && ev.key !== "ArrowUp" && ev.key !== "ArrowDown") return;
+      if (!ev.target.closest(".dash-tab")) return;
       const i = TABS.indexOf(S.tab), d = ev.key === "ArrowLeft" || ev.key === "ArrowUp" ? -1 : 1;
       const t = TABS[(i + d + TABS.length) % TABS.length];
       openTab(t);
       S.tabBtn[t].focus();
       ev.preventDefault();
+      ev.stopPropagation();   // PLAN 3.12: the view owns arrows; this one was used here, so it must not pan the map
     });
     S.sheetTicker.addEventListener("click", () => { if (S.tickerEvent) focusEvent(S.tickerEvent); });
     listen(P, "transitionend", ev => { if (ev.target === P) layoutSoon(); });
@@ -420,8 +425,12 @@
       if (ev.detail === 0 && S.mode === "sheet") setSheet(S.sheet === "peek" ? "half" : S.sheet === "half" ? "full" : "peek");
     });
     grip.addEventListener("keydown", ev => {
-      if (ev.key === "ArrowUp") { setSheet(S.sheet === "peek" ? "half" : "full"); ev.preventDefault(); }
-      if (ev.key === "ArrowDown") { setSheet(S.sheet === "full" ? "half" : "peek"); ev.preventDefault(); }
+      if (ev.key !== "ArrowUp" && ev.key !== "ArrowDown") return;
+      if (S.mode !== "sheet") return;
+      if (ev.key === "ArrowUp") setSheet(S.sheet === "peek" ? "half" : "full");
+      else setSheet(S.sheet === "full" ? "half" : "peek");
+      ev.preventDefault();
+      ev.stopPropagation();   // the arrow resized the sheet; the view must not also pan the map
     });
   }
   function updateMode() {
@@ -552,7 +561,9 @@
     chips.push(["people", `<b>${alive}</b> people`, "Population: open People"]);
     if (c) {
       const d = moodDelta();
-      chips.push(["mood", `Mood <b>${c.mood}</b>${d != null ? `<span class="dash-long"> <span class="${dirClass(d)}">${deltaNum(d)}</span></span>` : ""}`,
+      // dashboard.md 8.2: the phone chip keeps the arrow ("Mood 64▲") and drops only the number
+      const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "", num = d === 0 ? "±0" : String(Math.abs(d));
+      chips.push(["mood", `Mood <b>${c.mood}</b>${d != null ? `<span class="dash-md ${dirClass(d)}">${arrow}<span class="dash-long">${num}</span></span>` : ""}`,
         d != null ? `Mood ${c.mood}, ${d >= 0 ? "up" : "down"} ${Math.abs(d)} since yesterday` : `Mood ${c.mood}`]);
       chips.push(["wealth", `<b>${compact(c.wealth.total)}</b>`, `Total wealth ${money(c.wealth.total)}: open the ranking`]);
       if (c.homes) {
@@ -600,13 +611,18 @@
     if (S.sheetTicker) setHtml(S.sheetTicker, html);
   }
 
+  // Toasts (dashboard.md 5.4): major cards and the one coalesced "N more major events" card share 3 slots on
+  // desktop and 1 on a phone. A major card pushed out early is never lost: it joins the coalesced count, so
+  // the count is always the burst's majors not on screen. Error and info notices have their own slots
+  // (2, or 1 on a phone) and never push out a major or the coalesced card.
+  const majorKind = t => t.kind === "major" || t.kind === "more";
   function addToast(t) {
     if (!S.toastBox) return t;
     const card = document.createElement("div");
     card.className = `dash-toast ${t.kind}`;
     card.innerHTML = t.html;
     t.el = card;
-    t.until = Date.now() + (t.kind === "major" || t.kind === "more" ? TOAST_MS : NOTICE_MS);
+    t.until = Date.now() + (majorKind(t) ? TOAST_MS : NOTICE_MS);
     S.toasts.push(t);
     S.toastBox.appendChild(card);
     trimToasts();
@@ -620,24 +636,48 @@
     if (t === S.coalesced) S.coalesced = null;
     layoutSoon();
   }
+  function moreToast() {
+    if (S.coalesced && S.toasts.includes(S.coalesced)) return S.coalesced;
+    const c = { kind: "more", count: 0, html: "" };
+    S.coalesced = c;          // set first: adding it trims, and the trim must not push this card out
+    addToast(c);
+    return c;
+  }
+  function renderMore(c) {
+    if (!c || !c.el) return;
+    c.el.innerHTML = `<span class="dash-ticon">${icon("star")}</span><div class="dash-tbody"><div class="dash-ttext">${plural(c.count, "more major event")}</div></div>
+        <button type="button" class="dash-tbtn" data-act="news">Open News</button><button type="button" class="dash-tx" aria-label="Dismiss">${icon("close")}</button>`;
+  }
   function trimToasts() {
     if (!S) return;
-    const max = S.phone ? 1 : 3;
-    while (S.toasts.length > max) removeToast(S.toasts[0]);
+    const maxMajor = S.phone ? 1 : 3, maxNotice = S.phone ? 1 : 2;
+    for (let guard = 0; guard < 50; guard++) {
+      const majors = S.toasts.filter(majorKind);
+      if (majors.length <= maxMajor) break;
+      const victim = majors.find(t => t !== S.coalesced && !t.hold) || majors.find(t => t !== S.coalesced);
+      if (!victim) break;
+      removeToast(victim);
+      moreToast().count += 1;
+    }
+    for (let guard = 0; guard < 50; guard++) {
+      const notes = S.toasts.filter(t => !majorKind(t));
+      if (notes.length <= maxNotice) break;
+      removeToast(notes[0]);
+    }
+    if (S.coalesced) renderMore(S.coalesced);
   }
   function majorToast(e) {
     const now = Date.now();
     S.majorTimes = S.majorTimes.filter(t => now - t < 10000);
     S.majorTimes.push(now);
-    if (S.majorTimes.length > 3) {     // a burst: one card counts the rest
-      if (S.coalesced && S.toasts.includes(S.coalesced)) S.coalesced.count += 1;
-      else {
-        S.coalesced = addToast({ kind: "more", count: 1, html: "" });
-      }
-      const c = S.coalesced;
+    const shown = S.toasts.filter(t => t.kind === "major").length;
+    const more = S.coalesced && S.toasts.includes(S.coalesced);
+    // More than 3 within 10 s, a full set of slots, or a "more" card already up: one card counts the rest.
+    if (S.majorTimes.length > 3 || more || shown >= (S.phone ? 1 : 3)) {
+      const c = moreToast();
+      c.count += 1;
       c.until = now + TOAST_MS;
-      c.el.innerHTML = `<span class="dash-ticon">${icon("star")}</span><div class="dash-tbody"><div class="dash-ttext">${plural(c.count, "more major event")}</div></div>
-        <button type="button" class="dash-tbtn" data-act="news">Open News</button><button type="button" class="dash-tx" aria-label="Dismiss">${icon("close")}</button>`;
+      trimToasts();
       return;
     }
     const names = (e.agents || []).slice(0, 3).map(id => S.agentById[id]).filter(Boolean).map(a => esc(first(a.name)));
@@ -934,6 +974,7 @@
     return units && units.length === 1 ? units[0].id : placeId;
   }
   function pick(hit, ev) {
+    if (S && (S.tipTouch || (ev && ev.touch))) hideTip();
     if (!S || !S.state || !hit) return;
     if (hit.kind === "agent") { selectAgent(hit.id, { from: "map" }); return; }
     if (hit.kind === "bus") {
@@ -955,21 +996,40 @@
     }
     if (inside.length) selectAgent(inside[0].id, { from: "map" });
   }
+  // A mouse hover shows the tooltip until the pointer leaves. On touch the view sends onHover(hit, {touch: true})
+  // only for a 500 ms long-press (renderer.md 10): the tooltip then sits above the finger until the next tap,
+  // the next hover or TIP_TOUCH_MS.
+  function hideTip() {
+    if (!S) return;
+    clearTimeout(S.tipTimer);
+    S.tipTouch = false;
+    if (S.tooltip) S.tooltip.hidden = true;
+  }
   function hover(hit, ev) {
     if (!S || !S.tooltip) return;
-    const text = hit && !(ev && ev.touch) ? tooltipText(hit) : "";
+    const touch = !!(ev && ev.touch), text = hit ? tooltipText(hit) : "";
     const tip = S.tooltip;
+    clearTimeout(S.tipTimer);
+    S.tipTouch = false;
     if (!text) { tip.hidden = true; return; }
     tip.textContent = text;
     tip.hidden = false;
+    if (touch) { S.tipTouch = true; S.tipTimer = setTimeout(hideTip, TIP_TOUCH_MS); }
     if (!ev || !S.world) return;
     const canvas = S.world.querySelector("canvas");
     const wr = S.world.getBoundingClientRect(), cr = canvas ? canvas.getBoundingClientRect() : wr;
-    const ox = cr.left - wr.left, oy = cr.top - wr.top;
-    let x = ox + ev.cssX + 14, y = oy + ev.cssY + 16;
-    const w = tip.offsetWidth, h = tip.offsetHeight;
-    if (x + w > wr.width - 4) x = Math.max(4, ox + ev.cssX - w - 10);
-    if (y + h > wr.height - 4) y = Math.max(4, oy + ev.cssY - h - 10);
+    const ox = cr.left - wr.left, oy = cr.top - wr.top, w = tip.offsetWidth, h = tip.offsetHeight;
+    let x, y;
+    if (touch) {                 // above the finger, which would hide it, and inside the map
+      x = clamp(ox + ev.cssX - w / 2, 4, Math.max(4, wr.width - w - 4));
+      y = oy + ev.cssY - h - 28;
+      if (y < 4) y = Math.min(oy + ev.cssY + 28, Math.max(4, wr.height - h - 4));
+    } else {
+      x = ox + ev.cssX + 14;
+      y = oy + ev.cssY + 16;
+      if (x + w > wr.width - 4) x = Math.max(4, ox + ev.cssX - w - 10);
+      if (y + h > wr.height - 4) y = Math.max(4, oy + ev.cssY - h - 10);
+    }
     tip.style.left = `${round(x)}px`;
     tip.style.top = `${round(y)}px`;
   }
@@ -1888,12 +1948,18 @@
   function partsText(p) {
     return `Cash ${money(p.cash)} · Savings ${money(p.savings)} · Home ${money(p.homeEq)}`;
   }
+  // In debt means what stats.in_debt counts (dashboard.md 4): cash + savings below zero. The row then gets the
+  // red stub and the word "debt" (never colour alone), after the positive parts when the home still makes
+  // the net worth positive (house-rich, cash-poor), or alone when the net worth is negative too.
+  const inDebt = p => (p.cash || 0) + (p.savings || 0) < 0;
   function barHtml(p, top) {
-    if (p.worth < 0) return `<span class="dash-bar debt" title="${esc(partsText(p))}"><span class="dash-barfill"><i class="d"></i></span><em>debt</em></span>`;
+    const title = esc(partsText(p)), debt = inDebt(p) || p.worth < 0;
+    const tag = '<i class="dash-debtstub"></i><em>debt</em>';
+    if (p.worth <= 0 && debt) return `<span class="dash-bar debt" title="${title}"><span class="dash-barfill"><i class="d"></i></span><em>debt</em></span>`;
     const parts = [["c", p.cash], ["s", p.savings], ["h", p.homeEq]].filter(x => x[1] > 0);
     const w = top > 0 ? clamp(p.worth / top * 100, 0, 100) : 0;
-    return `<span class="dash-bar" title="${esc(partsText(p))}"><span class="dash-barfill" style="width:${w.toFixed(1)}%">${parts.map(([k, v]) =>
-      `<i class="${k}" style="flex-grow:${round(v)}"></i>`).join("")}</span></span>`;
+    return `<span class="dash-bar${debt ? " indebt" : ""}" title="${title}"><span class="dash-barfill" style="width:${w.toFixed(1)}%">${parts.map(([k, v]) =>
+      `<i class="${k}" style="flex-grow:${round(v)}"></i>`).join("")}</span>${debt ? tag : ""}</span>`;
   }
   function tenureOf(r) {
     if (r.kind === "household") {

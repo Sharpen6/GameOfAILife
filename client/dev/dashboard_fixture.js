@@ -9,6 +9,7 @@
 //   while paused; pushes carry only the hourly samples recorded since the previous push;
 // - replies to get_stats, get_decisions, get_home, get_agent, set_luck, set_profile, set_speed, pause,
 //   resume, with req_id echoed and the error replies of 3.9.
+// Every event with an agent lists that agent first in agents (3.7).
 // None of it is a real simulation: people wander between places on a script, and events and forks come
 // from small templates. Like the server, it never sends hidden information (odds, rolls, scores, outcome
 // tables, valence, pending emergencies).
@@ -16,7 +17,9 @@
 // window.DASH_FIXTURE = {
 //   town,                                    // the town_json() of 3.2
 //   createHost({browser, slow, fresh, seed, speed, frameMs}) -> host
-//   createStubView(canvas, opts) -> a plain-canvas stand-in for the CityView facade (3.12) that records calls
+//   createStubView(canvas, opts) -> a plain-canvas stand-in for the CityView facade (3.12) that records calls;
+//                                   its input copies P4's camera: a finger hovers only by a 500 ms long-press,
+//                                   and arrows/WASD reaching window are logged as "pan" calls
 // }
 // host.send(msg) answers asynchronously, like a socket; host.onmessage = msg => ... gets every reply and push
 // (a JSON copy); host.start() / host.stop() run the frame loop; host.demote() pushes a "demoted".
@@ -674,10 +677,12 @@
     const e = Object.assign({ importance: imp, agents: agentId ? [agentId] : [], place: undefined }, extra || {});
     const a = agentId ? W.byId[agentId] : null;
     if (e.place === undefined) e.place = a ? (a.inside || (a.plan ? a.plan.dest : null)) : null;
+    // PLAN 3.7: when agent is set, agents[0] == agent (the rest keep their order)
+    const agents = agentId ? [agentId, ...(e.agents || []).filter(id => id !== agentId)] : (e.agents || []);
     const out = {
       seq: ++W.seq, tick: e.tick !== undefined ? e.tick : W.tick, time: stamp(e.tick !== undefined ? e.tick : W.tick),
       kind, tag, importance: e.importance, major: e.importance === 2, text, agent: agentId || null,
-      agents: e.agents, place: e.place || null, at: a && !e.noAt ? [a.x, a.y] : null,
+      agents, place: e.place || null, at: a && !e.noAt ? [a.x, a.y] : null,
     };
     if (a && !e.forget) a.memory.push(`${out.time}: ${text}`);
     return out;
@@ -703,7 +708,7 @@
       return emit(W, "invite_accepted", `${b.name} accepts ${a.first}'s invite.`, b.id, { agents: [b.id, a.id] }); },
     W => { const a = W.pick(living(W).filter(x => x.age >= 25 && W.hh[x.hh].members.length > 1));
       return emit(W, "family_dinner", `${a.name} takes the family out to dinner.`, a.id,
-        { agents: W.hh[a.hh].members.filter(id => W.byId[id].alive) }); },
+        { agents: [a.id, ...W.hh[a.hh].members.filter(id => id !== a.id && W.byId[id].alive)] }); },
     W => { const a = W.pick(living(W).filter(x => x.age >= 18)), up = W.R() < 0.5, amt = up ? 50 : 40;
       a.cash += up ? amt : -amt;
       return emit(W, "money_swing", `${a.first}: ${up ? "Makes a breakthrough at work (+$50)" : "Gets a parking ticket (−$40)"}.`, a.id); },
@@ -1421,14 +1426,43 @@
       if (tx < 0 || ty < 0 || tx >= v.town.w || ty >= v.town.h) return null;
       return { kind: "tile", x: Math.floor(tx), y: Math.floor(ty) };
     }
+    v.hitAt = hitAt;            // dev only (the smoke test looks for a spot with a tooltip); not part of the facade
     const evPos = ev => { const r = canvas.getBoundingClientRect(); return { cssX: ev.clientX - r.left, cssY: ev.clientY - r.top, touch: ev.pointerType === "touch" }; };
-    canvas.addEventListener("pointermove", ev => { const e = evPos(ev); if (o.onHover) o.onHover(hitAt(e.cssX, e.cssY), e); });
-    canvas.addEventListener("pointerleave", ev => { if (o.onHover) o.onHover(null, evPos(ev)); });
-    canvas.addEventListener("click", ev => { const e = evPos(ev); if (o.onPick) o.onPick(hitAt(e.cssX, e.cssY), e); });
-    document.addEventListener("keydown", ev => {
-      const t = ev.target, tag = t && t.tagName;
-      if (ev.key !== "Escape" || tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-      if (v.selected) { v.selected = null; if (o.onSelect) o.onSelect(null); }
+    // Input as P4's camera does it: a mouse hovers; a finger hovers only by a 500 ms long-press (which then
+    // is not a tap); arrows and WASD on window pan (logged as "pan") unless focus is in an input, select or
+    // textarea.
+    let press = null;
+    canvas.addEventListener("pointerdown", ev => {
+      if (ev.pointerType !== "touch") return;
+      const e = evPos(ev);
+      clearTimeout(press && press.timer);
+      press = { x: e.cssX, y: e.cssY, long: false };
+      press.timer = setTimeout(() => { press.long = true; if (o.onHover) o.onHover(hitAt(press.x, press.y), { cssX: press.x, cssY: press.y, touch: true }); }, 500);
+    });
+    canvas.addEventListener("pointermove", ev => {
+      const e = evPos(ev);
+      if (ev.pointerType === "touch") {
+        if (press && Math.hypot(e.cssX - press.x, e.cssY - press.y) > 6) clearTimeout(press.timer);
+        return;
+      }
+      if (o.onHover) o.onHover(hitAt(e.cssX, e.cssY), e);
+    });
+    canvas.addEventListener("pointerup", ev => { if (ev.pointerType === "touch" && press) clearTimeout(press.timer); });
+    canvas.addEventListener("pointercancel", () => { if (press) clearTimeout(press.timer); press = null; });
+    canvas.addEventListener("pointerleave", ev => { if (ev.pointerType !== "touch" && o.onHover) o.onHover(null, null); });
+    canvas.addEventListener("contextmenu", ev => ev.preventDefault());
+    canvas.addEventListener("click", ev => {
+      if (press && press.long) { press = null; return; }   // the long-press showed a tooltip
+      press = null;
+      const e = evPos(ev);
+      if (o.onPick) o.onPick(hitAt(e.cssX, e.cssY), e);
+    });
+    const typing = () => { const a = document.activeElement; return !!a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable); };
+    window.addEventListener("keydown", ev => {
+      if (typing() || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      const k = ev.key.toLowerCase();
+      if (["arrowleft", "arrowright", "arrowup", "arrowdown", "w", "a", "s", "d"].includes(k)) { log("pan", [k]); ev.preventDefault(); }
+      else if (k === "escape" && v.selected) { v.selected = null; if (o.onSelect) o.onSelect(null); }
     });
     function resolve(target) {
       if (!target || !v.town) return null;

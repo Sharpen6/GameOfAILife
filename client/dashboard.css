@@ -128,6 +128,7 @@
 }
 .dash-chip:hover { border-color: #56627a; background: rgba(24, 29, 40, .94); }
 .dash-chip b { font-weight: 700; }
+.dash-chip .dash-md { margin-left: 5px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .dash-chip .warn { color: var(--stage-3); }
 .dash-chip.muted { color: var(--muted); }
 .dash-chip.amber { background: var(--dash-amber-bg); border-color: var(--dash-amber-line); color: var(--dash-amber-text); }
@@ -309,7 +310,11 @@
 .dash-barfill i { display: block; flex: 1 1 0; min-width: 2px; height: 100%; }
 .dash-barfill i:last-child { border-radius: 0 4px 4px 0; }
 .dash-bar.debt .dash-barfill { width: 18px; }
-.dash-bar.debt em { color: #ff9b9b; font-size: 11px; font-style: normal; font-weight: 600; line-height: 1; }
+.dash-bar.debt em, .dash-bar.indebt em { color: #ff9b9b; font-size: 11px; font-style: normal; font-weight: 600; line-height: 1; }
+.dash-bar.indebt { gap: 2px; }
+.dash-bar.indebt em { margin-left: 4px; }
+.dash-debtstub { display: block; flex: none; width: 10px; height: 100%; border-radius: 0 4px 4px 0; background: var(--debt); }
+.dash-bar.indebt .dash-barfill i:last-child { border-radius: 0; }
 .dash-parts { display: flex; flex-wrap: wrap; gap: 3px 12px; margin: 4px 0 6px; color: var(--muted); font-size: 12px; }
 .dash-parts b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .dash-parts.small { margin-top: 5px; font-size: 11.5px; }
@@ -602,6 +607,7 @@
   #hud.dash-hud { left: 16px; right: 16px; max-width: none; flex-wrap: nowrap; }
   #hud .dash-chip { flex: 1 1 0; min-width: 0; padding: 0 4px; font-size: 12.5px; text-align: center; overflow: hidden; text-overflow: ellipsis; }
   #hud [data-k="homes"], #hud [data-k="neglect"], #hud .dash-long { display: none; }
+  #hud .dash-md { margin-left: 2px; }
   #overlay-chips.dash-chips-map { display: none; }
   .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dash-rankhead { display: none; }
