@@ -12,6 +12,7 @@
   const DIR_OF = { e: 0, s: 1, w: 2, n: 3 };
   const VEHICLES = { car: 1, taxi: 1, ambulance: 1 };
   const LANE = 0.17, KERB = 0.4, RING = 0.22, SNAP = 12;
+  const BUS_GAP = (1.45 + 0.62) / 2 + 0.1; // bus and car half lengths plus a little air, in tiles
   CV.carColor = id => CAR_COLORS[hash(id + ":car") % CAR_COLORS.length];
 
   // state.lots and state.homes -> {placeId: {stage, works, moving, listing, vacant, anyListed, units}}.
@@ -156,7 +157,7 @@
       const ring = new Map();
       for (const ids of idle.values()) if (ids.length >= 2) { ids.sort(); ids.forEach((id, k) => { const an = 2 * Math.PI * k / ids.length; ring.set(id, [Math.cos(an) * RING, Math.sin(an) * RING]); }); }
       // buses first, so riders can point at them
-      const busRec = new Map();
+      const busRec = new Map(), busPos = [];
       for (const [key, tr] of tracks) {
         const b = tr.bus;
         if (!b) continue;
@@ -166,6 +167,7 @@
         if (s.sx) tr.axis = "x"; else if (s.sy) tr.axis = "y";
         const o = offset("bus", b.id, s.x, s.y, tr.d, true);
         const tx = s.x + 0.5 + o[0], ty = s.y + 0.5 + o[1];
+        busPos.push({ d: tr.d, x: tx, y: ty });
         const spr = art.bus(b.line || "1", tr.d, !!b.at_stop && !s.moving, b.riders | 0);
         const p = proj.toWorld(tx, ty);
         const it = { img: spr.c, sx: 0, sy: 0, sw: spr.c.width, sh: spr.c.height, wx: Math.round(p[0]) - spr.ax, wy: Math.round(p[1]) - spr.ay,
@@ -196,7 +198,24 @@
         // lerp the in-tile offset between the two ends of the move
         const o0 = offset("p", a.id, tr.prev[0], tr.prev[1], tr.d, veh), o1 = ring.get(key) || offset("p", a.id, tr.cur[0], tr.cur[1], tr.d, veh);
         const k = s.t;
-        const tx = s.x + 0.5 + o0[0] + (o1[0] - o0[0]) * k, ty = s.y + 0.5 + o0[1] + (o1[1] - o0[1]) * k;
+        let tx = s.x + 0.5 + o0[0] + (o1[0] - o0[0]) * k, ty = s.y + 0.5 + o0[1] + (o1[1] - o0[1]) * k;
+        // a car in a bus's lane keeps nose to tail with it (behind it, unless well ahead), never inside it
+        if (veh) for (const b of busPos) {
+          if (b.d % 2 !== tr.d % 2) { // crossing the bus's road at a junction: wait short of it (or clear it)
+            const bx = b.d % 2 === 0, cdir = tr.d < 2 ? 1 : -1;
+            const dl = bx ? tx - b.x : ty - b.y, dc = bx ? ty - b.y : tx - b.x; // along the bus, across it
+            if (Math.abs(dl) >= 0.725 + 0.2 || Math.abs(dc) >= 0.28 + 0.31) continue;
+            const clear = (0.28 + 0.31 + 0.06) * (dc * cdir > 0.15 ? cdir : -cdir);
+            if (bx) ty = b.y + clear; else tx = b.x + clear;
+            continue;
+          }
+          if (b.d !== tr.d) continue;
+          const ax = tr.d % 2 === 0, dir = tr.d < 2 ? 1 : -1;
+          const along = ax ? tx - b.x : ty - b.y, across = ax ? ty - b.y : tx - b.x;
+          if (Math.abs(across) > 0.3 || Math.abs(along) >= BUS_GAP) continue;
+          const side = along * dir > 0.3 ? dir : -dir;
+          if (ax) tx = b.x + side * BUS_GAP; else ty = b.y + side * BUS_GAP;
+        }
         const p = proj.toWorld(tx, ty);
         let it;
         if (veh) {

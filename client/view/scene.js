@@ -70,6 +70,7 @@
     const placeIdx = new Int16Array(N).fill(-1); // footprint owner
     const lotOf = new Int16Array(N).fill(-1);    // house or big house lot (lawn, fence)
     const zoneOf = new Uint8Array(N);            // 1 paved plaza, 2 works yard
+    const zoneOwn = new Int16Array(N).fill(-1);  // the place a paved tile belongs to
     const pathMask = new Uint8Array(N);          // park paths
     const squareOf = new Uint8Array(N);          // paved square
     const driveOf = new Int16Array(N).fill(-1);  // driveway tile of a home
@@ -96,7 +97,7 @@
       if (best >= 0) {
         const p = places[best];
         if (isHouseLike(p)) lotOf[y * W + x] = best;
-        else zoneOf[y * W + x] = p.style === "factory" ? 2 : 1;
+        else { zoneOf[y * W + x] = p.style === "factory" ? 2 : 1; zoneOwn[y * W + x] = best; }
       } else if (inRects(downtown, x, y)) zoneOf[y * W + x] = 1;
     }
     // Back gardens run from the house to the next street when the land behind it is free (Hilltop's big
@@ -210,6 +211,7 @@
     for (const s of town.stops) stopAt.set(s.y * W + s.x, s);
     const junctionSet = new Set(town.junctions.map(([x, y]) => y * W + x));
 
+    const stageOf = p => { if (p.kind !== "home") return 0; const l = scene.looks[p.id]; return l ? l.stage | 0 : 0; };
     function groundSprite(x, y) {
       const c = tiles[y][x], i = y * W + x, v = variant[i], s = scene.season;
       if (c === "#") {
@@ -225,13 +227,13 @@
       if (c === "B" || c === "D") {
         const p = places[placeIdx[i]];
         if (p && isHouseLike(p)) { const look = scene.looks[p.id]; return art.lawn(s, look ? look.stage | 0 : 0, v % 4); }
-        return art.apron(v % 4);
+        return art.apron(v % 4, p ? stageOf(p) : 0, s);
       }
       if (c === "e") {
         const p = places[entryOf.get(i)];
         if (p && p.kind === "park") return art.path(s, 15);
         const axis = p && (p.face === "e" || p.face === "w") ? "x" : "y";
-        return art.entry(s, axis, zoneOf[i] === 1 || (p && !isHouseLike(p)));
+        return art.entry(s, axis, zoneOf[i] === 1 || (p && !isHouseLike(p)), p ? stageOf(p) : 0);
       }
       if (pathMask[i]) {
         const m = (a, b) => (a >= 0 && b >= 0 && a < W && b < H && (pathMask[b * W + a] || (at(a, b) === "e" && entryOf.has(b * W + a) && places[entryOf.get(b * W + a)].kind === "park"))) ? 1 : 0;
@@ -253,7 +255,7 @@
         return art.drive(s, look ? look.stage | 0 : 0, p.face === "e" || p.face === "w" ? "x" : "y", v % 4);
       }
       if (lotOf[i] >= 0) { const look = scene.looks[places[lotOf[i]].id]; return art.lawn(s, look ? look.stage | 0 : 0, v % 4); }
-      if (zoneOf[i] === 1) return art.pavement(v % 2);
+      if (zoneOf[i] === 1) return art.pavement(v % 2, null, zoneOwn[i] >= 0 ? stageOf(places[zoneOwn[i]]) : 0, s);
       if (zoneOf[i] === 2) return art.yard(v % 4);
       return art.grass(s, v);
     }
@@ -286,6 +288,19 @@
     const inHull = (h, x, y) => { for (let i = 0; i < h.length; i++) { const a = h[i], b = h[(i + 1) % h.length]; if ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) < 0) return false; } return true; };
     scene.inHull = inHull;
 
+    // The lot tile that carries a home's listing board (SALE / RENT beside a house's walk, LET by a block's
+    // door), whether or not it is listed now, so lamps can keep clear of it for good.
+    function boardTile(p, i) {
+      if (!p.entry) return null;
+      const [ex, ey] = p.entry;
+      if (isHouseLike(p)) {
+        const alongX = p.face === "n" || p.face === "s";
+        const beside = (alongX ? [[ex - 1, ey], [ex + 1, ey]] : [[ex, ey - 1], [ex, ey + 1]]).filter(([a, b]) => lotOf[b * W + a] === i && driveOf[b * W + a] !== i);
+        return beside[0] || null;
+      }
+      const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => at(a, b) === "." || at(a, b) === "e");
+      return side[0] || null;
+    }
     function buildStatics() {
       const list = [];
       buildings = [];
@@ -326,25 +341,39 @@
         }
         if (pathMask[i] && hash(`b${x},${y}`) % 4 === 0) addSprite(list, art.bench(), x + 0.82, y + 0.3, proj.depth(x + 0.82, y + 0.3), "p");
       }
-      // street lamps on the north kerb of east-west roads and the west kerb of north-south roads
+      // street lamps on the north kerb of east-west roads and the west kerb of north-south roads; a lamp never
+      // stands in front of a door's walk or a lot's board (SALE, RENT, LET): it moves a tile along, or goes
+      const boards = new Set();
+      places.forEach((p, i) => {
+        if (p.entry) boards.add(p.entry[1] * W + p.entry[0]);
+        const t = p.kind === "home" ? boardTile(p, i) : null;
+        if (t) boards.add(t[1] * W + t[0]);
+      });
       lampPts = [];
       const nearJ = (x, y) => junctionSet.has(y * W + x) || junctionSet.has(y * W + x + 1) || junctionSet.has(y * W + x - 1) || junctionSet.has((y + 1) * W + x) || junctionSet.has((y - 1) * W + x);
-      for (const ry of town.road_rows) for (let x = 2; x < W; x += 4) {
-        if (at(x, ry) !== "#" || at(x, ry - 1) === "#" || nearJ(x, ry) || stopAt.has(ry * W + x)) continue;
+      const lampOk = (x, y, bx, by) => at(x, y) === "#" && at(bx, by) !== "#" && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx);
+      for (const ry of town.road_rows) for (let x0 = 2; x0 < W; x0 += 4) {
+        const x = [x0, x0 + 1, x0 - 1].find(a => a >= 0 && a < W && lampOk(a, ry, a, ry - 1));
+        if (x == null) continue;
         addSprite(list, art.lamp(), x + 0.5, ry + 0.07, proj.depth(x + 0.5, ry + 0.07), "l");
         lampPts.push([x + 0.5, ry + 0.07]);
       }
-      for (const rx of town.road_cols) for (let y = 2; y < H; y += 4) {
-        if (at(rx, y) !== "#" || at(rx - 1, y) === "#" || nearJ(rx, y) || stopAt.has(y * W + rx)) continue;
+      for (const rx of town.road_cols) for (let y0 = 2; y0 < H; y0 += 4) {
+        const y = [y0, y0 + 1, y0 - 1].find(b => b >= 0 && b < H && lampOk(rx, b, rx - 1, b));
+        if (y == null) continue;
         addSprite(list, art.lamp(), rx + 0.07, y + 0.5, proj.depth(rx + 0.07, y + 0.5), "l");
         lampPts.push([rx + 0.07, y + 0.5]);
       }
-      // traffic lights: north-west pole shows north-south, south-east pole shows east-west
+      // traffic lights on the two kerb corners that sit left and right on screen (north-east and south-west
+      // at rotation 0), so the two poles never stack into one post in the middle of the junction
       signals = [];
+      const cornerPts = [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
+      const sx = ([u, v]) => { const q = proj.toWorld(u, v); return q[0] - q[1] * 1e-3; };
+      const left = cornerPts.reduce((m, c) => sx(c) < sx(m) ? c : m), right = cornerPts.reduce((m, c) => sx(c) > sx(m) ? c : m);
       for (const [x, y] of town.junctions) {
         if (x <= 0 || y <= 0 || x >= W - 1 || y >= H - 1) continue;
-        const a = addSprite(list, art.signal(scene.lights.ns || "green"), x + 0.08, y + 0.08, proj.depth(x + 0.08, y + 0.08), "sig");
-        const b = addSprite(list, art.signal(scene.lights.ew || "red"), x + 0.92, y + 0.92, proj.depth(x + 0.92, y + 0.92), "sig");
+        const a = addSprite(list, art.signal(scene.lights.ns || "green"), x + left[0], y + left[1], proj.depth(x + left[0], y + left[1]), "sig");
+        const b = addSprite(list, art.signal(scene.lights.ew || "red"), x + right[0], y + right[1], proj.depth(x + right[0], y + right[1]), "sig");
         signals.push([a, "ns"], [b, "ew"]);
       }
       // bus stop shelters on the kerb
@@ -354,6 +383,7 @@
         addSprite(list, art.shelter((s.lines || ["1"]).join(",")), tx, ty, proj.depth(tx, ty), "stop", s.id);
       }
       // home lots: fences or hedges, listing signs, junk, works and moving vans
+      const snowy = !!(CV.SEASON[scene.season] && CV.SEASON[scene.season].snow);
       places.forEach((p, i) => {
         if (p.kind !== "home") return;
         const look = scene.looks[p.id] || { stage: 0 };
@@ -373,11 +403,9 @@
               addSprite(list, spr, x + 0.5, y + 0.5, proj.depth(x + ex, y + ey) + 0.02, "f", i);
             }
           }
-          const [ex, ey] = p.entry;
-          const alongX = p.face === "n" || p.face === "s";
-          const beside = (alongX ? [[ex - 1, ey], [ex + 1, ey]] : [[ex, ey - 1], [ex, ey + 1]]).filter(([a, b]) => lotOf[b * W + a] === i && driveOf[b * W + a] !== i);
           const sale = look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null;
-          if (sale && beside.length) { const [a, b] = beside[0]; addSprite(list, art.sign(sale), a + 0.5, b + (p.face === "s" ? 0.75 : 0.25), proj.depth(a + 0.5, b + 0.5), "s", i); }
+          const bt = boardTile(p, i);
+          if (sale && bt) { const [a, b] = bt; addSprite(list, art.sign(sale), a + 0.5, b + (p.face === "s" ? 0.75 : 0.25), proj.depth(a + 0.5, b + 0.5), "s", i); }
           // junk on the lot tile nearest the camera
           let best = null, bd = -1e9;
           for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
@@ -385,17 +413,18 @@
             const d = proj.depth(x + 0.5, y + 0.5) - Math.abs(x - (p.x + p.w / 2)) * 0.3;
             if (d > bd) { bd = d; best = [x, y]; }
           }
-          if (stage >= 2 && best) addSprite(list, art.junk(stage, hash(p.id) % 3), best[0] + 0.4, best[1] + 0.35, proj.depth(best[0] + 0.4, best[1] + 0.35), "j", i);
+          if (stage >= 2 && best) addSprite(list, art.junk(stage, hash(p.id) % 3, snowy), best[0] + 0.4, best[1] + 0.35, proj.depth(best[0] + 0.4, best[1] + 0.35), "j", i);
           if (look.works && best) addSprite(list, art.skip(), best[0] + 0.5, best[1] + 0.6, proj.depth(best[0] + 0.5, best[1] + 0.6), "j", i);
         } else {
           const [ex, ey] = p.entry;
           const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => at(a, b) === "." || at(a, b) === "e");
-          const t = side[0] || [ex + 1, ey];
+          const t = boardTile(p, i) || [ex + 1, ey];
           if (look.anyListed) addSprite(list, art.sign("let"), t[0] + 0.5, t[1] + 0.5, proj.depth(t[0] + 0.5, t[1] + 0.5), "s", i);
-          // rubbish on the apron by the door of a run-down block: a full bin, then bags, a mattress and scrap
+          // rubbish on the apron by the door of a run-down block: overflowing bins from shabby, then bags, a
+          // mattress and scrap
           const o = side[1] || side[0];
-          if (stage >= 3 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
-          if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
+          if (stage >= 2 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3, snowy), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
+          if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3, snowy), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
         }
         if (look.moving && p.entry) { // moving van at the kerb in front of the door
           const [ex, ey] = p.entry;
@@ -534,16 +563,18 @@
       return false;
     }
     // The buildings drawn see-through this frame: those that actually cover the selected person (or the
-    // building they are inside), or the first highlighted place. Whole buildings, never single strips.
+    // building they are inside), or the first highlighted place; and the world rect of the target. Only the
+    // part of a covering building over that rect (plus about 24 screen px) turns see-through.
     let ghostKey = "", ghostSet = null;
     function ghosts() {
+      const pad = 24 / Math.max(0.1, scene.cam.zoom);
       const m = scene.selected && scene.moverById ? scene.moverById(scene.selected) : null;
       if (m && m.item) {
         const it = m.item, h = it.hit || [0, 0, it.sw, it.sh];
         const box = [it.wx + h[0], it.wy + h[1], it.wx + h[2], it.wy + h[3]];
         const out = new Set();
         for (const r of buildings) if (hidesBox(r, box, it.depth)) out.add(r);
-        return out.size ? out : null;
+        return out.size ? { set: out, rect: [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad] } : null;
       }
       let rec = m && m.insideRec ? m.insideRec : null;
       const hp = scene.highlight && scene.highlight.places && scene.highlight.places[0];
@@ -551,7 +582,80 @@
       if (!rec) return null;
       const key = rec.p.id + "|" + staticsVersion;
       if (key !== ghostKey) { ghostKey = key; ghostSet = new Set(buildings.filter(r => r !== rec && hides(r, rec))); }
-      return ghostSet.size ? ghostSet : null;
+      if (!ghostSet.size) return null;
+      const xs = rec.hull.map(q => q[0]), ys = rec.hull.map(q => q[1]);
+      return { set: ghostSet, rect: [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) + pad, Math.max(...ys) + pad] };
+    }
+    // Draw an image part opaque outside the ghost rect and see-through inside it, with a soft edge: the inner
+    // part goes through a scratch canvas where a feathered mask (0.65 in the middle, 0 at the rect's edge)
+    // is cut out of it. Returns false when the image does not meet the rect (the caller draws it normally).
+    let gScratch = null, gMask = null, gMaskKey = "";
+    function ghostBlit(img, sx, sy, sw, sh, wx, wy, v, R) {
+      const dx0 = Math.round(wx * v.S + v.ox), dy0 = Math.round(wy * v.S + v.oy);
+      const dx1 = Math.round((wx + sw) * v.S + v.ox), dy1 = Math.round((wy + sh) * v.S + v.oy);
+      const rx0 = Math.round(R[0] * v.S + v.ox), ry0 = Math.round(R[1] * v.S + v.oy), rx1 = Math.round(R[2] * v.S + v.ox), ry1 = Math.round(R[3] * v.S + v.oy);
+      const ix0 = Math.max(dx0, rx0), iy0 = Math.max(dy0, ry0), ix1 = Math.min(dx1, rx1), iy1 = Math.min(dy1, ry1);
+      if (ix1 <= ix0 || iy1 <= iy0 || dx1 <= dx0 || dy1 <= dy0) return false;
+      g.save(); g.beginPath(); g.rect(dx0, dy0, dx1 - dx0, dy1 - dy0); g.rect(ix0, iy0, ix1 - ix0, iy1 - iy0); g.clip("evenodd");
+      g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      g.restore();
+      const iw = ix1 - ix0, ih = iy1 - iy0, rw = rx1 - rx0, rh = ry1 - ry0;
+      if (!gScratch) gScratch = CV.canvas(1, 1);
+      if (gScratch.width < iw || gScratch.height < ih) { gScratch.width = Math.max(gScratch.width, iw); gScratch.height = Math.max(gScratch.height, ih); }
+      const feather = Math.max(4, Math.round(16 * scene.dpr));
+      const mk = rw + "x" + rh + "x" + feather;
+      if (mk !== gMaskKey) {
+        gMaskKey = mk; gMask = CV.canvas(rw, rh);
+        const q = gMask.getContext("2d"), off = rw + 4 * feather;
+        q.shadowColor = "rgba(0,0,0,0.65)"; q.shadowBlur = feather; q.shadowOffsetX = off;
+        q.fillStyle = "#000"; q.fillRect(feather - off, feather, Math.max(1, rw - 2 * feather), Math.max(1, rh - 2 * feather));
+      }
+      const sq = gScratch.getContext("2d");
+      sq.setTransform(1, 0, 0, 1, 0, 0); sq.globalCompositeOperation = "source-over"; sq.clearRect(0, 0, iw, ih);
+      sq.imageSmoothingEnabled = g.imageSmoothingEnabled;
+      sq.drawImage(img, sx, sy, sw, sh, dx0 - ix0, dy0 - iy0, dx1 - dx0, dy1 - dy0);
+      sq.globalCompositeOperation = "destination-out";
+      sq.drawImage(gMask, rx0 - ix0, ry0 - iy0);
+      sq.globalCompositeOperation = "source-over";
+      g.drawImage(gScratch, 0, 0, iw, ih, ix0, iy0, iw, ih);
+      return true;
+    }
+    // The same for an additive glow: full outside the rect, at `inside` alpha within it (no feather needed).
+    function ghostGlow(img, wx, wy, v, R, base, inside) {
+      const rx0 = Math.round(R[0] * v.S + v.ox), ry0 = Math.round(R[1] * v.S + v.oy), rx1 = Math.round(R[2] * v.S + v.ox), ry1 = Math.round(R[3] * v.S + v.oy);
+      g.save(); g.beginPath(); g.rect(0, 0, cv.width, cv.height); g.rect(rx0, ry0, rx1 - rx0, ry1 - ry0); g.clip("evenodd");
+      blit(img, 0, 0, img.width, img.height, wx, wy, v);
+      g.restore();
+      g.save(); g.beginPath(); g.rect(rx0, ry0, rx1 - rx0, ry1 - ry0); g.clip();
+      g.globalAlpha = base * inside; blit(img, 0, 0, img.width, img.height, wx, wy, v);
+      g.restore();
+    }
+    // Where a building's name plate goes: over its roof, or, when a nearer building covers that point, over
+    // the highest part of it still in view (City Hall's clock tower beside the Brightline tower); null when
+    // nothing of it shows. Worked out once per static rebuild.
+    function labelAnchor(rec) {
+      if (rec.anchorV === staticsVersion) return rec.anchor;
+      rec.anchorV = staticsVersion;
+      const b = rec.b;
+      const depthAt = wx => { const sl = rec.slices.find(q => wx >= q.wx && wx < q.wx + q.sw); return sl ? sl.depth : rec.depth; };
+      const near = buildings.filter(B => B !== rec && B.b.ox < b.ox + b.c.width && B.b.ox + B.b.c.width > b.ox && B.b.oy < b.oy + b.c.height && B.b.oy + B.b.c.height > b.oy);
+      const covered = (wx, wy) => {
+        const d = depthAt(wx);
+        for (const B of near) { const sl = B.slices.find(q => wx >= q.wx && wx < q.wx + q.sw); if (sl && sl.depth > d && opaqueAt(B, wx, wy)) return true; }
+        return false;
+      };
+      if (!near.length || !covered(rec.label[0], rec.label[1])) { rec.anchor = rec.label; return rec.anchor; }
+      let best = null;
+      for (let x = b.ox + 2; x < b.ox + b.c.width - 2; x += 2) {
+        let top = null;
+        for (let y = b.oy; y < b.oy + b.c.height; y++) if (opaqueAt(rec, x, y) && !covered(x, y)) { top = y; break; }
+        if (top == null || (best && top >= best[1])) continue;
+        let n = 0, m = 0; // most of a 12 x 12 patch under it must show, so a lone antenna does not win
+        for (let yy = top; yy < top + 12; yy += 2) for (let xx = x - 6; xx <= x + 6; xx += 2) { m++; if (opaqueAt(rec, xx, yy) && !covered(xx, yy)) n++; }
+        if (n >= m * 0.4) best = [x, top];
+      }
+      rec.anchor = best ? [best[0], best[1] - 10] : null;
+      return rec.anchor;
     }
     // A person (or vehicle) item whose foot point lies under a nearer building's opaque pixels.
     function hiddenItem(it) {
@@ -820,7 +924,7 @@
       g.imageSmoothingEnabled = S < 1;
       const night = scene.nightAlpha(scene.minute);
       const ms = scene.movers;
-      const ghost = scene.ghost = ghosts();
+      const gh = ghosts(), ghost = scene.ghost = gh ? gh.set : null;
       let i = 0, j = 0, n = 0;
       const pad = 2;
       const dyn = [];
@@ -830,21 +934,21 @@
         const s = i < statics.length ? statics[i] : null, m = j < merged.length ? merged[j] : null;
         const it = m && (!s || m.depth < s.depth) ? (j++, m) : (i++, s);
         if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx + it.sw < v.x0 - pad || it.wy + it.sh < v.y0 - pad) continue;
-        const alpha = ghost && it.rec && ghost.has(it.rec) ? 0.35 : 1;
-        if (alpha !== 1) g.globalAlpha = alpha;
-        blit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v);
-        if (alpha !== 1) g.globalAlpha = 1;
+        if (!(ghost && it.rec && ghost.has(it.rec) && ghostBlit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v, gh.rect))) blit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v);
         if (it.extra) it.extra(g, v);
         n++;
       }
       scene.stats.items = n; scene.stats.chunks = nch;
       smoke(v, now);
+      // rain: an overcast wash, so a still frame reads as wet weather too
+      const raining = scene.weather === "rain" || scene.weather === "storm";
+      if (raining) { g.fillStyle = "rgba(40,50,70,0.15)"; g.fillRect(0, 0, cv.width, cv.height); }
       // night: an alpha tint toward blue, a warm wash at dusk and dawn, then the emissive lights
       if (night > 0) {
         g.fillStyle = `rgba(14,20,58,${(0.58 * night).toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height);
         const dusk = 0.1 * (1 - Math.abs(2 * night - 1));
         if (dusk > 0.005) { g.fillStyle = `rgba(255,140,60,${dusk.toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height); }
-        emissive(v, night, now, ghost);
+        emissive(v, night, now, gh);
       }
       const wet = scene.weather === "rain" || scene.weather === "snow" || scene.weather === "storm";
       if (wet) weather(now, scene.season === "winter" || scene.weather === "snow");
@@ -930,19 +1034,18 @@
       }
     }
 
-    function emissive(v, night, now, ghost) {
+    function emissive(v, night, now, gh) {
       const S = v.S, lit = litPlaces(), base = Math.min(1, night * 0.95);
       g.globalCompositeOperation = "lighter";
       g.globalAlpha = base;
-      // a see-through building's glows fade with it
-      const fade = rec => { if (ghost && ghost.has(rec)) g.globalAlpha = base * 0.35; };
+      // a see-through building's glows fade with it, where it is see-through
+      const ghosted = rec => gh && gh.set.has(rec);
+      const glow = (rec, img, wx, wy) => { if (ghosted(rec)) ghostGlow(img, wx, wy, v, gh.rect, base, 0.35); else blit(img, 0, 0, img.width, img.height, wx, wy, v); g.globalAlpha = base; };
       for (const rec of buildings) {
         if (!lit.has(rec.p.id)) continue;
         const gl = glowOf(rec, lit.get(rec.p.id));
         if (!gl || gl.wx > v.x1 || gl.wy > v.y1 || gl.wx + gl.c.width < v.x0 || gl.wy + gl.c.height < v.y0) continue;
-        fade(rec);
-        blit(gl.c, 0, 0, gl.c.width, gl.c.height, gl.wx, gl.wy, v);
-        g.globalAlpha = base;
+        glow(rec, gl.c, gl.wx, gl.wy);
       }
       const occ = occlusionOf();
       if (scene.quality !== "low") {
@@ -955,9 +1058,7 @@
         });
         for (const rec of buildings) {
           const b = rec.b, vis = occ.porch.get(rec) || [], imgs = occ.porchImg.get(rec) || [];
-          fade(rec);
-          [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) blit(img, 0, 0, img.width, img.height, q[0] - 22, q[1] - 12, v); });
-          g.globalAlpha = base;
+          [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) glow(rec, img, q[0] - 22, q[1] - 12); });
         }
         for (const m of scene.movers) if (m.lights != null && m.moving) { const spr = art.headlights(m.lights); blit(spr.c, 0, 0, spr.c.width, spr.c.height, m.cx - spr.ax, m.cy - spr.ay, v); }
       }
@@ -973,22 +1074,28 @@
       for (const m of scene.movers) if (m.blink && Math.floor(now / 250) % 2 === 0) dot(m.cx, m.cy - 22, 4, 3, `rgba(80,160,255,${Math.max(0.6, night)})`);
     }
 
-    // Rain or snow in screen space, density by viewport area.
+    // Rain or snow in screen space, density by viewport area (CSS px). Rain falls as slanted 2-px streaks,
+    // 10-14 px long, along the way the drops drift; snow as 2-px flakes.
     const drops = [];
     let lastRain = 0;
     function weather(now, snow) {
-      const want = Math.round(cv.width * cv.height / (snow ? 7000 : 9000) * (scene.quality === "low" ? 0.5 : 1));
-      while (drops.length < want) drops.push({ x: Math.random() * cv.width, y: Math.random() * cv.height, s: 2 + Math.random() * 3 });
+      const k = scene.dpr, area = (cv.width / k) * (cv.height / k);
+      const want = Math.round(area / (snow ? 7000 : 4000) * (scene.quality === "low" ? 0.5 : 1));
+      while (drops.length < want) drops.push({ x: Math.random() * cv.width, y: Math.random() * cv.height, s: 2 + Math.random() * 3, l: 10 + Math.random() * 4 });
       const dt = Math.min(0.1, (now - lastRain) / 1000 || 0); lastRain = now;
-      g.fillStyle = snow ? "rgba(255,255,255,.9)" : "rgba(170,200,255,.5)";
-      const k = scene.dpr;
+      const vx = -80, vy = 520, vl = Math.hypot(vx, vy);
+      if (snow) g.fillStyle = "rgba(255,255,255,.9)";
+      else { g.strokeStyle = "rgba(200,220,255,0.7)"; g.lineWidth = 2 * k; g.lineCap = "butt"; g.beginPath(); }
       for (let i = 0; i < want; i++) {
         const d = drops[i];
-        d.y += (snow ? 40 : 520) * dt * (d.s / 3) * k; d.x += (snow ? Math.sin(d.y / 30) * 12 : -80) * dt * k;
-        if (d.y > cv.height) { d.y = -8; d.x = Math.random() * (cv.width + 60); }
-        if (d.x < -10) d.x = cv.width + 5;
-        if (snow) g.fillRect(d.x, d.y, 2 * k, 2 * k); else g.fillRect(d.x, d.y, k, (d.s + 5) * k);
+        d.y += (snow ? 40 : vy) * dt * (d.s / 3) * k; d.x += (snow ? Math.sin(d.y / 30) * 12 : vx * (d.s / 3)) * dt * k;
+        if (d.y > cv.height) { d.y = -16 * k; d.x = Math.random() * (cv.width + 60 * k); }
+        if (d.x < -16 * k) d.x = cv.width + 5;
+        if (snow) { g.fillRect(d.x, d.y, 2 * k, 2 * k); continue; }
+        const L = d.l * k;
+        g.moveTo(d.x, d.y); g.lineTo(d.x + vx / vl * L, d.y + vy / vl * L);
       }
+      if (!snow) g.stroke();
     }
 
     function plane(v, now, night) {
@@ -1054,7 +1161,7 @@
       } else if (selM && selM.insideRec) {
         const rec = selM.insideRec;
         outlineHull(rec, pulse ? "#ffe27a" : "#f6a945", v);
-        const [x, y] = toScr(rec.label[0], rec.label[1]);
+        const an = labelAnchor(rec) || rec.label, [x, y] = toScr(an[0], an[1]);
         plateOf.set(rec, plate(`${(selM.name || "").split(" ")[0]} · inside`, x, y - 4 * k, "#2a1d05", "#ffe27a", true, padOf(rec)));
       }
       // hovered person
@@ -1066,7 +1173,7 @@
       const hl = scene.highlight;
       if (hl && hl.places) for (const id of hl.places) {
         const rec = buildings.find(r => r.p.id === id);
-        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v); const [x, y] = toScr(rec.label[0], rec.label[1]); if (!plateOf.get(rec)) plateOf.set(rec, plate(rec.p.name, x, y, "#08202e", "#9fdcff", true, padOf(rec))); }
+        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v); const an = labelAnchor(rec) || rec.label, [x, y] = toScr(an[0], an[1]); if (!plateOf.get(rec)) plateOf.set(rec, plate(rec.p.name, x, y, "#08202e", "#9fdcff", true, padOf(rec))); }
       }
       if (hl && hl.agents && scene.moverById) for (const id of hl.agents) {
         const m = scene.moverById(id);
@@ -1087,25 +1194,40 @@
         for (const rec of buildings) {
           if (rec.p.kind === "home" && (rec.p.style !== "apartments" || z < 1)) continue;
           if (plateOf.has(rec)) continue;
-          const [x, y] = toScr(rec.label[0], rec.label[1]);
+          const an = labelAnchor(rec); // re-anchored when a nearer building covers the roof
+          if (!an) { plateOf.set(rec, null); continue; }
+          const [x, y] = toScr(an[0], an[1]);
           plateOf.set(rec, plate(rec.p.name, x, y, "#ffffff", "rgba(20,24,34,.78)", false, padOf(rec)));
         }
         if (z >= 0.75) for (const p of parks) { const c = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2, 6); const [x, y] = toScr(c[0], c[1]); plate(p.name, x, y, "#eaffdf", "rgba(28,60,24,.8)"); }
       } else {
-        g.font = `700 ${13 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+        // district names, sized to the district: clamp(9, width / (letters * 1.1), 13) CSS px, letter-spaced
+        // only when 12 px or more; kept between the left edge and the control stack, and left out when the
+        // pill would be wider than 70% of its district
+        const ctlL = (scene.reserved || []).filter(q => q[2] > cv.width / k - 80 && q[1] < cv.height / k * 0.6).reduce((m, q) => Math.min(m, q[0]), cv.width / k);
         for (const d of town.districts) {
           if (!d.rects || !d.rects.length) continue;
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
           for (const r of d.rects) { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); }
+          let sx0 = Infinity, sx1 = -Infinity;
+          for (const [a, b] of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) { const q = toScr(...proj.toWorld(a, b, 0)); sx0 = Math.min(sx0, q[0]); sx1 = Math.max(sx1, q[0]); }
+          const dw = (sx1 - sx0) / k; // the district's projected width, CSS px
+          const name = d.name.toUpperCase(), fs = Math.max(9, Math.min(13, dw / (name.length * 1.1)));
+          const text = fs >= 12 ? name.split("").join(" ") : name;
+          g.font = `700 ${(fs * k).toFixed(1)}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+          const w = g.measureText(text).width + 14 * k, hh = Math.round(fs * 1.65) * k;
+          if (w / k > dw * 0.7) continue;
           const c = proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2, 40);
-          const [x, y] = toScr(c[0], c[1]);
-          const text = d.name.toUpperCase().split("").join(" ");
-          const w = g.measureText(text).width + 16 * k;
-          const r = [x - w / 2, y - 11 * k, x + w / 2, y + 11 * k];
-          if (hit(r)) continue;
+          let [x, y] = toScr(c[0], c[1]);
+          // kept on screen clear of the controls, but never slid off its own district onto a neighbour
+          const lo = Math.max(4 * k + w / 2, sx0 + w / 2), hi = Math.min(ctlL * k - 4 * k - w / 2, sx1 - w / 2);
+          if (lo > hi) continue;
+          x = Math.max(lo, Math.min(hi, x));
+          const r = [x - w / 2, y - hh / 2, x + w / 2, y + hh / 2];
+          if (r[0] < 0 || offScreen(r) || hit(r)) continue;
           placed.push(r);
           g.fillStyle = "rgba(10,14,22,0.55)";
-          roundRect(r[0], r[1], w, 22 * k, 5 * k); g.fill();
+          roundRect(r[0], r[1], w, hh, 5 * k); g.fill();
           g.fillStyle = "rgba(255,255,255,0.88)"; g.fillText(text, x, y + k);
         }
         g.font = `600 ${11 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`;
@@ -1118,7 +1240,9 @@
           const r = plateOf.get(rec);
           if (r) { badge(String(c), r[2] - 3 * k, r[1], k); continue; }
           if (plateOf.has(rec)) continue; // its plate was dropped: no badge floating on its own
-          const [x, y] = toScr(rec.label[0], rec.label[1]);
+          const an = labelAnchor(rec);
+          if (!an) continue;
+          const [x, y] = toScr(an[0], an[1]);
           const bx = x + 14 * k, by = y - 4 * k, br = [bx - 10 * k, by - 9 * k, bx + 10 * k, by + 9 * k];
           if (hit(br)) continue;
           placed.push(br);
@@ -1198,7 +1322,8 @@
         if (sa !== sb) {
           changed = true;
           if (((a && a.stage) | 0) !== ((b && b.stage) | 0)) {
-            let x0 = p.x - 1, y0 = p.y - 1, x1 = p.x + p.w + 1, y1 = p.y + p.h + 1;
+            const m = isHouseLike(p) ? 1 : 2; // a block's paving reaches two tiles out
+            let x0 = p.x - m, y0 = p.y - m, x1 = p.x + p.w + m, y1 = p.y + p.h + m;
             for (const [x, y] of lotTiles[placeById.get(p.id)]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 1); y1 = Math.max(y1, y + 1); }
             invalidateRect(x0, y0, x1, y1);
           }

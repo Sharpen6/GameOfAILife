@@ -320,16 +320,21 @@
         for (let i = 0; i < 4; i++) if (i % 2 === 0) poly(g, D(i / 4, 0, (i + 1) / 4, 1), b); // mowed stripes
         speckle(g, v * 7 + 1, [shade(a, 0.92)], 10);
         if (S.flower.length && v % 2 === 0) speckle(g, v * 3 + 2, S.flower, 4, 0.1, 0.9);
-      } else if (stage === 1) { // unmown: no stripes, longer blades and dandelions
-        const base = mix(S.grass, "#8a9a3a", 0.12);
+      } else if (stage === 1) { // unmown: no stripes, the grass grown out unevenly in tall clumps
+        const base = mix(S.grass, "#8a9a3a", 0.14);
         poly(g, D(0, 0, 1, 1), base);
-        speckle(g, v * 97 + 1, [S.dark, S.light, shade(base, 0.88)], 30);
-        tufts(g, v * 5 + 1, 14, S.dark, S.light, 0.06, 0.94, true);
+        speckle(g, v * 97 + 1, [S.dark, S.light, shade(base, 0.88)], 26);
+        tufts(g, v * 5 + 1, 6, S.dark, S.light, 0.06, 0.94, true);
         const R = rng(v * 41 + 9);
-        for (let i = 0; i < 6; i++) { // dandelion heads, some gone to seed
-          const p = T(0.1 + R() * 0.8, 0.1 + R() * 0.8), x = Math.round(p[0]), y = Math.round(p[1]);
-          g.fillStyle = "#3f7a2a"; g.fillRect(x, y, 1, 2);
-          g.fillStyle = i % 3 === 2 ? "#f4f4ec" : "#f6d21a"; g.fillRect(x - 1, y - 1, 2, 2);
+        for (let c = 0; c < 3; c++) { // clumps: a darker footing, then long blades of uneven height
+          const cu = 0.18 + R() * 0.64, cw = 0.18 + R() * 0.64;
+          poly(g, D(cu - 0.07, cw - 0.05, cu + 0.07, cw + 0.06), shade(base, 0.86));
+          for (let i = 0; i < 10; i++) {
+            const p = T(cu + (R() - 0.5) * 0.16, cw + (R() - 0.5) * 0.14), x = Math.round(p[0]), y = Math.round(p[1]), hh = 3 + Math.floor(R() * 4);
+            g.fillStyle = shade(base, 0.68); g.fillRect(x, y - hh + 1, 1, hh);
+            if (R() < 0.5) g.fillRect(x + 1, y - hh + 3, 1, hh - 2);
+            g.fillStyle = shade(base, 1.18); g.fillRect(x, y - hh, 1, 1);
+          }
         }
       } else if (stage === 2) { // mostly straw-yellow with a few green patches
         const base = mix(S.grass, "#c8b46a", 0.6);
@@ -345,12 +350,22 @@
         }
         speckle(g, v * 19 + 3, ["#a89a58", "#8a8a48", "#e0d090"], 26);
         tufts(g, v * 9 + 4, 14, shade(base, 0.76), shade(base, 1.12), 0.08, 0.92, true);
-      } else if (stage === 3) {
-        const base = mix(S.grass, "#3f6a2a", 0.45);
+      } else if (stage === 3) { // overgrown and gone to seed: olive-khaki, pale seed heads, brown patches
+        const base = mix(S.grass, "#86803a", 0.6);
         poly(g, D(0, 0, 1, 1), base);
-        tufts(g, v * 7919 + 3, 22, "#2f5422", "#5f8a34", 0.06, 0.94, true); // long grass
-        tufts(g, v * 31 + 3, 8, "#3e6e2a", "#7a9a3a", 0.06, 0.94, true);
-        speckle(g, v * 3 + 11, ["#e8d34a", "#f2f2f2"], 4, 0.1, 0.9); // weeds in flower
+        const R = rng(v * 23 + 3);
+        for (let i = 0; i < 2; i++) { // dead brown patches
+          const u = 0.12 + R() * 0.6, w = 0.12 + R() * 0.12, vv = 0.12 + R() * 0.6;
+          poly(g, D(u, vv, u + w, vv + w * 0.8), mix(base, "#7a5e3a", 0.55));
+          speckle(g, v * 7 + i, ["#6a5034", "#8a7048"], 4, Math.min(u, vv), Math.min(0.95, Math.max(u, vv) + w));
+        }
+        speckle(g, v * 19 + 3, [shade(base, 0.86), shade(base, 1.1), "#a89a58"], 24);
+        for (let i = 0; i < 24; i++) { // long stalks: a deep-green shadow, an olive blade, a pale seed head
+          const p = T(0.06 + R() * 0.88, 0.06 + R() * 0.88), x = Math.round(p[0]), y = Math.round(p[1]), hh = 3 + Math.floor(R() * 4);
+          g.fillStyle = "#3a5424"; g.fillRect(x + 1, y - hh + 3, 1, hh - 2);
+          g.fillStyle = shade(base, 0.78); g.fillRect(x, y - hh + 1, 1, hh);
+          g.fillStyle = i % 4 ? "#c8bd7a" : "#e2d8a0"; g.fillRect(x, y - hh - 1, 1, 2);
+        }
       } else {
         const base = mix(S.grass, "#9a8a52", 0.7);
         poly(g, D(0, 0, 1, 1), base);
@@ -364,26 +379,60 @@
       }
     });
     // Driveway beside a house: a concrete strip from the street to the house, on the lawn.
+    // In winter a kept home's drive is shovelled (bare concrete between snow banks); from stage 1 it is left
+    // under the snow with tyre ruts.
+    const strip = (axis, a, b, c0, c1) => axis === "y" ? D(a, c0, b, c1) : D(c0, a, c1, b);
     art.drive = (season, stage, axis, v) => groundTile(`dr:${season}:${stage}:${axis}:${v}`, g => {
       g.drawImage(art.lawn(season, stage, v), 0, 0);
+      if (SEASON[season].snow) {
+        if (stage === 0) {
+          poly(g, strip(axis, 0.18, 0.82, 0, 1), "#ffffff");
+          poly(g, strip(axis, 0.25, 0.75, 0, 1), "#aea89c");
+          poly(g, strip(axis, 0.25, 0.75, 0.48, 0.52), "#9c968a");
+          speckle(g, v * 3 + 1, ["#c8c2b6", "#ffffff"], 8, 0.3, 0.7);
+        } else {
+          poly(g, strip(axis, 0.22, 0.78, 0, 1), "#e6ecee");
+          for (const r of [0.33, 0.6]) poly(g, strip(axis, r, r + 0.06, 0, 1), "#c6ced2");
+        }
+        return;
+      }
       const c = stage >= 3 ? "#a9a49a" : "#c4bfb3";
-      if (axis === "y") poly(g, D(0.22, 0, 0.78, 1), c); else poly(g, D(0, 0.22, 1, 0.78), c);
-      if (axis === "y") poly(g, D(0.22, 0.48, 0.78, 0.52), shade(c, 0.9)); else poly(g, D(0.48, 0.22, 0.52, 0.78), shade(c, 0.9));
+      poly(g, strip(axis, 0.22, 0.78, 0, 1), c);
+      poly(g, strip(axis, 0.22, 0.78, 0.48, 0.52), shade(c, 0.9));
       if (stage >= 3) speckle(g, v * 3, ["#7a7468", "#5f8a34"], 10, 0.25, 0.75);
     });
+    // Cracks with weeds in them, on the paving round a run-down block of flats (stage 2 and up): jagged dark
+    // lines with a pale lip, tufts in the cracks, and from stage 3 a broken slab.
+    function cracks(g, stage, v, season) {
+      if (stage < 2) return;
+      const R = rng(v * 97 + stage * 13 + 5), weed = SEASON[season].snow ? ["#7a6a4a", "#a8946a"] : ["#4f7f2c", "#7cab3e"];
+      for (let c = 0; c < stage - 1; c++) {
+        let u = 0.1 + R() * 0.8, w = R() < 0.5 ? 0.04 : 0.96;
+        const du = (R() - 0.5) * 0.12, dw = w < 0.5 ? 0.09 : -0.09;
+        for (let k = 0; k < 9; k++) {
+          const p = T(u, w), x = Math.round(p[0]), y = Math.round(p[1]);
+          g.fillStyle = "#6e695e"; g.fillRect(x, y, 2, 1); g.fillStyle = "#d8d2c4"; g.fillRect(x, y + 1, 2, 1);
+          if (k % 3 === 2) { g.fillStyle = weed[0]; g.fillRect(x, y - 2, 1, 3); g.fillRect(x + 2, y - 1, 1, 2); g.fillStyle = weed[1]; g.fillRect(x + 1, y - 3, 1, 3); }
+          u = Math.max(0.04, Math.min(0.96, u + du + (R() - 0.5) * 0.1)); w += dw;
+        }
+      }
+      if (stage >= 3) { const u = 0.2 + R() * 0.5, w = 0.2 + R() * 0.5; poly(g, D(u, w, u + 0.18, w + 0.14), "#9a9488"); poly(g, D(u + 0.02, w + 0.02, u + 0.16, w + 0.12), "#857f72"); speckle(g, v + 3, weed, 4, Math.min(u, w), Math.max(u, w) + 0.15); }
+    }
     // Paved plaza: stone slabs in two tones with joints. Downtown and around shops and flats.
-    art.pavement = (v, tone) => groundTile(`pv:${tone || ""}:${v}`, g => {
+    art.pavement = (v, tone, stage, season) => groundTile(`pv:${tone || ""}:${v}:${stage | 0}:${stage >= 2 ? season : ""}`, g => {
       const base = tone || "#cbc4b4", alt = shade(base, 0.95), joint = shade(base, 0.84);
       poly(g, D(0, 0, 1, 1), base);
       for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) if ((i + j + v) % 2) poly(g, D(i / 2, j / 2, (i + 1) / 2, (j + 1) / 2), alt);
       poly(g, D(0.49, 0, 0.52, 1), joint); poly(g, D(0, 0.49, 1, 0.52), joint);
       poly(g, D(0, 0, 0.03, 1), joint); poly(g, D(0, 0, 1, 0.03), joint);
       speckle(g, v * 41 + 7, [shade(base, 0.9), shade(base, 1.05)], 8);
+      cracks(g, stage | 0, v, season || "summer");
     });
     // Concrete apron around a building's inset body.
-    art.apron = v => groundTile(`ap:${v}`, g => {
+    art.apron = (v, stage, season) => groundTile(`ap:${v}:${stage | 0}:${stage >= 2 ? season : ""}`, g => {
       poly(g, D(0, 0, 1, 1), "#b4afa3");
       speckle(g, v * 5 + 1, ["#a39e92", "#c2bdb1"], 10);
+      cracks(g, stage | 0, v + 11, season || "summer");
     });
     // Works yard: gravel with painted bay markings.
     art.yard = v => groundTile(`y:${v}`, g => {
@@ -393,12 +442,21 @@
       if (v % 4 === 2) { poly(g, D(0.3, 0.3, 0.5, 0.45), "#4a4a46"); }
     });
     // The walk from a door to the street.
-    art.entry = (season, axis, paved) => groundTile(`e:${season}:${axis}:${paved ? 1 : 0}`, g => {
+    // The walk from a door to the street. In winter a kept home (stage 0) has it shovelled: bare flags
+    // between white banks; from stage 1 it lies under the snow with a line of footprints.
+    art.entry = (season, axis, paved, stage) => groundTile(`e:${season}:${axis}:${paved ? 1 : 0}:${SEASON[season].snow && !paved ? (stage ? 1 : 0) : 0}`, g => {
       const S = SEASON[season];
       if (paved) { g.drawImage(art.pavement(1), 0, 0); return; }
       poly(g, D(0, 0, 1, 1), S.grass);
       speckle(g, 5, [S.dark, S.light], 16);
-      const c = S.snow ? "#e6e2d8" : "#d8cfbd", e = shade(c, 0.85);
+      if (S.snow && stage) {
+        const c = "#eef2f2";
+        if (axis === "y") poly(g, D(0.32, 0, 0.68, 1), c); else poly(g, D(0, 0.32, 1, 0.68), c);
+        for (let i = 0; i < 4; i++) { const p = axis === "y" ? T(0.45 + (i % 2) * 0.1, 0.12 + i * 0.24) : T(0.12 + i * 0.24, 0.45 + (i % 2) * 0.1); g.fillStyle = "#c2cacc"; g.fillRect(Math.round(p[0]), Math.round(p[1]), 2, 1); }
+        return;
+      }
+      if (S.snow) { if (axis === "y") poly(g, D(0.27, 0, 0.73, 1), "#ffffff"); else poly(g, D(0, 0.27, 1, 0.73), "#ffffff"); }
+      const c = S.snow ? "#bdb6aa" : "#d8cfbd", e = shade(c, 0.85);
       if (axis === "y") { poly(g, D(0.32, 0, 0.68, 1), e); poly(g, D(0.35, 0, 0.65, 1), c); for (let i = 1; i < 4; i++) poly(g, D(0.35, i / 4, 0.65, i / 4 + 0.025), e); }
       else { poly(g, D(0, 0.32, 1, 0.68), e); poly(g, D(0, 0.35, 1, 0.65), c); for (let i = 1; i < 4; i++) poly(g, D(i / 4, 0.35, i / 4 + 0.025, 0.65), e); }
     });
@@ -764,11 +822,20 @@
       pixelText(g, t, 13 - Math.round(textWidth(t) / 2), 5, "#ffffff");
     });
     // Junk by neglect stage: overflowing bin, then a tyre and bin bags, then an old mattress and scrap.
-    art.junk = (stage, v) => item(`j:${stage}:${v}`, 34, 26, 17, 21, g => {
+    art.junk = (stage, v, snow) => item(`j:${stage}:${v}:${snow ? 1 : 0}`, 34, 26, 17, 21, g => {
       ellipse(g, 17, 21, 14, 3, "rgba(0,0,0,.25)");
       g.fillStyle = "#2f4a2c"; g.fillRect(3, 9, 9, 12); g.fillStyle = "#3e5e3a"; g.fillRect(3, 9, 3, 12);
       g.fillStyle = "#24381f"; g.fillRect(2, 7, 11, 3);
-      if (stage >= 2) { g.fillStyle = "#1e1e1e"; g.fillRect(4, 3, 6, 5); g.fillStyle = "#e8e2d0"; g.fillRect(7, 2, 4, 2); g.fillStyle = "#c84a3a"; g.fillRect(5, 4, 2, 2); }
+      if (stage >= 2) { // overflowing: a second bin, lids pushed up on full bags, a split bag at the foot, litter
+        g.fillStyle = "#2a4428"; g.fillRect(13, 11, 8, 10); g.fillStyle = "#38563a"; g.fillRect(13, 11, 2, 10);
+        g.fillStyle = "#1e1e1e"; g.fillRect(13, 6, 8, 5); g.fillStyle = "#3a3a3e"; g.fillRect(14, 7, 2, 1);
+        g.fillStyle = "#24381f"; g.fillRect(15, 3, 8, 2); g.fillRect(21, 5, 2, 2); // lid propped open
+        g.fillStyle = "#1e1e1e"; g.fillRect(3, 3, 9, 5); g.fillStyle = "#3a3a3e"; g.fillRect(4, 4, 2, 1);
+        g.fillStyle = "#24381f"; g.fillRect(2, 1, 9, 2);
+        g.fillStyle = "#c84a3a"; g.fillRect(9, 4, 2, 2); g.fillStyle = "#e8e2d0"; g.fillRect(6, 2, 3, 1);
+        g.fillStyle = "#26262a"; g.fillRect(21, 15, 6, 6); g.fillStyle = "#44444a"; g.fillRect(22, 16, 2, 1); g.fillRect(23, 13, 2, 2);
+        g.fillStyle = "#e8e2d0"; g.fillRect(27, 20, 2, 1); g.fillRect(11, 21, 1, 1); g.fillStyle = "#c84a3a"; g.fillRect(29, 19, 2, 1); g.fillStyle = "#6a9ac8"; g.fillRect(17, 21, 2, 1);
+      }
       if (stage >= 3) {
         g.fillStyle = "#1a1a1a"; g.fillRect(15, 15, 9, 6); g.fillStyle = "#3a3a3a"; g.fillRect(17, 16, 5, 4); g.fillStyle = "#1a1a1a"; g.fillRect(18, 17, 3, 2); // tyre
         g.fillStyle = "#26262a"; g.fillRect(24, 11, 7, 8); g.fillStyle = "#44444a"; g.fillRect(25, 12, 2, 2); g.fillRect(27, 9, 2, 2); // bin bags
@@ -776,6 +843,13 @@
       if (stage >= 4) {
         g.fillStyle = "#d8cfb0"; g.fillRect(12, 6, 18, 6); g.fillStyle = "#b8ab88"; g.fillRect(12, 10, 18, 2); g.fillStyle = "#a89a7a"; g.fillRect(15, 7, 2, 1); g.fillRect(21, 8, 3, 1); // mattress
         g.fillStyle = "#8a5a3a"; g.fillRect(2, 21, 10, 2); g.fillStyle = "#6a6a70"; g.fillRect(26, 20, 6, 2);
+      }
+      if (snow) { // snow caps on whatever pokes out, and a drift round the foot
+        g.fillStyle = "#ffffff"; g.fillRect(2, 6, 11, 2);
+        if (stage >= 2) { g.fillRect(2, 0, 9, 1); g.fillRect(15, 2, 8, 1); g.fillRect(13, 5, 2, 1); g.fillRect(21, 14, 6, 1); }
+        if (stage >= 3) { g.fillRect(15, 14, 9, 1); g.fillRect(24, 10, 7, 2); }
+        if (stage >= 4) g.fillRect(12, 5, 18, 2);
+        g.fillStyle = "#e8eef2"; g.fillRect(1, 19, 14, 3); if (stage >= 3) g.fillRect(14, 19, 18, 3);
       }
     });
     // Skip (builder's dumpster) during works.
