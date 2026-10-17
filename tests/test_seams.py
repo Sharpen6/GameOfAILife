@@ -395,12 +395,17 @@ class TestTransit(unittest.TestCase):
     def test_fares(self):
         self.assertEqual([transit.fare(a) for a in (6, 17, 18, 40, 64, 65, 80)], [0, 0, 2, 2, 2, 0, 0])
 
-    def test_p1_stubs(self):
+    def test_p1_buses(self):  # was test_p1_stubs: P1 runs the buses (tests/test_transit.py has the rest)
         for tick in (0, 360, 18240):
-            self.assertEqual(transit.bus_rows(tick), [])
-            self.assertIs(transit.doors_open("1", "maple_west", tick), False)
-        self.assertIsNone(transit.best_trip(SimpleNamespace(), (10, 24), "hospital", 360))
-        self.assertIsNone(transit.best_trip(SimpleNamespace(), (10, 24), "hospital", 360, worst=True))
+            rows = transit.bus_rows(tick)
+            self.assertEqual([r["id"] for r in rows], ["1a", "1b", "1c", "1d", "2a", "2b", "2c", "2d"])
+            self.assertEqual(rows, transit.bus_rows(tick))
+            self.assertIs(transit.doors_open("1", "maple_west", tick), False)  # no bus stands there then
+        self.assertIs(transit.doors_open("1", "maple_west", self.DOORS["1"]["maple_west"]), True)
+        town = town_module.build_map(1)
+        walk = town.walk_minutes((10, 24), "hospital")
+        self.assertEqual(transit.best_trip(town, (10, 24), "hospital", 360)[1:], ("1", "maple_west", "downtown_east"))
+        self.assertLessEqual(transit.best_trip(town, (10, 24), "hospital", 360, worst=True)[0], walk - 5)
 
 
 # --- fakes for travel: only what PLAN 3.10 says travel reads ------------------------------------
