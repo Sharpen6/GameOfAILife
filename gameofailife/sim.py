@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import cast, chronicle, housing, stats, transit, travel
+from . import chronicle, housing, stats, transit, travel
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
@@ -104,6 +104,8 @@ def _r1(x: float) -> float:
 class Simulation:
     def __init__(self, seed: int = 1, now: Callable[[], float] = time.monotonic,
                  luck_log_path: str | None = None):
+        from . import cast  # here, not at the top, so `python3 -m gameofailife.cast` runs it only once
+
         self.seed = seed
         self.rng = random.Random(seed)
         self.now = now
@@ -166,6 +168,14 @@ class Simulation:
                 or self.clock.minute_of_day > job.start_hour * 60 + WORK_LATE):
             return None
         return self.clock.tick - self.clock.minute_of_day + job.start_hour * 60
+
+    def _fits_before_closing(self, place, minutes: int, walk: int = 0) -> bool:
+        """True when the place is open `walk` minutes from now and stays open for `minutes` after that, to the
+        minute (an activity that ends as the doors shut is not cut short). A place with no hours always fits."""
+        if not place.hours:
+            return True
+        start = self.clock.minute_of_day + walk
+        return place.hours[0] * 60 <= start and start + minutes <= place.hours[1] * 60
 
     def _payer_for(self, agent: Agent, cost: float) -> Agent:
         """Children's costs they can't cover are paid by an adult in the household."""
@@ -440,9 +450,15 @@ class Simulation:
         place_id = agent.activity_place
         paid, agent.paid = getattr(agent, "paid", None), None  # type: ignore[attr-defined]
         place = self.town.places.get(place_id or "")
-        if place and place.hours and agent.activity != "work" and not place.is_open(self.clock.hour):
-            self._find_shut(agent, place, paid)
-            return
+        if place and place.hours and agent.activity != "work":
+            if not place.is_open(self.clock.hour):
+                self._find_shut(agent, place, paid)
+                return
+            if paid and paid[1] > 0 and not self._fits_before_closing(place, act.minutes):
+                # A paid outing goes ahead only if the place stays open for all of it. The fork offered it only
+                # then, but a controller's answer can come seconds (game minutes) later, and a trip can run slow.
+                self._find_shut(agent, place, paid, closing=True)
+                return
         agent.state = "busy"
         agent.path = []
         if place_id:
@@ -499,14 +515,17 @@ class Simulation:
         if self.clock.tick >= agent.busy_until:
             self._end_activity(agent)
 
-    def _find_shut(self, agent: Agent, place, paid: tuple[str, float] | None) -> None:
-        """Nothing is served at a shut place: the money comes back and the outing is off (a shift still stands)."""
+    def _find_shut(self, agent: Agent, place, paid: tuple[str, float] | None, closing: bool = False) -> None:
+        """Nothing is served at a shut place: the money comes back and the outing is off (a shift still stands).
+
+        closing=True: the place is open but shuts before a paid outing there could be over, which is just as off.
+        """
         refund = paid[1] if paid else 0.0
         if paid:  # the first stop of the character's own choice: none of what it promised happens either
             self.agents[paid[0]].money += refund
             agent.pending_outcomes = [p for p in agent.pending_outcomes if p["fork"] != agent.fork_id]
-        self.event(f"{agent.name} finds {place.name} closed" + (f" (${refund:.0f} refunded)." if refund else "."),
-                   agent, tag="closed", place=place.id)
+        self.event(f"{agent.name} finds {place.name} {'about to close' if closing else 'closed'}"
+                   + (f" (${refund:.0f} refunded)." if refund else "."), agent, tag="closed", place=place.id)
         agent.path = []
         agent.plan = [s for s in agent.plan if s[0] == "work"]
         agent.state = "idle"
@@ -890,8 +909,11 @@ class Simulation:
                        tag="saving")
         if "ask_shop" in extra:
             other = self.agents.get(extra["ask_shop"])
+            market = self.town.places["market"]
             if (other and other.alive and self._interruptible(other)
-                    and not self._must_leave_for_work(other, "market")):
+                    and not self._must_leave_for_work(other, "market")
+                    and self._fits_before_closing(market, ACTIVITIES["buy_groceries"].minutes,
+                                                  self.walk_minutes(other, "market"))):
                 payer = other if other.money >= GROCERY_COST else agent  # the asker covers it if the shopper can't
                 payer.money -= GROCERY_COST
                 other.plan = [("relax_home", "home")]

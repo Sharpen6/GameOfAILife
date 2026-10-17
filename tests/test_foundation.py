@@ -7,16 +7,20 @@ build small scenes of their own. Ids, places and times come from the city at run
 from __future__ import annotations
 
 import asyncio
+import collections
 import heapq
 import json
 import random
+import subprocess
+import sys
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from gameofailife import chronicle, forks, housing, housing_forks, sim as sim_module, stats, transit, travel, ws
 from gameofailife.cast import CAST_SIZE
-from gameofailife.clock import MINUTES_PER_DAY
+from gameofailife.clock import MINUTES_PER_DAY, TICKS_PER_REAL_SECOND
 from gameofailife.forks import Fork, Option, Outcome, default_scores, payday_fork
 from gameofailife.server import GOD_ONLY, HOUSING_EVERY, GameServer
 from gameofailife.sim import ANSWER_SECONDS, Simulation
@@ -24,6 +28,7 @@ from gameofailife.town import ROAD, UNREACHABLE, WATER, build_map
 
 SEED = 1
 DAYS = 3
+ROOT = Path(__file__).resolve().parent.parent
 SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_log", "scores", "valence",
                "due", "pending_emergency", "roll", "base_p", "hit"}
 # Six ticks of the run whose state is measured: morning rush, midday and evening on each of the days.
@@ -686,18 +691,44 @@ class HiddenEmergencyTest(unittest.TestCase):
 
 
 class ForkShapeTest(unittest.TestCase):
+    P0_KINDS = {"invite", "work", "hunger", "sleep", "payday", "groceries", "lonely", "free_time"}
+    PROBE_EVERY = 20  # minutes between probes
+
     def test_every_builder_gives_four_distinct_options(self):
-        built = [f for f in RUN["built"] if f.tick < RUN["sim"].clock.tick - MINUTES_PER_DAY]  # seed 1, two days
-        for seed in (2, 3):
-            built += run_city(seed, 2)["built"]
-        kinds = {f.kind for f in built}
-        self.assertLessEqual({"work", "hunger", "sleep", "free_time"}, kinds)  # payday is a Friday: PaydayShoppingTest
+        """Every builder in forks.builders(), called directly for every living character every PROBE_EVERY
+        minutes of two days from Thursday 06:00 (so Friday's payday evening is in), on seeds 1-3."""
+        scalars = (bool, int, float, str, type(None))
+        seen = collections.Counter()
+        for seed in (1, 2, 3):
+            sim = Simulation(seed=seed)
+            sim.clock.tick += 3 * MINUTES_PER_DAY  # nothing has happened yet: only the weekday changes
+            for n in range(2 * MINUTES_PER_DAY):
+                sim.step()
+                if n % self.PROBE_EVERY:
+                    continue
+                for agent in sim.living():
+                    for name, builder in zip(forks.BUILDERS, forks.builders()):
+                        # What a builder notes on the character (payday's last_payday) is put back, so the
+                        # city runs on as if nobody had asked.
+                        kept = {k: v for k, v in vars(agent).items() if isinstance(v, scalars)}
+                        fork = builder(sim, agent)
+                        vars(agent).update(kept)
+                        if fork is None:
+                            continue
+                        seen[fork.kind] += 1
+                        labels = [o.label for o in fork.options]
+                        if len(labels) != 4 or len(set(labels)) != 4:
+                            self.fail(f"seed {seed} {sim.clock.stamp()} {agent.id} {fork.kind}: {labels}")
+                        self.assertEqual(fork.kind, name.rpartition(".")[2].removesuffix("_fork"))
+        self.assertLessEqual(self.P0_KINDS, set(seen), seen)
+
+    def test_forks_the_run_built_have_four_options_and_the_major_flag(self):
+        built = RUN["built"]  # seed 1, three days from Monday, through build_fork
+        self.assertLessEqual({"work", "hunger", "sleep", "free_time"}, {f.kind for f in built})
         for fork in built:
-            with self.subTest(kind=fork.kind, fork=fork.id):
-                labels = [o.label for o in fork.options]
-                self.assertEqual(len(labels), 4)
-                self.assertEqual(len(set(labels)), 4, labels)
-                self.assertEqual(fork.major, fork.kind in housing_forks.MAJOR_KINDS)
+            labels = [o.label for o in fork.options]
+            if len(set(labels)) != 4 or fork.major != (fork.kind in housing_forks.MAJOR_KINDS):
+                self.fail(f"{fork.kind} {fork.id}: {labels}, major {fork.major}")
 
 
 # --- the server -------------------------------------------------------------------------------------------------
@@ -916,6 +947,172 @@ class PaydayShoppingTest(unittest.TestCase):
                 break
         self.assertEqual(shopped, forks.SHOP_MINUTES)  # the whole trip, not cut off at closing time
         self.assertEqual(sim_module.ACTIVITIES["shopping"].minutes, forks.SHOP_MINUTES)
+
+    def ask_and_answer(self, minute: int, delay: float) -> tuple[Simulation, list[dict], int]:
+        """Dana's Friday payday fork at `minute`, asked of her controller, who picks the shopping trip `delay`
+        real seconds later; returns the sim, its events and the minutes she then shops."""
+        clock = FakeClock()
+        sim = Simulation(seed=SEED, now=clock)
+        dana = sim.agents["dana"]
+        sim.clock.tick = 4 * MINUTES_PER_DAY + minute
+        dana.last_payday, dana.money, dana.state, dana.plan = -1, 900.0, "idle", []
+        fork = payday_fork(sim, dana)
+        buy = [o.label for o in fork.options].index("Buy something nice for yourself")
+        sim.claim(dana.id, "bot")
+        with mock.patch.object(sim_module, "default_scores", lambda agent, fork, sim: [0.0] * 4):
+            sim.director(dana, fork)  # tied: no habit, so the controller is asked
+        self.assertEqual(fork.status, "asked")
+        for _ in range(int(delay * TICKS_PER_REAL_SECOND)):  # speed 1: the city goes on while the model thinks
+            sim.clock.advance()
+            sim._tick_agent(dana)
+        clock.advance(delay)
+        self.assertEqual(sim.answer(fork.id, buy, "treat myself", controller="bot"),
+                         {"accepted": True, "applied": True})
+        self.assertEqual(dana.money, 840.0)
+        shopped = 0
+        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):  # nothing else to spend it on
+            for _ in range(sim.walk_minutes(dana, "market") + 2 * forks.SHOP_MINUTES):
+                sim.clock.advance()
+                sim._tick_agent(dana)
+                if dana.activity == "shopping" and dana.state == "busy":
+                    shopped += 1
+                    self.assertTrue(sim.town.places["market"].is_open(sim.clock.hour))
+        events = sim.drain()[0]
+        if shopped:
+            self.assertEqual(dana.money, 840.0)
+        else:  # called off: the money is back and nothing it promised happens
+            self.assertEqual(dana.money, 900.0)
+            self.assertFalse([p for p in dana.pending_outcomes if p["fork"] == fork.id])
+            self.assertFalse([e for e in events if e["tag"] == "outcome" and e["agent"] == dana.id])
+        return sim, events, shopped
+
+    def test_a_late_answer_calls_off_a_trip_that_no_longer_fits(self):
+        """The controller answers 4 real seconds (9 game minutes) after the last minute the trip is offered:
+        Fresh Market would shut before the 45 minutes are up, so the trip is off and the $60 comes back."""
+        sim = Simulation(seed=SEED)
+        last = (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(sim.agents["dana"], "market")
+                - forks.SHOP_MINUTES - 1)
+        sim, events, shopped = self.ask_and_answer(last, 4.0)
+        self.assertEqual(shopped, 0)
+        closed = [e for e in events if e["tag"] == "closed"]
+        self.assertEqual([e["text"] for e in closed], ["Dana Cohen finds Fresh Market about to close ($60 refunded)."])
+        self.assertEqual(closed[0]["place"], "market")
+
+    def test_an_answer_that_still_fits_shops_for_the_whole_trip(self):
+        sim = Simulation(seed=SEED)
+        last = (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(sim.agents["dana"], "market")
+                - forks.SHOP_MINUTES - 1)
+        delay = 4.0
+        sim, events, shopped = self.ask_and_answer(last - int(delay * TICKS_PER_REAL_SECOND) + 1, delay)
+        self.assertEqual(shopped, forks.SHOP_MINUTES)  # it ends as the doors shut: not cut short
+        self.assertFalse([e for e in events if e["tag"] == "closed"])
+
+
+class CafeClosingTest(unittest.TestCase):
+    """A cafe hang-out is offered only when Corner Cafe stays open for all 90 minutes; one that no longer fits
+    when the character walks in (a late answer, a slow trip) is off and refunded if it was paid for."""
+
+    def setUp(self):
+        self.sim = Simulation(seed=SEED)
+        cafe = self.sim.town.places["cafe"]
+        far = max((a for a in self.sim.living() if a.is_adult), key=lambda a: self.sim.walk_minutes(a, "cafe"))
+        self.far, self.cafe = far, cafe
+        self.walk = self.sim.walk_minutes(far, "cafe")
+        self.last = cafe.hours[1] * 60 - self.walk - forks.HANG_OUT_MINUTES - 1  # the last minute it is offered
+        self.assertEqual(sim_module.ACTIVITIES["hang_out"].minutes, forks.HANG_OUT_MINUTES)
+        self.assertLess(self.last, 21 * 60 - 1)  # inside the free-time and lonely evenings
+
+    def at(self, minute: int) -> None:
+        self.sim.clock.tick = 2 * MINUTES_PER_DAY + minute  # Wednesday
+        self.far.state, self.far.plan, self.far.cooldowns = "idle", [], {}
+
+    def test_free_time_and_lonely_offer_the_cafe_only_while_it_fits(self):
+        far = self.far
+        far.needs["fun"], far.needs["social"], far.money = 20, 20, 500.0
+        offered = {"free_time": [], "lonely": []}
+        for minute in range(9 * 60, 21 * 60):
+            self.at(minute)
+            for kind, builder in (("free_time", forks.free_time_fork), ("lonely", forks.lonely_fork)):
+                fork = builder(self.sim, far)
+                labels = [o.label for o in fork.options]
+                self.assertEqual(len(set(labels)), 4, labels)
+                if any(step[1] == "cafe" for o in fork.options for step in o.steps):
+                    offered[kind].append(minute)
+                elif kind == "free_time":
+                    self.assertIn("Play a board game at home", labels)
+                else:
+                    self.assertIn("Message a few people from home", labels)
+        for kind, minutes in offered.items():
+            self.assertEqual(minutes, list(range(9 * 60, self.last + 1)), kind)
+
+    def decide_late(self, cost: float, minutes_late: int) -> tuple[int, list[dict]]:
+        """A cafe hang-out costing `cost`, offered at the last minute and decided `minutes_late` later; returns the
+        minutes spent hanging out there, and the events."""
+        far = self.far
+        self.at(self.last + minutes_late)
+        far.money = 500.0
+        fork = Fork(far.id, "test", "What now?", [Option(f"Hang out {i}", [("hang_out", "cafe")], cost=cost,
+                                                         outcomes=[Outcome("fun", "Has fun", 1.0, +1, {"fun": 5})])
+                                                  for i in range(4)], self.sim.clock.tick)
+        self.sim._decide(far, fork, 0, "model", "")
+        self.assertEqual(far.money, 500.0 - cost)
+        minutes = 0
+        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):
+            for _ in range(self.walk + forks.HANG_OUT_MINUTES + 30):
+                self.sim.clock.advance()
+                self.sim._tick_agent(far)
+                if far.activity == "hang_out" and far.state == "busy":
+                    minutes += 1
+        return minutes, self.sim.drain()[0]
+
+    def test_a_paid_hang_out_that_no_longer_fits_is_off_and_refunded(self):
+        minutes, events = self.decide_late(6.0, 5)
+        self.assertEqual(minutes, 0)
+        self.assertEqual(self.far.money, 500.0)
+        self.assertIn(f"{self.far.name} finds Corner Cafe about to close ($6 refunded).",
+                      [e["text"] for e in events if e["tag"] == "closed"])
+        self.assertFalse([e for e in events if e["tag"] == "outcome" and e["agent"] == self.far.id])
+
+    def test_a_paid_hang_out_that_fits_runs_its_full_time(self):
+        minutes, events = self.decide_late(6.0, 1)  # one minute later still ends as the doors shut
+        self.assertEqual(minutes, forks.HANG_OUT_MINUTES)
+        self.assertEqual(self.far.money, 494.0)
+
+    def test_a_free_hang_out_still_goes_and_ends_at_closing_time(self):
+        minutes, events = self.decide_late(0.0, 5)
+        self.assertEqual(minutes, forks.HANG_OUT_MINUTES - 4)  # nothing to refund: they stay until closing
+        self.assertFalse([e for e in events if e["tag"] == "closed"])
+
+
+class ErrandTest(unittest.TestCase):
+    def test_nobody_is_sent_shopping_where_the_market_shuts_first(self):
+        """'Ask X to do the shopping' sends X only if Fresh Market is still open for the 20-minute shop after X's
+        walk there (the $35 was spent at a shut door before)."""
+        for late, sent in ((0, True), (1, False)):
+            with self.subTest(late=late):
+                sim = Simulation(seed=SEED)
+                hh = next(h for h in sim.households.values() if sum(sim.agents[m].is_adult for m in h.member_ids) > 1)
+                asker, other = [sim.agents[m] for m in hh.member_ids if sim.agents[m].is_adult][:2]
+                latest = (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(other, "market")
+                          - sim_module.ACTIVITIES["buy_groceries"].minutes)
+                sim.clock.tick = 2 * MINUTES_PER_DAY + latest + late
+                for a in (asker, other):
+                    a.state, a.plan, a.activity, a.money = "idle", [], "idle", 300.0
+                fork = Fork(asker.id, "test", "Who shops?", [Option(f"Ask {i}", [("relax_home", "home")],
+                                                                    extra={"ask_shop": other.id}) for i in range(4)],
+                            sim.clock.tick)
+                sim._decide(asker, fork, 0, "model", "")
+                self.assertEqual(other.activity_place == "market", sent)
+                self.assertEqual(other.money, 300.0 - sim_module.GROCERY_COST if sent else 300.0)
+
+
+class CastDumpTest(unittest.TestCase):
+    def test_the_dump_command_runs_cast_once(self):
+        """`python3 -m gameofailife.cast --dump 1`: no runpy warning that the package had already imported cast."""
+        out = subprocess.run([sys.executable, "-m", "gameofailife.cast", "--dump", "1"], cwd=ROOT,
+                             capture_output=True, text=True, check=True)
+        self.assertEqual(out.stderr, "")
+        self.assertTrue(out.stdout.startswith("{"))
 
 
 # --- the map and the timing ---------------------------------------------------------------------------------------

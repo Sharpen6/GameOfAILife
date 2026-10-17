@@ -25,6 +25,7 @@ KID_CURFEW = 19  # hour after which characters under 18 stay home for the night
 WORK_LEAD = 45  # minutes before a shift the work fork opens (more if the walk is long)
 WORK_LATE = 60  # minutes after a shift starts that the work fork still opens, for a late arrival
 SHOP_MINUTES = 45  # how long the payday shopping trip takes (sim.ACTIVITIES["shopping"])
+HANG_OUT_MINUTES = 90  # how long hanging out at a cafe takes (sim.ACTIVITIES["hang_out"])
 
 _ids = itertools.count(1)
 
@@ -366,13 +367,19 @@ def lonely_fork(sim: Simulation, agent: Agent) -> Fork | None:
     friend = _best_friend(sim, agent)
     family = _closest_family(sim, agent)
     opts = []
-    if friend and sim.town.places["cafe"].is_open(hour + 1):
+    cafe = _open_on_arrival(sim, agent, "cafe", stay=HANG_OUT_MINUTES)
+    if friend and cafe:
         opts.append(Option(f"Invite {friend.name.split()[0]} to Corner Cafe", [("hang_out", "cafe")], cost=6,
                            tags={"social": 1.0, "adventure": 0.3}, gains={"social": 45, "fun": 20},
                            outcomes=[_meet_new(0.05)], extra={"invite_to": friend.id, "place": "cafe"}))
-    else:
+    elif cafe:
         opts.append(Option("Go people-watching at Corner Cafe", [("hang_out", "cafe")], cost=6,
                            tags={"social": 0.6}, gains={"social": 25}, outcomes=[_meet_new(0.15)]))
+    else:  # Corner Cafe would shut before a hang-out there is over
+        opts.append(Option("Message a few people from home", [("text", "home")], tags={"social": 0.6, "thrift": 0.2},
+                           gains={"social": 15},
+                           outcomes=[Outcome("warm_replies", "Gets some warm replies", 0.6, +1, {"social": 6}),
+                                     Outcome("no_reply", "No reply comes", 0.3, -1, {"social": -4})]))
     who = family or friend
     if who:
         opts.append(Option(f"Call {who.name.split()[0]}", [("phone_call", None)], tags={"family": 0.8, "social": 0.4},
@@ -412,7 +419,7 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
                                  {"fun": 15, "money": 50} if agent.is_adult else {"fun": 20}),
                          Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, {"fun": -6})]),
     ]
-    if not sim.town.places["cafe"].is_open(hour + 1):
+    if not _open_on_arrival(sim, agent, "cafe", stay=HANG_OUT_MINUTES):  # it would shut before the hang-out is over
         opts[2] = Option("Play a board game at home", [("relax_home", "home")], tags={"family": 0.8}, gains={"fun": 25, "social": 10},
                          outcomes=[Outcome("bonding", "Laughs with the family", 0.5, +1, {"family_bond": 2})])
     return Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick)
