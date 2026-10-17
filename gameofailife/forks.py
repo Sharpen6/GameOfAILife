@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 RAIN_CHANCE = {"spring": 0.35, "summer": 0.10, "autumn": 0.40, "winter": 0.60}
 OBVIOUS_MARGIN = 0.45  # default-score lead at which the Director decides on its own
 LUCK_STRENGTH = 0.6  # Luck 100 multiplies good odds by 1.6 and bad odds by 0.4
+KID_CURFEW = 19  # hour after which characters under 18 stay home for the night
+WORK_LEAD = 45  # minutes before a shift the work fork opens (more if the walk is long)
 
 _ids = itertools.count(1)
 
@@ -97,17 +99,26 @@ def _meet_new(p: float) -> Outcome:
     return Outcome("meet_new", "Meets someone new", p, +1, {"meet_new": True})
 
 
-def _best_friend(sim: Simulation, agent: Agent, exclude_household: bool = True) -> Agent | None:
+def _curfew(sim: Simulation, agent: Agent, hours_ahead: float = 0.0) -> bool:
+    """True when a child should not be heading out (now or within `hours_ahead`)."""
+    hour = sim.clock.hour + hours_ahead
+    return not agent.is_adult and (hour >= KID_CURFEW or sim.clock.hour < 6)
+
+
+def _best_friend(sim: Simulation, agent: Agent, exclude_household: bool = True,
+                 adults_only: bool = False) -> Agent | None:
     hh = sim.household(agent).member_ids
     pool = [(r.affinity, oid) for oid, r in agent.relationships.items()
-            if not (exclude_household and oid in hh) and r.affinity > 10]
+            if not (exclude_household and oid in hh) and r.affinity > 10
+            and sim.agents[oid].alive and (not adults_only or sim.agents[oid].is_adult)]
     if not pool:
         return None
     return sim.agents[max(pool)[1]]
 
 
 def _closest_family(sim: Simulation, agent: Agent) -> Agent | None:
-    pool = [(r.affinity, oid) for oid, r in agent.relationships.items() if r.kind.value in ("family", "partner")]
+    pool = [(r.affinity, oid) for oid, r in agent.relationships.items()
+            if r.kind.value in ("family", "partner") and sim.agents[oid].alive]
     return sim.agents[max(pool)[1]] if pool else None
 
 
@@ -117,6 +128,9 @@ def invite_fork(sim: Simulation, agent: Agent) -> Fork | None:
     invite = sim.pending_invite_for(agent)
     if not invite:
         return None
+    hour = sim.clock.hour
+    if hour >= 22 or hour < 6 or _curfew(sim, agent):
+        return None  # sleep on it; the invite waits or expires
     host = sim.agents[invite["from"]]
     place = sim.town.places[invite["place"]]
     rel = ("rel", host.id)
@@ -145,7 +159,9 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if not job or agent.worked_today == sim.clock.day:
         return None
     minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day
-    if not (job.workdays.count(sim.clock.weekday) and -60 <= minutes_to_start <= 45):
+    if not job.workdays.count(sim.clock.weekday) or not -60 <= minutes_to_start <= 180:
+        return None
+    if minutes_to_start > max(WORK_LEAD, sim.walk_minutes(agent, job.place_id) + 15):
         return None
     place = sim.town.places[job.place_id]
     school = job.hourly_wage == 0
@@ -225,7 +241,7 @@ def hunger_fork(sim: Simulation, agent: Agent) -> Fork | None:
         cook = Option("Order food to the house", [("order_food", "home")], cost=25,
                       tags={"thrift": -0.4, "family": 0.3}, gains={"hunger": 50},
                       outcomes=[Outcome("late_delivery", "The delivery is very late", 0.2, -1, {"fun": -6})])
-    if cafe_open and agent.money >= 14:
+    if cafe_open and agent.money >= 14 and not _curfew(sim, agent, 0.7):
         out = Option("Eat at Corner Cafe", [("eat_out", "cafe")], cost=14,
                      tags={"thrift": -0.5, "social": 0.5, "adventure": 0.3}, gains={"hunger": 55, "social": 10},
                      outcomes=[_meet_new(0.08), Outcome("friend_there", "Bumps into a friend", 0.15, +1, {"social": 8}),
@@ -244,11 +260,14 @@ def hunger_fork(sim: Simulation, agent: Agent) -> Fork | None:
 
 def payday_fork(sim: Simulation, agent: Agent) -> Fork | None:
     week = sim.clock.day // 7
-    if (not agent.is_adult or not agent.job or agent.last_payday == week or sim.clock.weekday != 4
-            or sim.clock.hour < 17 or sim.clock.hour >= 21 or agent.money < 80):
+    hour, weekday = sim.clock.hour, sim.clock.weekday
+    # Friday evening, or Saturday for anyone who works Friday evenings; retirees get their pension that day.
+    evening = (weekday == 4 and hour >= 17) or (weekday == 5 and hour >= 9)
+    if (not agent.is_adult or not (agent.job or agent.age >= 65) or agent.last_payday == week or not evening
+            or hour >= 20 or agent.money < 80 or sim.on_shift_now(agent)):
         return None
     agent.last_payday = week
-    friend = _best_friend(sim, agent)
+    friend = _best_friend(sim, agent, adults_only=True)
     amount = float(min(100, round(agent.money * 0.25 / 10) * 10))
     goal_name = agent.goal["name"] if agent.goal else "savings"
     save = Option(f"Put ${amount:.0f} toward {goal_name}", [("relax_home", "home")],
@@ -305,7 +324,7 @@ def groceries_fork(sim: Simulation, agent: Agent) -> Fork | None:
 
 def lonely_fork(sim: Simulation, agent: Agent) -> Fork | None:
     hour = sim.clock.hour
-    if agent.needs["social"] >= 35 or not (9 <= hour < 21) or sim.on_shift_now(agent):
+    if agent.needs["social"] >= 35 or not (9 <= hour < 21) or sim.on_shift_now(agent) or _curfew(sim, agent, 1):
         return None
     friend = _best_friend(sim, agent)
     family = _closest_family(sim, agent)
@@ -338,7 +357,7 @@ def lonely_fork(sim: Simulation, agent: Agent) -> Fork | None:
 
 def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
     hour = sim.clock.hour
-    if agent.needs["fun"] >= 40 or not (8 <= hour < 21) or sim.on_shift_now(agent):
+    if agent.needs["fun"] >= 40 or not (8 <= hour < 21) or sim.on_shift_now(agent) or _curfew(sim, agent, 1):
         return None
     opts = [
         Option("Walk in Riverside Park", [("walk_park", "park")], tags={"health": 0.7, "adventure": 0.3},
@@ -349,7 +368,8 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
                gains={"fun": 25, "social": 30}, outcomes=[_meet_new(0.12)]),
         Option("Work on a side project", [("side_project", "home")], tags={"diligence": 0.6, "adventure": 0.5, "social": -0.3},
                gains={"fun": 25},
-               outcomes=[Outcome("breakthrough", "Makes a breakthrough", 0.15, +1, {"fun": 15, "money": 50}),
+               outcomes=[Outcome("breakthrough", "Makes a breakthrough", 0.15, +1,
+                                 {"fun": 15, "money": 50} if agent.is_adult else {"fun": 20}),
                          Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, {"fun": -6})]),
     ]
     if not sim.town.places["cafe"].is_open(hour + 1):
@@ -358,7 +378,7 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
     return Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick)
 
 
-BUILDERS = [invite_fork, work_fork, sleep_fork, hunger_fork, payday_fork, groceries_fork, lonely_fork, free_time_fork]
+BUILDERS = [invite_fork, work_fork, hunger_fork, sleep_fork, payday_fork, groceries_fork, lonely_fork, free_time_fork]
 
 
 # Minutes before the same kind of fork can come up again for a character.
