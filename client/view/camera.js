@@ -176,6 +176,12 @@
       fly = { x0: cam.x, y0: cam.y, z0: cam.zoom, x1: wx, y1: wy, z1: zoom, t: 0, ms: ms || 600, dip: far ? Math.log(2) : 0 };
       zoomAnim = null; cam.vx = cam.vy = 0;
     };
+    // The projection changed: f maps an old world point to the new world. The centre and a flight's start and end
+    // move with it, so a flight under way still lands on its target.
+    cam.remap = function (f) {
+      [cam.x, cam.y] = f(cam.x, cam.y);
+      if (fly) { [fly.x0, fly.y0] = f(fly.x0, fly.y0); [fly.x1, fly.y1] = f(fly.x1, fly.y1); }
+    };
     cam.busy = () => !!(fly || zoomAnim || drag || pinch || cam.vx || cam.vy || keys.size);
     cam.update = function (dt, followPos) {
       let kx = 0, ky = 0;

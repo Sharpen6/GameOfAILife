@@ -2,7 +2,7 @@
 
 A living city simulation where every resident is an AI agent with a home, a family, a job, a bank balance, friends and a memory. Any AI model (Claude, ChatGPT, Gemini) or any program that speaks the game's WebSocket API can play a character. The player is God: they see everything and can change an agent's luck, and nothing more.
 
-**Status:** first playable build. A small town of 20 characters lives on a pixel map in your browser, you watch as God and bend their luck, and any program can connect over a WebSocket to play characters. Jump to [Play it](#play-it) to run it, and see [What's in this first build](#whats-in-this-first-build) for what works today. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. Most of the design is still ahead of the code.
+**Status:** version 2. Millbrook is now an 80 by 50 tile city of seven districts and about 60 people, drawn isometrically in the style of SimCity, with buses on two lines and a housing market where households buy better homes and homes visibly run down. God's screen ranks everyone from richest to poorest and carries the city's News and a log of every decision the AI players made. Any program can connect over a WebSocket to play characters. Jump to [Play it](#play-it) to run it, and see [What's in this build](#whats-in-this-build) for what works today. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. Most of the design is still ahead of the code.
 
 ## Contents
 
@@ -28,7 +28,7 @@ A living city simulation where every resident is an AI agent with a home, a fami
 - [Roadmap](#roadmap)
 - [Decisions so far](#decisions-so-far)
 - [Play it](#play-it)
-- [What's in this first build](#whats-in-this-first-build)
+- [What's in this build](#whats-in-this-build)
 - [Project layout](#project-layout)
 
 
@@ -342,16 +342,16 @@ The world runs on fixed rules that no agent and no God can change: lights cycle,
 
 | System | Rule | Forks it creates |
 | --- | --- | --- |
-| Traffic lights | Each junction cycles green, yellow, red on a fixed timer (in the first build a 6-minute cycle: 2 minutes green, 1 minute yellow, 3 minutes red for each direction), and cars wait at red | Late for work after a run of reds: speed up, take the side street, or call ahead? |
+| Traffic lights | Each junction cycles green, yellow, red on a fixed timer (in this build a 6-minute cycle: 2 minutes green, 1 minute yellow, 3 minutes red for each direction), and cars wait at red | Late for work after a run of reds: speed up, take the side street, or call ahead? |
 | Rush hour | Road speed drops to about half from 07:30 to 09:30 and 17:00 to 19:00 | Leave early, leave late, take the metro, or work from home? |
-| City transit timetable | Buses every 10 to 20 minutes, metro every 5, a night bus hourly after midnight (the first build runs one bus around the ring road, stopping two minutes at each of its ten stops) | Missed the bus: wait, walk, taxi, or skip the plan? |
-| Intercity flights and trains | Scheduled departures between Millbrook and other cities (the first build has three flights a day, at 08:00, 14:00 and 20:00, that cross the sky from Riverton to Lakeside; trains come later), with fixed fares that rise near the date | Book the cheap early flight, the pricey later one, the train, or postpone the visit? |
+| City transit timetable | Buses every 10 to 20 minutes, metro every 5, a night bus hourly after midnight (this build runs two lines of four buses round the middle of town in opposite directions, a bus every 13 minutes at each of 11 stops; nobody boards yet) | Missed the bus: wait, walk, taxi, or skip the plan? |
+| Intercity flights and trains | Scheduled departures between Millbrook and other cities (this build has three flights a day, at 08:00, 14:00 and 20:00, that cross the sky from Riverton to Lakeside; trains come later), with fixed fares that rise near the date | Book the cheap early flight, the pricey later one, the train, or postpone the visit? |
 | Day and night | Sunrise and sunset move with the season | Go for a run after dark, run at dawn, skip it, or use the gym? |
 | Seasons | Spring, summer, autumn, winter, 90 days each | Spend on heating, wear a coat, travel for the holidays, take a summer job? |
 | Weather | Rolled each morning from the season's odds, and again in the afternoon | Rain: drive instead of cycling, take an umbrella, cancel the picnic, or go anyway? |
 | Opening hours | Every place has fixed hours and closes on some holidays | Shop now on the way home, or risk the market being closed? |
 | School terms and holidays | Fixed calendar of terms, breaks and exams | Who looks after the kids in the break: a grandparent, paid childcare, or a day off? |
-| Paydays and bills | Wages on fixed days; rent on a fixed day; utilities monthly (in the first build wages, after income tax, land at the end of every shift; payday is Friday evening, or Saturday from 09:00 for anyone who missed it; retirees get a $400 pension every Friday at 09:00; and rent, plus weekly bills of $80 per adult and $40 per car, is due every Sunday night) | The forks in Money and the economy, timed by the calendar |
+| Paydays and bills | Wages on fixed days; rent on a fixed day; utilities monthly (in this build wages, after income tax, land at the end of every shift; payday is Friday evening, or Saturday from 09:00 for anyone who missed it; retirees get a $400 pension every Friday at 09:00; and rent or an owner's property tax, plus weekly bills of $80 per adult and $40 per car, is due every Sunday night, split between the household's adults) | The forks in Money and the economy, timed by the calendar |
 
 **Season defaults** (tunable per city):
 
@@ -445,7 +445,7 @@ The world feeds perception, the mind turns it into actions and speech, and God's
 | send_message | Texts or calls another agent; propose_meeting and respond_invite set up work meetings, dates and get-togethers (see Communication between agents) |
 | set_goal | Records or changes a personal goal, such as saving $300 for a phone |
 
-In the first build these calls are WebSocket messages: forks arrive as `fork` messages and are answered with `choose`, `query` returns possessions, attributes, relationships, memory, inbox, the world and the people in town, and `send_message` and `invite` reach other characters. Goals cannot be set yet. [docs/protocol.md](docs/protocol.md) lists every message.
+In this build these calls are WebSocket messages: forks arrive as `fork` messages and are answered with `choose`, `query` returns possessions (the home included), attributes, relationships, memory, inbox, the world, the people in town and the homes on the market, and `send_message` and `invite` reach other characters. Goals cannot be set yet. [docs/protocol.md](docs/protocol.md) lists every message.
 
 **Honest answers only.** Queries return what the agent could really know: its own possessions and attributes exactly (Luck stays hidden), and other people only through what it has seen or been told. Queries cost no game time. Agents believe they are real people: nothing they see mentions a game, a God or AI models.
 
@@ -463,7 +463,7 @@ The screen is God's view: a living city map on top, and any mind one click away.
 - **Fortune log.** Every chance event that touched an agent and every Luck change God made; the odds stay hidden.
 - **Conversations.** Live and past conversations shown as chat transcripts, filterable by agent, place or topic.
 - **Chronicle and dashboards.** The running story feed, plus city charts: population, employment, average wellbeing, inequality, faith over time.
-- **Time controls.** Pause, 1x, 10x, 100x, skip to next notable event, and save points for rewind. The first build has pause and 1x, 2x, 4x, 8x and 16x.
+- **Time controls.** Pause, 1x, 10x, 100x, skip to next notable event, and save points for rewind. This build has pause and 1x, 2x, 4x, 8x and 16x.
 - **Character creation page.** Create a character's identity, looks, traits, household and play-style profile, and choose the AI model that plays it. The profile updates from the character's choices and stays editable at any time. A new city starts with a generated starter town of about 20 characters, which the player can edit here.
 
 ## Roadmap
@@ -488,6 +488,7 @@ The game is built in five phases, each ending at a gate that proves the layer wo
 - Agents never know for certain that God exists; faith always stays belief.
 - God has no Faith or other resource; the only powers are observing and changing luck.
 - The first playable city has 20 agents in one neighbourhood.
+- Version 2 follows what the first players asked for: homes worth buying that visibly fall apart when neglected, a SimCity-style isometric view with bigger tiles, a city of about 60 people in seven districts with buses, and a main screen with the wealth ranking from richest to poorest, the News and the LLM decisions log.
 - One player, one God, per city.
 - A web app comes first, and the first build goes straight to the Pokémon-style web map. Controllers connect over a WebSocket API only. It runs live, asks each character's model for answers, and falls back to default answers when a reply takes too long.
 - The first city runs on Claude only, with other models added later. Players bring their own API keys.
@@ -496,7 +497,7 @@ The game is built in five phases, each ending at a gate that proves the layer wo
 
 ### What you need
 
-Python 3.11 or newer and a web browser. There is nothing to install: the game uses only the Python standard library, and the web client is plain HTML and JavaScript.
+Python 3.11 or newer and a web browser. There is nothing to install: the game uses only the Python standard library, and the web client is plain HTML, CSS and JavaScript with no build step, no image files and nothing loaded from the internet.
 
 ### Start the city
 
@@ -506,15 +507,15 @@ From the repository root:
 
 Then open <http://localhost:8000> in your browser. You are God.
 
-![The city at midday](docs/screenshots/day.png)
+![Millbrook from above: the isometric city with the City tab open](docs/screenshots/city-iso.png)
 
 Useful flags:
 
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `--host` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` to let friends on your network connect. |
-| `--port` | `8000` | Port for the web page and the WebSocket. |
-| `--seed` | `1` | Seed for the starter town and its dice, so a run can be repeated. |
+| `--port` | `8000` | Port for the web page and the WebSocket (`0` picks a free one; the address is printed). |
+| `--seed` | `1` | Seed for the town's trees and its dice, so a run can be repeated. |
 | `--speed` | `1` | Starting speed: `0` (paused), `1`, `2`, `4`, `8` or `16`. At 1x a game day takes about ten real minutes. |
 | `--luck-log FILE` | off | Appends every hidden odds roll (base odds, odds after Luck, the roll) to a JSONL file for analysis. The game itself never shows the odds. |
 | `--headless` | off | Simulates without a server and prints what happened. |
@@ -522,20 +523,38 @@ Useful flags:
 
 ### What you see and can do as God
 
-- **The map.** Millbrook's 40 by 25 tile town: eight family homes, Brightline Tech, Millbrook School, Fresh Market, Corner Cafe, City Hospital and Riverside Park, joined by a grid of roads. Characters walk, run or drive to work, school, the shops and each other, keeping to the roads wherever that is no longer, so drivers wait at red lights. Traffic lights change at every junction, a bus loops the ring road, planes cross the sky three times a day, rain falls (snow in winter) and the town darkens at night with lit windows.
-- **Hover and click.** Hover over a character to see what they are doing, or over a building to see its hours and who is inside. Click a character, or a building with people in it, to open their panel.
-- **People, Events and Decisions tabs.** The roster shows everyone's activity, Luck and whether a controller plays them. The event feed tells the town's story. The decisions feed shows every fork: the question, all four options, the one chosen, who decided it (`habit`, `default`, `model` or `timeout`), the model's reason, and what came of it, added to the fork's entry as its hidden outcomes land (often once the plan is carried out, sometimes hours later).
-- **A character's panel.** Needs bars (hunger, energy, social, fun), money, health, mood, reputation, recent decisions, what they own, the people they know and their memories.
-- **Luck.** The slider on the panel is your only power over the world. It runs from 0 to 100, everyone starts at 50, and it tilts the hidden odds of every outcome. The character never knows.
+- **The city.** Millbrook is an 80 by 50 tile city drawn isometrically, SimCity-style, with big tiles and buildings you can tell apart at a glance: the Brightline Tech tower, City Hall, the hospital with its helipad, the bank, the school, the shops and cafes, the factory by the river, blocks of flats, family houses and big houses with pools. Drag to pan, scroll or pinch to zoom, and use the buttons for zoom and the whole city. The View menu switches between the isometric map and a flat top-down one and opens the minimap. People walk, run or drive, cars wait at red lights, two bus lines of four buses each run their timetable round the middle of town, planes cross the sky three times a day, rain falls (snow in winter) and the city darkens at night with lit windows.
+- **Hover and click.** Hover over a person to see what they are doing, or over a building to see its name, hours and who is inside. Click a person to open them. Click an empty home, or click a home a second time, to open its home card (the first click on a building with people inside opens the first of them).
+- **The HUD.** Across the top of the map: the population, the mood, the city's wealth, the homes for sale and to let, how many homes are neglected, and how many characters the AI players play and how many are thinking right now. Click one to open its part of the dashboard; the neglected count shows the condition colours on the map.
+- **City tab.** The city at a glance: population and deaths, mood, wealth (median, the richest tenth's share, the Gini index), homes (owned, rented, for sale and to let, and how run-down they are, stage by stage), jobs, the AI players, the needs, each district, and charts of the last seven days.
+- **News tab.** The city's story: the headlines (deaths, home purchases and evictions, new friendships and falling-outs, big wins and losses, a new richest person), then everything notable, filtered by Major, Notable or Everything, by topic (Homes, Money, People, Health, AI), by a person, or by searching. Major news also pops up as a toast over the map and runs along the ticker at the bottom.
+- **LLM log tab.** Every decision an AI player was asked to make, newest first: who decided, the question, the four options, the one chosen, the controller and model, how long the answer took and the reason it gave. A decision the controller missed shows the default that was played, and a late answer shows up on it as "answered after N s, saved to the profile". Filter it by person, or to show the timeouts, or the answers that went against the character's habit.
+- **People tab.** Everyone from richest to poorest, with their worth split into cash, savings and their share of a home they own, and the change over the last 24 hours. Switch to everyone (children included) or households, or sort by something else. Click a person to open them: needs, money, health, mood, what they own (their home included), their recent decisions, the people they know and their memories.
+- **Home cards.** Click a home on the map, or the home in a person's Owns block, to open its card: the residents, owned or rented, the condition and how run-down it looks, the value, the listing and the asking price or rent, any emergency, and the history of who lived there.
+- **Map colours.** The chips over the map, or the City tab's Map colours, colour the homes by Wealth, Mood or Condition, or by None.
+- **Luck.** The slider in a person's panel is your only power over the world. It runs from 0 to 100, everyone starts at 50, and it tilts the hidden odds of every outcome. The character never knows.
 - **Play style.** You can rewrite a character's play-style prompt and move their trait sliders (thrift, family, social, diligence, health, adventure). The Decision Director uses them for every fork no model answers. Saving changes only the sliders you moved, and the prompt only if you edited it, so the rest keeps learning from the character's choices.
 - **Time.** Pause, or run at 1x, 2x, 4x, 8x or 16x.
+- **On a phone.** The map fills the screen and the dashboard becomes a bottom sheet with the same four tabs; drag it up for more.
 - **The character page.** `client/character.html` shows one character on a full page. From a city view that is God, a plain click on the link in a character's panel opens it as God in the same tab. Clicked from a watching view, opened in a new tab, reloaded or from a bookmark, it first asks before taking God over from your other tabs (unless you ticked "Don't ask again in this tab").
 
-There is one God per city. If a second browser opens the God view, it takes over and the first one keeps watching without powers: it says "Watching only", and its speed buttons, Luck slider and play-style Save are locked until you reload it or it reconnects after losing its connection. Either one makes it God again and the newer view goes back to watching. When the server refuses something, the view shows why for a few seconds.
+![News: the headline of a family buying a better home, with its toast over the map](docs/screenshots/news.png)
+
+![The LLM log: each AI player's choices with the model and the reason](docs/screenshots/llm-log.png)
+
+![People: everyone from richest to poorest](docs/screenshots/people.png)
+
+![A home card, opened from a person's Owns block and shown on the map](docs/screenshots/home-card.png)
+
+![The flat top-down map of the whole city](docs/screenshots/city-flat.png)
+
+<img src="docs/screenshots/phone.png" alt="The God view on a phone, with the dashboard as a bottom sheet" width="320">
+
+There is one God per city. If a second browser opens the God view, it takes over and the first one keeps watching without powers: it says "Watching only", and its speed buttons, Luck slider and play-style Save are locked until you reload it or it reconnects after losing its connection. Either one makes it God again and the newer view goes back to watching. A watching view can still open every page, card and log. When the server refuses something, the view shows why for a few seconds.
 
 ### Connect a controller
 
-Anything that speaks the WebSocket API can play characters: an AI model, a script, or a person typing JSON. Connect to `ws://localhost:8000/ws`, say hello as a controller, and claim the characters you want. Forks arrive as messages with four options; answer within 5 seconds or the Director plays the default for you. The first answer that arrives after those 5 seconds but within 10 is too late to act on but still teaches the character's play style; any later answer for that fork is refused. Texts and invites are paced at 20 a second per controller after a burst of 100, and a controller that does not keep up with reading what the server sends it is dropped and loses its characters once its network buffers are full and a message has waited more than 5 seconds to go out. [docs/protocol.md](docs/protocol.md) describes every message.
+Anything that speaks the WebSocket API can play characters: an AI model, a script, or a person typing JSON. Connect to `ws://localhost:8000/ws`, say hello as a controller (with the `model` behind it, if you like: God's dashboard shows it, the characters never see it), and claim the characters you want. Forks arrive as messages with exactly four options; answer within 5 seconds or the Director plays the character's profile default for you. The first answer that arrives after those 5 seconds but within 10 is too late to act on but still teaches the character's play style, once; any later answer for that fork is refused. The odds behind the options are never sent, to anyone. A controller can also ask what its characters own and know, look at the homes on the market, and send texts and invitations. Texts and invites are paced at 20 a second per controller after a burst of 100, and a controller that does not keep up with reading what the server sends it is dropped and loses its characters once its network buffers are full and a message has waited more than 5 seconds to go out. [docs/protocol.md](docs/protocol.md) describes every message.
 
 Two example controllers come with the game. Start the city first, then in another terminal:
 
@@ -546,73 +565,116 @@ Two example controllers come with the game. Start the city first, then in anothe
     export ANTHROPIC_API_KEY=your-key-here
     python3 examples/claude_controller.py --url ws://localhost:8000/ws --characters all
 
-The Claude controller uses `claude-haiku-5-5` by default and runs on your own API key. It asks Claude at low effort so answers arrive inside the 5 second window (a model you pick with `--model` must support the effort setting), and it leaves a fork to the play-style default when no worker thread is free before the deadline. Characters played by a controller show a robot icon in the roster, and their decisions are tagged `model` with the reason the model gave. Characters no controller plays still live full days on their play-style defaults.
+The Claude controller uses `claude-haiku-5-5` by default and runs on your own API key, and tells the server which model it uses. It asks Claude at low effort so answers arrive inside the 5 second window (a model you pick with `--model` must support the effort setting), and it leaves a fork to the play-style default when no worker thread is free before the deadline. With `--chat` it also answers texts in character. Characters played by a controller show it in the People tab and the HUD's AI count, and their decisions are tagged `model` with the reason the model gave, in the LLM log. Characters no controller plays still live full days on their play-style defaults.
 
 ### Run without a browser
 
     python3 -m gameofailife --headless --days 3
 
-This runs three game days as fast as your computer allows, prints the event log, and ends with a count of forks by kind and by who decided them, and a line per character with their money, health, mood and savings goal.
+This runs three game days as fast as your computer allows, prints every headline as it happens, and ends with a count of forks by kind and by who decided them, the AI players' answers, the news by tag, the city's wealth and homes, and everyone from richest to poorest with their cash, savings, home equity, health, mood and home.
 
 ### Run the tests
 
-    python3 -m unittest discover -s tests -v
+    python3 -m unittest discover -s tests
 
-## What's in this first build
+The default run takes about a minute. The slow tests (the housing economy soak over many game weeks, the 7-day headless runs, and the city view's and the full app's browser tests) run with `GOAL_SLOW=1`:
 
-The first build is the foundation from the roadmap: one small town, running live, that you can watch, nudge and connect to. A lot of the design above is not built yet.
+    GOAL_SLOW=1 python3 -m unittest discover -s tests
 
-**Working now**
+The browser tests need Node and Playwright with a Chromium; without them they print SKIP. Each one also runs on its own:
+
+    node tests/browser/full_app_smoke.cjs     # the real server, a fake controller and the God view, desktop and phone
+    node tests/browser/view_smoke.cjs         # the city view on the dev fixture
+    node tests/browser/dashboard_smoke.cjs    # the dashboard on its fixture
+    node tests/browser/god_view_smoke.cjs     # the God view against the real server
+
+`FULL_SHOTS=docs/screenshots node tests/browser/full_app_smoke.cjs` also refreshes the screenshots in this README. `client/dev/view.html` and `client/dev/dashboard.html` open the city view and the dashboard on fixtures, with no server.
+
+## What's in this build
+
+This build answers what the first players asked for: homes worth buying and homes that visibly fall apart, a city that looks like SimCity with bigger tiles, a much bigger city, and a main screen that shows who is rich, what is happening and what the AI players decided. A lot of the design above is still not built.
+
+**Better homes, and neglect you can see**
+
+- 37 homes in 22 buildings: 18 flats in three blocks (Birch, Cedar and Elm Court) in Eastgate, 15 houses in Maple Grove and 4 big houses with gardens on Hilltop. Each has bedrooms, a value and a rent, and is owned by the household living there, let by the landlord (Millbrook Homes), or on the market. 27 households start in them, 7 in homes they own and 20 renting; 5 homes are for sale and 5 to let.
+- Households buy and rent better homes. A `house_hunt` fork asks a household that can afford it whether to buy or rent a better home on the market, haggle, look for a cheaper one, or stay. Moving day brings a van to the door for a few hours, the old home goes back on the market (an owned one is sold), and two households can want the same home: the second is too late. A household in the red after the week's bills meets `housing_trouble` (sell up and buy smaller, ask family for help, sell the car or some belongings, ask the bank for grace, pick up odd jobs, cut back, or hope), and one that falls far enough behind is evicted or has to sell.
+- Homes wear out. Every building's condition falls a little each night (faster for big houses, in winter, when crowded or with an emergency left unfixed) through five stages: kept, worn, shabby, neglected and derelict. You see it on the map: paint and roofs fade and darken, grime and vines climb the walls, windows crack and are boarded up, shutters hang loose and graffiti appears. Households decide what to do about a worn home in `upkeep` forks (hire builders, do it themselves, tidy up, or leave it), and emergencies (a burst pipe, a broken boiler, a leaking roof, an electrical fault) come as `repair` forks (call a tradesperson, fix it themselves, ask a friend, or call the cheapest handyman). The landlord repaints its own buildings before they get too bad. A neglected home costs its residents comfort, reputation and health, and lowers its value.
+- Wealth counts homes: each adult's net worth is their cash, their savings and their share of a home they own.
+
+**SimCity-style graphics with bigger tiles**
+
+- An isometric city drawn in code on a canvas: every building type has its own model, with floors, roofs, signs, doors, windows that light up at night, and a look for each stage of wear. People, cars, buses and planes move on it, with weather and day and night.
+- Bigger tiles than the first build, and zoom from the whole city to a single house. A top-down map, a minimap, labels, map colours and pings for news. It works with a mouse, a trackpad or a finger.
+
+**A much bigger city**
+
+- 80 by 50 tiles in 7 districts: Maple Grove (ordinary houses, the school, Fresh Market), Hilltop (big houses with gardens), Downtown (offices, the hospital, shops, City Hall), Eastgate (cheap flats, corner shops), The Works (the factory by the river), Riverside (the park along the river) and East Woods. Ten named streets, traffic lights at every junction and a river.
+- About 60 people (45 adults and 15 children, aged 5 to 78) in 27 households, with jobs at 17 workplaces, shops and parks, friendships and families, and savings goals.
+- Two bus lines of four buses each, on a timetable with 11 stops. The buses run and are drawn, but nobody rides them yet.
+
+**The main screen: the wealth ranking, News and the LLM log**
+
+- People: everyone ranked from richest to poorest, with their worth's parts and its change in a day.
+- News: the headlines and everything notable, with topics, levels and search, and toasts and a ticker for major news.
+- LLM log: every decision the AI players were asked for, with the model, the reason, the answer time, timeouts and late answers.
+- The City tab, the HUD, home cards, map colours and a phone layout, all fed by a stats message the server pushes every few seconds.
+
+**Still from the first build**
 
 - A clock of one tick per game minute, about ten real minutes per game day at 1x, with weekdays, weekends and seasons of 90 days.
-- A 40 by 25 tile map with eight homes, an office, a school, a market, a cafe, a hospital and a park, each with opening hours. Forks only send characters to places that will be open when they get there, and a place that is shut when a character arrives anyway serves nothing, and what that choice cost is refunded.
-- A starter cast of 20 characters in eight households, with ages from 6 to 74, jobs, wages, school places, cars for some, friendships, family ties, and savings goals for a few (Ari's new phone, Tom's guitar).
 - Four needs (hunger, energy, social, fun) that fall over time and are restored by sleeping, eating, seeing people and having fun.
-- Eight kinds of fork, each with exactly four options: getting to work or school, sleep, hunger, payday, groceries, loneliness, free time, and answering an invitation. On payday, someone who lives alone is offered a takeaway night in instead of a family dinner. Every option carries hidden outcomes with odds that the character's Luck shifts, and some outcomes land hours later.
-- The Decision Director: obvious forks are decided by habit, close ones go to the character's controller with a 5 second window and a 10 second learning window, and characters with no controller play their default.
+- Twelve kinds of fork, each with exactly four options: getting to work or school, sleep, hunger, payday, groceries, loneliness, free time, answering an invitation, and the four housing forks. Every option carries hidden outcomes with odds that the character's Luck shifts, and some outcomes land hours later. Places have opening hours, and a paid outing that would not fit before closing is called off and refunded.
+- The Decision Director: obvious forks are decided by habit, close ones go to the character's controller with a 5 second window and a 10 second learning window, and characters with no controller play their default. Moves and housing trouble need a clearer lead to be settled by habit, so they reach the AI players more often.
 - Play-style profiles that learn from a controller's choices and that God can edit.
-- Weather by season, traffic lights that stop cars, a bus on a fixed loop, three daily flights overhead, day and night.
-- Money that moves: wages for each shift with income tax withheld (15% plus 0.4% for each $1 of hourly wage, capped at 45%: about 22% for a cashier, 43% for a doctor), a $400 weekly pension for retirees, weekly rent and bills, groceries (also when one adult asks another to do the shopping), cafe bills, a $50 hospital stay, and money put aside on payday, toward a goal or into plain savings.
-- Health that drops when characters go hungry or exhausted, hospital visits, and deaths from old age (from 70, softened by Luck) or from health running out.
-- Text messages and invitations between characters, sent by controllers. Characters also invite a friend to Corner Cafe on their own from the payday and loneliness forks.
-- The God view in the browser, the character page, and the WebSocket API for controllers, with two example controllers.
+- Money that moves: wages for each shift with income tax withheld, a weekly pension for retirees, weekly rent or property tax and bills, groceries, outings, home repairs and moves, and money put aside on payday.
+- Health that drops when characters go hungry or exhausted, or live in a neglected home, hospital visits, and deaths from old age or from health running out.
+- Text messages and invitations between characters, sent by controllers. Characters also invite a friend to Corner Cafe on their own.
 
 **Not built yet (design only)**
 
 - Births, pregnancy, children growing up, and generations.
 - Creating brand-new characters or editing the starter cast's identity. Only play style and Luck can be changed.
-- More cities, neighbourhoods or a growing town.
-- Riding the bus, taking a flight, taxis, bikes, the metro and rush hour. The bus and planes run, but nobody gets on.
+- Riding the bus, taking a flight, taxis, bikes, the metro and rush hour. The buses and planes run, but nobody gets on.
+- Finding, changing or losing jobs, promotions, businesses, banks, loans and mortgages.
 - Saving, loading, replaying or branching a world.
 - Natural-language conversations and meetings with a time and an agenda. Characters can text and invite, but not hold a conversation.
 - The other four needs (hygiene, bladder, comfort, safety), emotions, the Big Five personality and skills.
-- Finding, changing or losing jobs, promotions, businesses, banks, loans, taxes other than income tax, the housing market and evictions.
-- Illness and contagion, schools with grades, government, elections, crime, news and religion.
-- The chronicle, per-model dashboards, the fortune log and Luck history in the God view.
+- Illness and contagion, schools with grades, government, elections, crime and religion.
+- Per-model comparisons, the fortune log and Luck history in the God view.
 
 ## Project layout
 
 ```
 GameOfAILife/
-├── gameofailife/          the game server (Python standard library only)
-│   ├── __main__.py        command line: python3 -m gameofailife
-│   ├── clock.py           game time, days, weekdays and seasons
-│   ├── town.py            the tile map, the places and the starter cast
-│   ├── agent.py           characters: needs, jobs, households, relationships, play style
-│   ├── forks.py           the eight fork kinds, their options and hidden odds
-│   ├── sim.py             the simulation loop, world clockwork and the Decision Director
-│   ├── server.py          HTTP for the web client and the /ws endpoint
-│   └── ws.py              a small WebSocket implementation
-├── client/                the God view in the browser
-│   ├── index.html
-│   ├── game.js
-│   ├── style.css
-│   └── character.html     the character page
+├── gameofailife/            the game server (Python standard library only)
+│   ├── __main__.py          command line: python3 -m gameofailife (and --headless)
+│   ├── clock.py             game time, days, weekdays and seasons
+│   ├── rng.py               the seeded dice and portable rounding
+│   ├── town.py              the 80 x 50 map: streets, districts, the 39 places, trees
+│   ├── cast.py              the starter cast: about 60 people in 27 households
+│   ├── agent.py             characters: needs, jobs, households, relationships, play style
+│   ├── travel.py            getting around: walking, running and driving times, the lights
+│   ├── transit.py           the bus lines, stops and timetable, and the daily flights
+│   ├── housing.py           homes, their condition, the market, moves, rent, tax and emergencies
+│   ├── housing_forks.py     the four housing forks
+│   ├── forks.py             the other eight fork kinds, their options and hidden odds
+│   ├── chronicle.py         every event's tag, kind and importance (the News)
+│   ├── stats.py             the city's statistics, the wealth ranking and the LLM log
+│   ├── sim.py               the simulation loop, world clockwork and the Decision Director
+│   ├── server.py            HTTP for the web client and the /ws endpoint
+│   └── ws.py                a small WebSocket implementation
+├── client/                  the God view in the browser
+│   ├── index.html, game.js, style.css      the page, the socket and the header
+│   ├── dashboard.js, dashboard.css         the City, News, LLM log and People tabs, HUD, toasts, home cards
+│   ├── view/                the isometric city view (projection, art, buildings, people, camera, minimap)
+│   ├── character.html       the character page
+│   └── dev/                 view.html and dashboard.html on fixtures, with no server
 ├── examples/
-│   ├── simple_controller.py   a rule-based controller
-│   └── claude_controller.py   Claude plays characters
+│   ├── simple_controller.py     a rule-based controller
+│   └── claude_controller.py     Claude plays characters
 ├── docs/
-│   ├── protocol.md        the WebSocket API reference
+│   ├── protocol.md          the WebSocket API reference
 │   └── screenshots/
-└── tests/                 python3 -m unittest discover -s tests -v
+└── tests/                   python3 -m unittest discover -s tests
+    └── browser/             Playwright smoke tests (node tests/browser/<name>.cjs)
 ```
