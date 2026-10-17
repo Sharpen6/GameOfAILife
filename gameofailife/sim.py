@@ -3,25 +3,36 @@
 The simulation is synchronous and knows nothing about the network. The server
 calls `step()` on a timer, hands controller answers to `answer()`, and drains
 `outbox` (messages for controllers) and `events` (for God's view) after each step.
+
+The city's other parts plug in through hook functions this module calls at fixed points (PLAN 3.10):
+`housing` (homes, rent, upkeep), `travel` and `transit` (getting around), `chronicle` (event tags) and
+`stats` (counters and samples). Their packages change those functions, never the call sites.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import random
 import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import cast, chronicle, housing, stats, transit, travel
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
-from .forks import COOLDOWN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, Fork, build_fork, default_scores, luck_odds
-from .town import ROAD_COLS, ROAD_ROWS, TownMap, build_cast, build_map
+from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
+                    default_scores, luck_odds)
+from .rng import r2
+from .town import TownMap, build_map
+from .transit import BUS_FARE, FLIGHTS
+from .travel import SPEEDS, TAXI_FARE
 
 ANSWER_SECONDS = 5.0  # a controller's answer applies if it arrives within this
 LEARN_SECONDS = 10.0  # a later answer is still saved and teaches the profile
 INVITE_MINUTES = 120  # an unanswered invite expires after this
-SPEEDS = {"walk": 1, "run": 2, "car": 3}
+# SPEEDS (tiles a minute by vehicle: walk 1, run 2, car/taxi/ambulance 4, and bus 1 for the rider's own walking
+# legs), TAXI_FARE (12), BUS_FARE (2) and WORK_LEAD (45) come from travel, transit and forks: one copy of each.
 PENSION = 400.0  # paid every Friday morning to retirees (65+ with no job)
 BILLS_PER_ADULT = 80.0  # weekly phone, power and transport, charged with the rent
 CAR_BILL = 40.0  # weekly fuel and insurance for a car owner
@@ -29,6 +40,9 @@ HOSPITAL_FEE = 50.0
 GROCERY_COST = 35.0  # ten meals from Fresh Market: the price of 'Buy groceries now' in the groceries fork
 SHIFT_MARGIN = 10  # minutes spare a character keeps before setting off for a shift
 LEISURE = ("idle", "relax_home", "read", "side_project", "text", "rest")  # activities that can be interrupted
+HISTORY_SIZE, NEWS_SIZE, HEADLINES_SIZE = 300, 300, 100  # events kept: all, importance >= 1, importance 2
+LLM_LOG_SIZE = 500  # the city's ring of fork summaries decided by a model or a timeout
+AGENT_LLM_FORKS = 30  # ... and each character's
 
 
 def income_tax(hourly_wage: float) -> float:
@@ -67,6 +81,9 @@ ACTIVITIES = {
     "idle": Activity(20, {}),
     "hospital": Activity(180, {"hunger": 40}),  # the ward feeds its patients
 }
+# The housing forks' activities (moving house, viewings, DIY, ...): none of them is leisure.
+ACTIVITIES.update({name: Activity(spec["minutes"], dict(spec["gains"]), spec["inside"])
+                   for name, spec in housing.ACTIVITIES_EXTRA.items()})
 
 # How fast needs drop during some activities (default 1.0).
 DECAY_SCALE = {
@@ -76,21 +93,12 @@ DECAY_SCALE = {
 }
 
 LIGHT_CYCLE = 6  # minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
-BUS_STOPS = [(3, 3), (14, 3), (25, 3), (36, 3), (36, 12), (36, 21), (25, 21), (14, 21), (3, 21), (3, 12)]
-FLIGHTS = (8 * 60, 14 * 60, 20 * 60)  # daily plane from Riverton to Lakeside
-FLIGHT_MINUTES = 12
+FLIGHT_MINUTES = 12  # the daily planes (transit.FLIGHTS) take this long to cross the sky
 
 
-def _bus_loop() -> list[tuple[int, int]]:
-    """The bus drives the outer ring road clockwise, one tile per minute."""
-    x0, x1, y0, y1 = ROAD_COLS[0], ROAD_COLS[-1], ROAD_ROWS[0], ROAD_ROWS[-1]
-    loop = [(x, y0) for x in range(x0, x1)] + [(x1, y) for y in range(y0, y1)]
-    loop += [(x, y1) for x in range(x1, x0, -1)] + [(x0, y) for y in range(y1, y0, -1)]
-    return loop
-
-
-BUS_LOOP = _bus_loop()
-BUS_DWELL = 2  # minutes the bus waits at each stop
+def _r1(x: float) -> float:
+    """One decimal, rounding half up (floor(x * 10 + 0.5) / 10), as the JS port does."""
+    return math.floor(x * 10 + 0.5) / 10
 
 
 class Simulation:
@@ -100,22 +108,29 @@ class Simulation:
         self.rng = random.Random(seed)
         self.now = now
         self.clock = Clock()
-        self.town: TownMap = build_map(seed)
-        self.agents, self.households = build_cast(self.town, seed)
+        self.town: TownMap = build_map(seed)  # shared with every Simulation of this seed: never changed
+        self.homes = housing.build_homes(self.town)  # home id -> Home
+        self.lots = housing.build_lots(self.town, self.homes)  # residential place id -> Lot (its condition)
+        self.agents, self.households = cast.build_cast(self.town, self.homes, seed)
+        housing.init(self)
+        self.stats = stats.CityStats()
         self.weather = "clear"
         self.forks: dict[str, Fork] = {}  # every fork still asked or recently decided
         self.asked_at: dict[str, float] = {}
         self.invites: dict[str, dict] = {}
         self.events: list[dict] = []  # new events since the server last drained them
-        self.history: list[dict] = []  # the last few hundred events, for new God views
+        self.history: list[dict] = []  # the last HISTORY_SIZE events, for new God views
+        self.news: list[dict] = []  # ... of importance 1 or 2
+        self.headlines: list[dict] = []  # ... of importance 2
         self.fork_log: list[dict] = []  # decided forks since last drain
+        self.llm_log: list[dict] = []  # the last LLM_LOG_SIZE summaries decided by a model or a timeout
         self.outbox: list[tuple[str, dict]] = []  # (controller name, message)
+        self.controllers: dict[str, dict] = {}  # name -> {"model": str | None, "characters": [ids]}
         self.luck_log: list[dict] = []  # hidden: odds and rolls, never sent to anyone
         self.luck_log_path = luck_log_path
+        self._event_seq = 0
         self._invite_ids = 0
         self._host_hold: dict[str, int] = {}  # host id -> tick they wait at an invite place until
-        self._bus_pos = 0
-        self._bus_wait = 0
         self._roll_weather()
 
     # --- lookups used by the fork builders -----------------------------------
@@ -124,7 +139,8 @@ class Simulation:
         return self.households[agent.household_id]
 
     def home_of(self, agent: Agent) -> str:
-        return self.household(agent).home_id
+        """The place id of the character's home: the house, or the apartment block of a flat."""
+        return self.homes[self.household(agent).home_id].place
 
     def pending_invite_for(self, agent: Agent) -> dict | None:
         for inv in self.invites.values():
@@ -141,7 +157,7 @@ class Simulation:
         """Minutes on foot from where the character is to a place."""
         if agent.inside == place_id:
             return 0
-        return len(self.town.path((agent.x, agent.y), self.town.places[place_id].entry))
+        return self.town.walk_minutes((agent.x, agent.y), place_id)
 
     def _shift_start_tick(self, agent: Agent) -> int | None:
         """Tick today's shift starts, while the character can still turn up for it (up to WORK_LATE late)."""
@@ -162,16 +178,80 @@ class Simulation:
     def living(self) -> list[Agent]:
         return [a for a in self.agents.values() if a.alive]
 
+    # --- getting around, homes and statistics (delegated to their modules) ----
+
+    def travel_minutes(self, agent: Agent, place_id: str, mode: str, worst: bool = False) -> int:
+        return travel.travel_minutes(self, agent, place_id, mode, worst)
+
+    def usual_mode(self, agent: Agent) -> str:
+        return travel.usual_mode(self, agent)
+
+    def commute_minutes(self, agent: Agent) -> int | None:
+        return travel.commute_minutes(self, agent)
+
+    def weekly_commute_cost(self, agent: Agent) -> int:
+        return travel.weekly_commute_cost(self, agent)
+
+    def nearest(self, agent: Agent, kinds: tuple[str, ...], origin=None, meet=None, stay: int = 0):
+        return travel.nearest(self, agent, kinds, origin, meet, stay)
+
+    def pay_household(self, hh: Household, amount: float) -> None:
+        housing.pay_household(self, hh, amount)
+
+    def possessions(self, agent: Agent) -> dict:
+        """What the character owns: the agent page's and `query possessions`' block."""
+        return housing.possessions_json(self, agent)
+
+    def market_json(self) -> dict:
+        """The homes for sale and to let (controller `query market`)."""
+        return housing.market_json(self)
+
+    def home_page(self, home_id: str) -> dict | None:
+        """God's `get_home` reply body, or None for an unknown home."""
+        return housing.home_page(self, home_id)
+
+    def buses(self) -> list[dict]:
+        """`state.buses`: a pure function of the tick."""
+        return transit.bus_rows(self.clock.tick)
+
+    def stats_json(self, full: bool = False) -> dict:
+        """God's `stats` push (PLAN 3.8), built by stats.stats_json."""
+        return stats.stats_json(self, full)
+
+    def decisions(self, agent_id: str | None = None, before: str | None = None, limit: int = 30) -> dict:
+        """The `get_decisions` reply body, built by stats.decisions."""
+        return stats.decisions(self, agent_id, before, limit)
+
     # --- events ---------------------------------------------------------------
 
-    def event(self, text: str, agent: Agent | None = None, kind: str = "life") -> None:
-        ev = {"tick": self.clock.tick, "time": self.clock.stamp(), "kind": kind, "text": text,
-              "agent": agent.id if agent else None}
+    def event(self, text: str, agent: Agent | None = None, kind: str | None = None, *, tag: str = "other",
+              importance: int | None = None, agents: list[str] | None = None, place: str | None = None,
+              remember: bool = True) -> dict:
+        """Log something that happened, for God's views and the character's memory.
+
+        `tag` is a key of chronicle.EVENT_TAGS and gives the kind and importance unless the call names them.
+        `place` is a place id: the one given, else where the character is or is headed, else None.
+        remember=False (and the God-only tags) keeps the line out of the character's memory.
+        """
+        if place is None and agent is not None:
+            place = agent.inside or agent.activity_place
+        self._event_seq += 1
+        stamp = self.clock.stamp()
+        ev = chronicle.make_event(self._event_seq, self.clock.tick, stamp, text, tag, kind, importance,
+                                  agent.id if agent else None, agents, place,
+                                  (agent.x, agent.y) if agent else None)
         self.events.append(ev)
         self.history.append(ev)
-        del self.history[:-300]
-        if agent:
-            agent.remember(self.clock.stamp(), text)
+        del self.history[:-HISTORY_SIZE]
+        if ev["importance"] >= 1:
+            self.news.append(ev)
+            del self.news[:-NEWS_SIZE]
+            if ev["importance"] >= 2:
+                self.headlines.append(ev)
+                del self.headlines[:-HEADLINES_SIZE]
+        if agent and remember and tag not in chronicle.GOD_ONLY_TAGS:
+            agent.remember(stamp, text)
+        return ev
 
     def drain(self) -> tuple[list[dict], list[dict], list[tuple[str, dict]]]:
         out = self.events, self.fork_log, self.outbox
@@ -188,14 +268,16 @@ class Simulation:
         if m == 0:
             self._new_day()
         if self.clock.weekday == 6 and m == 23 * 60:
-            self._charge_rent()
+            housing.weekly_charges(self)  # rent or property tax, and bills
         if self.clock.weekday == 4 and m == 9 * 60:
             self._pay_pensions()
-        self._move_bus()
         self._check_timeouts()
         self._expire_invites()
+        housing.tick(self)
         for agent in self.living():
             self._tick_agent(agent)
+        if m % 60 == 0:
+            self.stats.sample(self)
 
     def run_days(self, days: float) -> None:
         for _ in range(int(days * MINUTES_PER_DAY)):
@@ -207,7 +289,7 @@ class Simulation:
         old = self.weather
         self.weather = "rain" if self.rng.random() < RAIN_CHANCE[self.clock.season] else "clear"
         if old != self.weather:
-            self.event("It starts to rain." if self.weather == "rain" else "The sky clears up.", kind="weather")
+            self.event("It starts to rain." if self.weather == "rain" else "The sky clears up.", tag="weather")
 
     def _new_day(self) -> None:
         for agent in self.living():
@@ -221,29 +303,14 @@ class Simulation:
         if self.clock.day % (DAYS_PER_SEASON * len(SEASONS)) == 0 and self.clock.day:
             for agent in self.living():
                 agent.age += 1
-
-    def _charge_rent(self) -> None:
-        for hh in self.households.values():
-            payers = [self.agents[m] for m in hh.member_ids if self.agents[m].alive and self.agents[m].is_adult]
-            if not payers:
-                continue
-            share = hh.weekly_rent / len(payers)
-            bills = 0.0
-            for a in payers:
-                bill = BILLS_PER_ADULT + (CAR_BILL if a.owns_car else 0.0)
-                a.money -= share + bill
-                bills += bill
-            names = " and ".join(a.name.split()[0] for a in payers)
-            self.event(f"{names} paid ${hh.weekly_rent:.0f} rent and ${bills:.0f} in bills.", kind="money")
-            for a in payers:
-                if a.money < 0:
-                    self.event(f"{a.name} is behind on money after rent.", a, kind="money")
+        housing.nightly(self)
+        self.stats.reset_day()
 
     def _pay_pensions(self) -> None:
         for a in self.living():
             if a.job is None and a.age >= 65:
                 a.money += PENSION
-                self.event(f"{a.name} receives a ${PENSION:.0f} pension.", a, kind="money")
+                self.event(f"{a.name} receives a ${PENSION:.0f} pension.", a, tag="pension")
 
     def lights(self) -> dict:
         """Traffic light phase for north-south traffic; east-west is the opposite."""
@@ -251,18 +318,6 @@ class Simulation:
         ns = "green" if phase < 2 else "yellow" if phase < 3 else "red"
         ew = "red" if phase < 3 else "green" if phase < 5 else "yellow"
         return {"ns": ns, "ew": ew}
-
-    def _move_bus(self) -> None:
-        if self._bus_wait > 0:
-            self._bus_wait -= 1
-            return
-        self._bus_pos = (self._bus_pos + 1) % len(BUS_LOOP)
-        if BUS_LOOP[self._bus_pos] in BUS_STOPS:
-            self._bus_wait = BUS_DWELL
-
-    def bus(self) -> dict:
-        x, y = BUS_LOOP[self._bus_pos]
-        return {"x": x, "y": y, "stopped": self._bus_wait > 0}
 
     def plane(self) -> dict | None:
         m = self.clock.minute_of_day
@@ -272,9 +327,7 @@ class Simulation:
         return None
 
     def timetable(self) -> dict:
-        return {"bus": {"route": "Ring road loop", "stops": [list(s) for s in BUS_STOPS],
-                        "minutes_per_loop": len(BUS_LOOP) + BUS_DWELL * len(BUS_STOPS)},
-                "flights": [f"{d // 60:02d}:{d % 60:02d} Riverton to Lakeside" for d in FLIGHTS]}
+        return transit.timetable_json()
 
     # --- agents ---------------------------------------------------------------
 
@@ -315,7 +368,7 @@ class Simulation:
         if agent.fork_id:
             self._finish_fork(agent)
         if agent.health < 25 and agent.inside != "hospital":
-            self.event(f"{agent.name} feels very unwell and goes to City Hospital.", agent, kind="health")
+            self.event(f"{agent.name} feels very unwell and goes to City Hospital.", agent, tag="hospital")
             agent.plan = [("hospital", "hospital")]
             self._start_step(agent, *agent.plan.pop(0))
             return
@@ -338,9 +391,8 @@ class Simulation:
         route = self.walk_minutes(agent, agent.job.place_id)
         place_id = self._resolve_place(agent, via)
         if place_id and agent.inside != place_id:
-            entry = self.town.places[place_id].entry
-            route = (len(self.town.path((agent.x, agent.y), entry))
-                     + len(self.town.path(entry, self.town.places[agent.job.place_id].entry)))
+            route = (self.town.walk_minutes((agent.x, agent.y), place_id)
+                     + self.town.walk_minutes(self.town.places[place_id].entry, agent.job.place_id))
         return self.clock.tick >= start - route - SHIFT_MARGIN
 
     def _resolve_place(self, agent: Agent, where: str | None) -> str | None:
@@ -357,7 +409,10 @@ class Simulation:
         if place_id and agent.inside != place_id:
             place = self.town.places[place_id]
             start = (agent.x, agent.y)
-            agent.path = self.town.path(start, place.entry)
+            if agent.vehicle in ("car", "taxi", "ambulance"):
+                agent.path = self.town.drive_path(start, place_id)
+            else:
+                agent.path = self.town.path(start, place.entry)
             agent.inside = None
             if agent.path:
                 agent.state = "travelling"
@@ -366,15 +421,16 @@ class Simulation:
         self._begin_activity(agent)
 
     def _travel(self, agent: Agent) -> None:
-        light = self.lights()
+        light = None
         for _ in range(agent.speed):
             if not agent.path:
                 break
             nxt = agent.path[0]
-            if agent.vehicle == "car" and nxt[0] in ROAD_COLS and nxt[1] in ROAD_ROWS:
+            if agent.vehicle == "car" and nxt in self.town.junctions:
+                light = light or self.lights()
                 axis = "ns" if nxt[0] == agent.x else "ew"
                 if light[axis] == "red":
-                    break  # wait at the intersection
+                    break  # wait at the junction
             agent.x, agent.y = agent.path.pop(0)
         if not agent.path:
             self._begin_activity(agent)
@@ -426,10 +482,13 @@ class Simulation:
     def _do_activity(self, agent: Agent) -> None:
         act = ACTIVITIES[agent.activity]
         minutes = getattr(agent, "activity_minutes", 1)
+        scale = 1.0  # at home, how good the home is scales what an activity gives
+        if (act.gains or agent.activity == "sleep") and agent.activity_place == self.home_of(agent):
+            scale = housing.activity_gain_scale(self, agent)
         for need, gain in act.gains.items():
-            agent.adjust(need, gain / minutes)
+            agent.adjust(need, (gain * scale if gain > 0 else gain) / minutes)
         if agent.activity == "sleep":
-            agent.adjust("energy", 0.17)
+            agent.adjust("energy", 0.17 * scale)
         elif agent.activity == "hospital":
             agent.health = min(100.0, agent.health + 0.15)
         elif agent.activity == "walk_park" and self.clock.tick % 3 == 0:
@@ -446,7 +505,8 @@ class Simulation:
         if paid:  # the first stop of the character's own choice: none of what it promised happens either
             self.agents[paid[0]].money += refund
             agent.pending_outcomes = [p for p in agent.pending_outcomes if p["fork"] != agent.fork_id]
-        self.event(f"{agent.name} finds {place.name} closed" + (f" (${refund:.0f} refunded)." if refund else "."), agent)
+        self.event(f"{agent.name} finds {place.name} closed" + (f" (${refund:.0f} refunded)." if refund else "."),
+                   agent, tag="closed", place=place.id)
         agent.path = []
         agent.plan = [s for s in agent.plan if s[0] == "work"]
         agent.state = "idle"
@@ -473,7 +533,7 @@ class Simulation:
             payer.money -= HOSPITAL_FEE
             by = "" if payer is agent else f" by {payer.name.split()[0]}"
             self.event(f"{agent.name} leaves City Hospital feeling better (paid ${HOSPITAL_FEE:.0f}{by}).",
-                       agent, kind="health")
+                       agent, tag="discharged")
         elif agent.activity == "walk_park":
             park = self.town.places["park"]
             agent.x, agent.y = park.entry
@@ -481,12 +541,16 @@ class Simulation:
         agent.activity = "idle" if not agent.plan else agent.activity
 
     def _die(self, agent: Agent, how: str) -> None:
+        place = agent.inside or agent.activity_place  # where it happened, before `inside` is cleared
         agent.alive = False
         agent.state = "dead"
         agent.activity = "dead"
         agent.plan = []
         agent.path = []
         agent.inside = None
+        agent.trip = None
+        agent.riding = None
+        agent.died = {"tick": self.clock.tick, "time": self.clock.stamp(), "how": how}
         self._withdraw_fork(agent)  # nothing is played for the dead
         for inv in self.invites.values():
             if inv["from"] == agent.id and inv["status"] == "pending":
@@ -495,7 +559,7 @@ class Simulation:
                 asked = self.forks.get(guest.fork_id or "")
                 if asked and asked.kind == "invite" and asked.options[0].extra.get("invite") == inv["id"]:
                     self._withdraw_fork(guest)  # the guest can't accept a dead host's invite
-        self.event(f"{agent.name} {how}, aged {agent.age}.", agent, kind="death")
+        self.event(f"{agent.name} {how}, aged {agent.age}.", agent, tag="death", place=place)
         for other_id, rel in agent.relationships.items():
             other = self.agents.get(other_id)
             if other and other.alive and rel.affinity > 30:
@@ -503,12 +567,14 @@ class Simulation:
                 other.adjust("social", -20)
                 other.remember(self.clock.stamp(), f"Lost {agent.name}.")
         self.household(agent).member_ids = [m for m in self.household(agent).member_ids if m != agent.id]
+        housing.on_death(self, agent)
 
     def _withdraw_fork(self, agent: Agent) -> None:
         """Stop asking a character's open fork: nothing is played for it and answers are refused."""
         fork = self.forks.get(agent.fork_id or "")
         if fork and fork.status == "asked":
             fork.status = "withdrawn"
+            self.stats.count("withdrawn")
             agent.fork_id = None
             if agent.state == "deciding":
                 agent.state = agent.activity = "idle"  # the Director finds their next decision
@@ -516,17 +582,22 @@ class Simulation:
     # --- the Decision Director -------------------------------------------------
 
     def director(self, agent: Agent, fork: Fork) -> None:
-        fork.scores = default_scores(agent, fork)
+        fork.scores = default_scores(agent, fork, self)
+        fork.profile_choice = fork.scores.index(max(fork.scores))  # first on ties
         ranked = sorted(fork.scores, reverse=True)
         self.forks[fork.id] = fork
-        if ranked[0] - ranked[1] >= OBVIOUS_MARGIN:
-            self._decide(agent, fork, fork.scores.index(ranked[0]), "habit", "Obvious from the character's habits.")
+        margin = MAJOR_MARGIN if fork.major else OBVIOUS_MARGIN  # a move needs a clearer lead than a coffee
+        if ranked[0] - ranked[1] >= margin - 1e-9:
+            self._decide(agent, fork, fork.profile_choice, "habit", "Obvious from the character's habits.")
         elif agent.controller:
             fork.status = "asked"
+            fork.controller = agent.controller
+            fork.model = (self.controllers.get(agent.controller) or {}).get("model")
             agent.state = "deciding"
             agent.activity = "deciding"
             agent.fork_id = fork.id
             self.asked_at[fork.id] = self.now()
+            self.stats.count("asked")
             self.outbox.append((agent.controller, self.fork_message(agent, fork)))
         else:
             self._decide(agent, fork, self.default_choice(fork), "default", "Played from the character's profile.")
@@ -543,9 +614,10 @@ class Simulation:
             first = opt.steps[0][1] if opt.steps else None
             place_id = self._resolve_place(agent, first)
             if place_id and agent.inside != place_id:
-                minutes = -(-len(self.town.path((agent.x, agent.y), self.town.places[place_id].entry))
-                            // SPEEDS.get(opt.vehicle, 1))
+                mode = opt.vehicle if opt.vehicle in SPEEDS else "walk"
+                minutes = self.travel_minutes(agent, place_id, mode)
             options.append(opt.public(i, minutes))
+        here = self.town.places.get(agent.inside or "")
         return {
             "type": "fork", "fork_id": fork.id, "agent_id": agent.id, "kind": fork.kind,
             "question": fork.question, "options": options, "time": self.clock.stamp(),
@@ -553,7 +625,9 @@ class Simulation:
             "you": {"name": agent.name, "profile": agent.profile.prompt, "money": round(agent.money, 2),
                     "needs": {k: round(v) for k, v in agent.needs.items()}, "health": round(agent.health),
                     "where": agent.inside or "outside", "groceries_at_home": hh.groceries,
-                    "goal": agent.goal, "recent_memory": agent.memory[-5:]},
+                    "goal": agent.goal, "recent_memory": agent.memory[-5:],
+                    "savings": r2(agent.savings), "where_name": here.name if here else "outside",
+                    "home_name": self.homes[hh.home_id].name, **housing.fork_you(self, agent)},
         }
 
     def answer(self, fork_id: str, choice: int, reason: str = "", controller: str | None = None) -> dict:
@@ -581,6 +655,12 @@ class Simulation:
                 and getattr(fork, "late_answer", None) is None):  # only the first late answer teaches
             self._learn(agent, fork, choice, reason)
             fork.late_answer = {"choice": choice, "reason": reason}  # type: ignore[attr-defined]
+            self.stats.count("late")
+            for summary in agent.forks:
+                if summary["id"] == fork.id:
+                    summary["late"] = {"choice": choice, "reason": reason, "seconds": _r1(elapsed)}
+                    if not any(s is summary for s in self.fork_log):
+                        self.fork_log.append(summary)  # sent again, same id, so viewers see the late answer
             return {"accepted": True, "applied": False, "note": "too late to act on; saved to the profile"}
         return {"accepted": False, "error": "too late"}
 
@@ -604,17 +684,31 @@ class Simulation:
 
     def _decide(self, agent: Agent, fork: Fork, choice: int, by: str, reason: str) -> None:
         opt = fork.options[choice]
+        asked = self.asked_at.get(fork.id)
+        seconds = self.now() - asked if asked is not None else None
         fork.status, fork.choice, fork.decided_by, fork.reason = "decided", choice, by, reason
         if fork.id not in self.asked_at:
             self.forks.pop(fork.id, None)
         if not agent.alive:
             return
-        payer = self._payer_for(agent, opt.cost)
-        payer.money -= opt.cost
-        agent.paid = (payer.id, opt.cost)  # type: ignore[attr-defined]  # handed back if the place is shut on arrival
-        agent.vehicle = opt.vehicle if opt.vehicle in SPEEDS else "walk"
-        agent.speed = SPEEDS[agent.vehicle]
-        agent.plan = list(opt.steps)
+        if fork.profile_choice is None:  # decided without going through the Director
+            fork.scores = fork.scores or default_scores(agent, fork, self)
+            fork.profile_choice = fork.scores.index(max(fork.scores))
+        self.stats.count(stats.DECIDED_BY[by], seconds if by == "model" and seconds is not None else None)
+        if by == "model" and choice != fork.profile_choice:
+            self.stats.count("against_habit")
+        place = agent.inside or agent.activity_place  # where the character was when it was decided
+        hh = self.household(agent)
+        if not opt.charge:
+            agent.paid = None  # type: ignore[attr-defined]  # a move pays its own way when it goes through
+        elif opt.household_pays:
+            if opt.cost:
+                self.pay_household(hh, opt.cost)  # the adults' pooled money and savings
+            agent.paid = None  # type: ignore[attr-defined]  # nothing is handed back to the pool at a shut door
+        else:
+            payer = self._payer_for(agent, opt.cost)
+            payer.money -= opt.cost
+            agent.paid = (payer.id, opt.cost)  # type: ignore[attr-defined]  # handed back if the place is shut
         agent.fork_id = fork.id
         agent.state = "idle"
         if fork.kind in COOLDOWN:
@@ -622,27 +716,47 @@ class Simulation:
         if any(step[0] == "work" for step in opt.steps) or opt.extra.get("skip_work"):
             agent.worked_today = self.clock.day
         self._apply_extra(agent, fork, opt)
-        # Roll the hidden outcomes now; most land when the plan is done, some later.
+        # Roll the hidden outcomes now; most land when the plan is done, some later. Within a group the first
+        # hit wins: the group's later outcomes are neither rolled nor logged.
+        hit_groups: set[str] = set()
         for out in opt.outcomes:
-            if out.p <= 0:
+            if out.p <= 0 or (out.group is not None and out.group in hit_groups):
                 continue
             p = luck_odds(out.p, out.valence, agent.luck)
             roll = self.rng.random()
             self._log_roll(agent, f"{fork.id}:{out.id}", p, roll, base=out.p)
             if roll < p:
+                if out.group is not None:
+                    hit_groups.add(out.group)
                 delay = out.effects.get("delay")
                 agent.pending_outcomes.append({"fork": fork.id, "outcome": out,
                                                "due": self.clock.tick + delay if delay else None})
-        summary = {"id": fork.id, "agent": agent.id, "kind": fork.kind, "time": self.clock.stamp(),
-                   "question": fork.question, "options": [o.label for o in fork.options],
-                   "choice": choice, "decided_by": by, "reason": reason, "happened": fork.happened}
+        summary = {"id": fork.id, "agent": agent.id, "kind": fork.kind, "tick": self.clock.tick,
+                   "time": self.clock.stamp(), "question": fork.question, "options": [o.label for o in fork.options],
+                   "choice": choice, "decided_by": by, "reason": reason, "happened": fork.happened,
+                   "major": fork.major, "controller": fork.controller, "model": fork.model,
+                   "answer_seconds": _r1(seconds) if by == "model" and seconds is not None else None,
+                   "late": None, "profile_choice": fork.profile_choice, "place": place}
         agent.forks.append(summary)
         del agent.forks[:-20]
+        if by in ("model", "timeout"):
+            self.llm_log.append(summary)
+            del self.llm_log[:-LLM_LOG_SIZE]
+            agent.llm_forks.append(summary)
+            del agent.llm_forks[:-AGENT_LLM_FORKS]
         self.fork_log.append(summary)
+        # The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave for work:
+        # _begin_activity cuts it short (even once the shift has begun), and _next drops any later steps.
+        self.start_plan(agent, opt.steps, opt.vehicle)
+
+    def start_plan(self, agent: Agent, steps: list, vehicle: str = "walk") -> None:
+        """Give the character a plan and start its first step now; with no steps the Director looks for the
+        next fork. Housing uses it too (moving a household, sending a helper)."""
+        agent.vehicle = vehicle if vehicle in SPEEDS else "walk"
+        agent.speed = SPEEDS[agent.vehicle]
+        agent.plan = list(steps)
+        agent.state = "idle"
         if agent.plan:
-            # The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave
-            # for work: _begin_activity cuts it short (even once the shift has begun), and _next drops any
-            # later steps.
             self._start_step(agent, *agent.plan.pop(0))
         else:
             self._next(agent)
@@ -695,11 +809,16 @@ class Simulation:
                             back.bump(value)
             elif isinstance(key, tuple) and key[0] == "rel":
                 self._bump(agent, key[1], value)
-        self.event(f"{agent.name.split()[0]}: {out.label}.", agent, kind="outcome")
+            elif key == "delay":
+                continue  # when it lands, not what it does
+            elif isinstance(key, str):
+                housing.apply_effect(self, agent, key, value)  # home_condition, hh_money, buy, ... (P2)
+        text, tag, importance = chronicle.outcome_event(agent.name, out.label, out.effects)
+        self.event(text, agent, tag=tag, importance=importance)
         for summary in agent.forks:
             if summary["id"] == pending["fork"]:
                 summary["happened"].append(out.label)
-                if summary not in self.fork_log:
+                if not any(s is summary for s in self.fork_log):
                     self.fork_log.append(summary)  # sent again, same id, so viewers see what came of it
 
     def _bump(self, agent: Agent, other_id: str, value: float) -> None:
@@ -709,18 +828,27 @@ class Simulation:
         for a, b in ((agent, other), (other, agent)):
             if b.id not in a.relationships:
                 a.relate(b.id, RelationKind.ACQUAINTANCE, 10)
+        before = agent.relationships[other_id].affinity
+        for a, b in ((agent, other), (other, agent)):
             a.relationships[b.id].bump(value if a is agent else value / 2)
+        chronicle.on_affinity(self, agent.id, other_id, before, agent.relationships[other_id].affinity)
 
-    def _meet_someone(self, agent: Agent) -> None:
-        strangers = [a for a in self.living() if a.id != agent.id and a.id not in agent.relationships
-                     and (a.is_adult == agent.is_adult)]
+    def _meet_someone(self, agent: Agent, pool: list | None = None) -> None:
+        """A first meeting with a stranger of the same age group, drawn from `pool` (Agents or ids) if given."""
+        if pool is None:
+            candidates = self.living()
+        else:
+            candidates = [self.agents.get(p) if isinstance(p, str) else p for p in pool]
+        strangers = [a for a in candidates if a is not None and a.alive and a.id != agent.id
+                     and a.id not in agent.relationships and (a.is_adult == agent.is_adult)]
         if not strangers:
             return
         other = self.rng.choice(strangers)
         agent.relate(other.id, RelationKind.ACQUAINTANCE, 15)
         other.relate(agent.id, RelationKind.ACQUAINTANCE, 15)
         other.remember(self.clock.stamp(), f"Met {agent.name}.")
-        self.event(f"{agent.name} meets {other.name} for the first time.", agent, kind="social")
+        self.event(f"{agent.name} meets {other.name} for the first time.", agent, tag="first_meet",
+                   agents=[other.id])
 
     def _apply_extra(self, agent: Agent, fork: Fork, opt) -> None:
         extra = opt.extra
@@ -731,7 +859,9 @@ class Simulation:
                 host = self.agents[inv["from"]]
                 words = {"accept": "accepts", "decline": "declines", "later": "suggests another day for",
                          "ignore": "ignores"}[extra["answer"]]
-                self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent, kind="social")
+                self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent,
+                           tag="invite_accepted" if extra["answer"] == "accept" else "invite_declined",
+                           agents=[host.id], place=inv["place"])
                 self._deliver(host, {"type": "invite_answer", "invite_id": inv["id"], "from": agent.id,
                                      "answer": extra["answer"]})
                 if extra["answer"] == "accept":
@@ -745,17 +875,19 @@ class Simulation:
             agent.money -= amount
             agent.goal["saved"] = round(agent.goal["saved"] + amount, 2)
             if agent.goal["saved"] >= agent.goal["target"]:
-                self.event(f"{agent.name} finally buys {agent.goal['name']} with their savings!", agent, kind="goal")
+                self.event(f"{agent.name} finally buys {agent.goal['name']} with their savings!", agent,
+                           tag="goal_reached")
                 agent.adjust("fun", 40)
                 agent.goal = None
             else:
                 self.event(f"{agent.name} saves ${amount:.0f} toward {agent.goal['name']} "
-                           f"(${agent.goal['saved']:.0f} of ${agent.goal['target']:.0f}).", agent, kind="money")
+                           f"(${agent.goal['saved']:.0f} of ${agent.goal['target']:.0f}).", agent, tag="saving")
         elif "save" in extra:
             amount = min(extra["save"], max(agent.money, 0))
             agent.money -= amount
             agent.savings = round(agent.savings + amount, 2)
-            self.event(f"{agent.name} puts ${amount:.0f} into savings (${agent.savings:.0f} saved).", agent, kind="money")
+            self.event(f"{agent.name} puts ${amount:.0f} into savings (${agent.savings:.0f} saved).", agent,
+                       tag="saving")
         if "ask_shop" in extra:
             other = self.agents.get(extra["ask_shop"])
             if (other and other.alive and self._interruptible(other)
@@ -764,19 +896,25 @@ class Simulation:
                 payer.money -= GROCERY_COST
                 other.plan = [("relax_home", "home")]
                 self._start_step(other, "buy_groceries", "market")  # started now so the paid shop happens
-                self.event(f"{other.name} heads to Fresh Market for {agent.name.split()[0]}.", other, kind="social")
+                self.event(f"{other.name} heads to Fresh Market for {agent.name.split()[0]}.", other, tag="errand",
+                           agents=[agent.id])
         if "call" in extra:
             other = self.agents.get(extra["call"])
             if other and other.alive:
                 other.adjust("social", 15)
-                self.event(f"{agent.name} calls {other.name}.", agent, kind="social")
+                self.event(f"{agent.name} calls {other.name}.", agent, tag="call", agents=[other.id])
         if extra.get("family"):
+            where = extra.get("place") or "cafe"  # the family dinner's place
+            family = []
             for m in self.household(agent).member_ids:
                 other = self.agents[m]
                 if other is not agent and other.alive and self._interruptible(other):
-                    other.plan = [("family_dinner", "cafe")]
+                    other.plan = [("family_dinner", where)]
                     other.state = "idle"
-            self.event(f"{agent.name} takes the family out to dinner.", agent, kind="social")
+                    family.append(other.id)
+            self.event(f"{agent.name} takes the family out to dinner.", agent, tag="family_dinner", agents=family,
+                       place=where)
+        housing.apply_extra(self, agent, fork, opt)  # move, repair, works, belt_tighten, ... (P2)
 
     def _interruptible(self, other: Agent) -> bool:
         """Free to be asked along: idle or doing something leisurely, not asleep, working or deciding."""
@@ -799,7 +937,7 @@ class Simulation:
             host.state = "idle"
             self._host_hold[host.id] = hold + self.walk_minutes(host, place_id)
             self.event(f"{host.name} heads to {self.town.places[place_id].name} to meet {guest.name.split()[0]}.",
-                       host, kind="social")
+                       host, tag="meetup", agents=[guest.id], place=place_id)
 
     # --- invites and messages ---------------------------------------------------
 
@@ -812,7 +950,8 @@ class Simulation:
                "tick": self.clock.tick, "status": "pending"}
         self.invites[inv["id"]] = inv
         place = self.town.places[place_id].name
-        self.event(f"{host.name} invites {guest.name} to {place}.", host, kind="social")
+        self.event(f"{host.name} invites {guest.name} to {place}.", host, tag="invite", agents=[guest_id],
+                   place=place_id)
         guest.inbox.append({"time": self.clock.stamp(), "from": host.id, "text": f"Want to meet at {place}?"})
         del guest.inbox[:-30]
         return inv
@@ -839,7 +978,7 @@ class Simulation:
         del b.inbox[:-30]
         a.adjust("social", 3)
         b.adjust("social", 3)
-        self.event(f"{a.name} texts {b.name}: “{text[:80]}”", a, kind="message")
+        self.event(f"{a.name} texts {b.name}: “{text[:80]}”", a, tag="text", agents=[b.id])
         self._deliver(b, {"type": "message", "from": a.id, "from_name": a.name, "to": b.id, "text": text,
                           "time": self.clock.stamp()})
         return {"ok": True}
@@ -881,28 +1020,85 @@ class Simulation:
         agent.controller = controller
         return True
 
-    def release(self, controller: str, agent_id: str | None = None) -> None:
+    def release(self, controller: str, agent_id: str | None = None) -> list[str]:
+        """Free a controller's characters (or just one); returns the ids it let go, in cast order."""
+        freed = []
         for agent in self.agents.values():
             if agent.controller == controller and (agent_id is None or agent.id == agent_id):
                 agent.controller = None
+                freed.append(agent.id)
+        if controller in self.controllers:
+            self.controllers[controller]["characters"] = self._played_by(controller)
+        return freed
+
+    def _played_by(self, controller: str) -> list[str]:
+        return [a.id for a in self.agents.values() if a.controller == controller]
+
+    def controller_joined(self, name: str, model: str | None, ids: list[str]) -> dict | None:
+        """A controller said hello (or claimed one more character): register it, and tell God in one event.
+
+        `model` is what its hello declared (God-only); a later claim passes the model already registered.
+        """
+        entry = self.controllers.setdefault(name, {"model": None, "characters": []})
+        if model is not None:
+            entry["model"] = model
+        entry["characters"] = self._played_by(name)
+        if not ids:
+            return None
+        agent = self.agents.get(ids[0]) if len(ids) == 1 else None
+        return self.event(f"{self._names(ids)} {'is' if len(ids) == 1 else 'are'} now played by {name}.", agent,
+                          tag="controller_joined", agents=list(ids), remember=False)
+
+    def controller_left(self, name: str, ids: list[str], release: bool = False) -> dict | None:
+        """A controller let characters go: all of them when it disconnects (it leaves the registry), or one
+        with a `release` message (importance 0)."""
+        if release:
+            if name in self.controllers:
+                self.controllers[name]["characters"] = self._played_by(name)
+        else:
+            self.controllers.pop(name, None)
+        if not ids:
+            return None
+        agent = self.agents.get(ids[0]) if len(ids) == 1 else None
+        return self.event(f"{self._names(ids)} {'is' if len(ids) == 1 else 'are'} no longer played by {name}.",
+                          agent, tag="controller_left", importance=0 if release else None, agents=list(ids),
+                          remember=False)
+
+    def _names(self, ids: list[str]) -> str:
+        """Who an event names: "A", "A and B", "A, B and C", or "A, B, C and 57 others"."""
+        names = [self.agents[i].name if i in self.agents else i for i in ids]
+        if len(names) <= 2:
+            return " and ".join(names)
+        if len(names) == 3:
+            return f"{names[0]}, {names[1]} and {names[2]}"
+        return f"{', '.join(names[:3])} and {len(names) - 3} others"
 
     # --- snapshots ---------------------------------------------------------------
 
     def town_json(self) -> dict:
-        return {"w": len(self.town.tiles[0]), "h": len(self.town.tiles), "tiles": self.town.rows(),
-                "places": [p.to_json() for p in self.town.places.values()],
-                "road_rows": list(ROAD_ROWS), "road_cols": list(ROAD_COLS), "timetable": self.timetable()}
+        """God's map, sent once in `welcome` (PLAN 3.2)."""
+        return {**self.town.map_json(), "homes": housing.town_homes_json(self), "housing": housing.town_housing_json(),
+                "stops": transit.stops_json(), "timetable": self.timetable()}
 
-    def state_json(self) -> dict:
-        return {
+    def state_json(self, housing: bool = True) -> dict:
+        """One `state` frame (PLAN 3.3); housing=False leaves out `lots` and `homes` (see housing_maps)."""
+        state = {
             "tick": self.clock.tick, "time": self.clock.stamp(), "minute": self.clock.minute_of_day,
             "day": self.clock.day, "season": self.clock.season, "weather": self.weather,
-            "lights": self.lights(), "bus": self.bus(), "plane": self.plane(),
+            "lights": self.lights(), "plane": self.plane(), "buses": self.buses(),
             "agents": [{"id": a.id, "name": a.name, "x": a.x, "y": a.y, "inside": a.inside, "state": a.state,
                         "activity": a.activity, "vehicle": a.vehicle, "mood": round(a.mood), "luck": round(a.luck),
-                        "controller": a.controller, "alive": a.alive, "age": a.age}
+                        "controller": a.controller, "alive": a.alive, "age": a.age,
+                        "home": self.households[a.household_id].home_id, "car": a.owns_car, "riding": a.riding}
                        for a in self.agents.values()],
         }
+        if housing:
+            state.update(self.housing_maps())
+        return state
+
+    def housing_maps(self) -> dict:
+        """The state's `lots` and `homes` maps, which the server sends only when they change (and every 40th frame)."""
+        return {"lots": housing.lots_json(self), "homes": housing.homes_json(self)}
 
     def agent_json(self, agent_id: str) -> dict | None:
         a = self.agents.get(agent_id)
@@ -917,7 +1113,8 @@ class Simulation:
             "job": a.job.to_json() if a.job else None, "controller": a.controller,
             "profile": {"prompt": a.profile.prompt, "traits": a.profile.traits, "edited": a.profile.prompt_edited,
                         "learned": a.profile.learned},
-            "possessions": a.possessions(hh, self.town.places[hh.home_id].name),
+            **housing.agent_page_fields(self, a),
+            "possessions": self.possessions(a),
             "relationships": {oid: {**r.to_json(), "name": self.agents[oid].name}
                               for oid, r in sorted(a.relationships.items(), key=lambda kv: -kv[1].affinity)},
             "memory": a.memory[-15:], "inbox": a.inbox[-10:], "forks": a.forks[-10:],

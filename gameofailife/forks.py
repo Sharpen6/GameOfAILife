@@ -11,16 +11,20 @@ import itertools
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from . import housing
+
 if TYPE_CHECKING:
     from .agent import Agent
     from .sim import Simulation
 
 RAIN_CHANCE = {"spring": 0.35, "summer": 0.10, "autumn": 0.40, "winter": 0.60}
 OBVIOUS_MARGIN = 0.45  # default-score lead at which the Director decides on its own
+MAJOR_MARGIN = 1.0  # the lead a major fork (a move, housing trouble) needs before habit settles it
 LUCK_STRENGTH = 0.6  # Luck 100 multiplies good odds by 1.6 and bad odds by 0.4
 KID_CURFEW = 19  # hour after which characters under 18 stay home for the night
 WORK_LEAD = 45  # minutes before a shift the work fork opens (more if the walk is long)
 WORK_LATE = 60  # minutes after a shift starts that the work fork still opens, for a late arrival
+SHOP_MINUTES = 45  # how long the payday shopping trip takes (sim.ACTIVITIES["shopping"])
 
 _ids = itertools.count(1)
 
@@ -32,6 +36,7 @@ class Outcome:
     p: float
     valence: int  # +1 good, -1 bad, 0 neutral; Luck pushes good up and bad down
     effects: dict = field(default_factory=dict)
+    group: str | None = None  # within a group the first hit wins; later ones are neither rolled nor logged
 
 
 @dataclass
@@ -45,12 +50,16 @@ class Option:
     outcomes: list[Outcome] = field(default_factory=list)
     extra: dict = field(default_factory=dict)
     base: float = 0.0  # common-sense value whatever the personality (going to work beats skipping it)
+    household_pays: bool = False  # the cost comes from the pooled adults' money and savings
+    charge: bool = True  # False: deciding charges nothing (a move pays its own way when it goes through)
 
     def public(self, index: int, minutes: int | None = None) -> dict:
         """What the agent (and God) may see: never the outcome table."""
         out = {"index": index, "label": self.label, "cost": round(self.cost, 2)}
         if minutes is not None:
             out["travel_minutes"] = minutes
+        if self.household_pays:
+            out["household"] = True
         return out
 
 
@@ -68,6 +77,10 @@ class Fork:
     reason: str = ""
     happened: list[str] = field(default_factory=list)
     scores: list[float] = field(default_factory=list)
+    major: bool = False  # a move or housing trouble: habit settles it only with a lead of MAJOR_MARGIN
+    controller: str | None = None  # the controller asked, if one was
+    model: str | None = None  # the model that controller declared in its hello
+    profile_choice: int | None = None  # the option the profile scores highest (first on ties), set when asked
 
 
 def luck_odds(p: float, valence: int, luck: float) -> float:
@@ -79,13 +92,13 @@ def urgency(level: float) -> float:
     return ((100 - level) / 100) ** 2
 
 
-def default_scores(agent: Agent, fork: Fork) -> list[float]:
+def default_scores(agent: Agent, fork: Fork, sim: Simulation) -> list[float]:
     """How the character's play-style profile rates each option."""
     scores = []
     for opt in fork.options:
         style = sum((agent.profile.traits.get(t, 0.5) - 0.5) * 2 * v for t, v in opt.tags.items())
         need = sum(urgency(agent.needs[n]) * g / 25 for n, g in opt.gains.items() if n in agent.needs)
-        afford = -2.0 if opt.cost > agent.money else -opt.cost / max(agent.money, 50) * agent.profile.traits["thrift"]
+        afford = housing.afford_score(sim, agent, opt)
         scores.append(round(opt.base + 0.6 * style + need + afford, 3))
     return scores
 
@@ -193,11 +206,16 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
                       tags={"diligence": 0.7, "health": 0.5, "adventure": 0.2},
                       outcomes=[_late(0.03), Outcome("ankle", "Twists an ankle", 0.03, -1, {"health": -8, "fun": -6}),
                                 Outcome("buzz", "Arrives buzzing with energy", 0.3, +1, {"energy": 6, "fun": 4})])
-    coffee = Option("Grab a coffee at Corner Cafe first", [("coffee", "cafe"), ("work", "job")], cost=4, base=0.35,
-                    tags={"social": 0.4, "diligence": -0.5, "thrift": -0.3},
-                    gains={"energy": 10, "social": 5},
-                    outcomes=[_late(0.7), _meet_new(0.12), Outcome("barista", "Friendly chat at the counter", 0.3, +1, {"social": 6}),
-                              Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})])
+    if _open_on_arrival(sim, agent, "cafe"):
+        coffee = Option("Grab a coffee at Corner Cafe first", [("coffee", "cafe"), ("work", "job")], cost=4, base=0.35,
+                        tags={"social": 0.4, "diligence": -0.5, "thrift": -0.3},
+                        gains={"energy": 10, "social": 5},
+                        outcomes=[_late(0.7), _meet_new(0.12), Outcome("barista", "Friendly chat at the counter", 0.3, +1, {"social": 6}),
+                                  Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})])
+    else:  # an early start: Corner Cafe would still be shut on the way, so a cup before setting off instead
+        coffee = Option("Make a coffee before setting off", [("coffee", None), ("work", "job")], base=0.35,
+                        tags={"diligence": -0.3, "thrift": 0.2}, gains={"energy": 8},
+                        outcomes=[_late(0.4), Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})])
     skip = Option(f"Call in sick and stay home" if not school else "Pretend to be sick and stay home",
                   [("rest", "home")], tags={"diligence": -1.0, "health": 0.3, "adventure": 0.2}, base=-0.4,
                   gains={"energy": 30, "fun": 25},
@@ -294,10 +312,14 @@ def payday_fork(sim: Simulation, agent: Agent) -> Fork | None:
     else:
         out = Option("Go out alone to Corner Cafe", [("hang_out", "cafe")], cost=25,
                      tags={"social": 0.6, "thrift": -0.5}, gains={"social": 25, "fun": 20}, outcomes=[_meet_new(0.2)])
-    buy = Option("Buy something nice for yourself", [("shopping", "market"), ("relax_home", "home")], cost=60,
-                 tags={"thrift": -1.0, "adventure": 0.5}, gains={"fun": 35},
-                 outcomes=[Outcome("love_it", "Loves the purchase", 0.6, +1, {"fun": 15}),
-                           Outcome("regret", "Regrets the spending", 0.3, -1, {"fun": -8})])
+    bought = [Outcome("love_it", "Loves the purchase", 0.6, +1, {"fun": 15}),
+              Outcome("regret", "Regrets the spending", 0.3, -1, {"fun": -8})]
+    if _open_on_arrival(sim, agent, "market", stay=SHOP_MINUTES):
+        buy = Option("Buy something nice for yourself", [("shopping", "market"), ("relax_home", "home")], cost=60,
+                     tags={"thrift": -1.0, "adventure": 0.5}, gains={"fun": 35}, outcomes=bought)
+    else:  # the market would shut before the shopping is done: order it from home instead
+        buy = Option("Order something nice online", [("relax_home", "home")], cost=60,
+                     tags={"thrift": -1.0, "adventure": 0.3}, gains={"fun": 30}, outcomes=bought)
     if any(m != agent.id for m in sim.household(agent).member_ids):
         treat = Option("Treat the family to dinner at Corner Cafe", [("family_dinner", "cafe")], cost=50,
                        tags={"family": 1.0, "thrift": -0.4, "social": 0.3}, gains={"hunger": 40, "social": 30},
@@ -396,19 +418,35 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
     return Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick)
 
 
-BUILDERS = [invite_fork, work_fork, hunger_fork, sleep_fork, payday_fork, groceries_fork, lonely_fork, free_time_fork]
+# The fork builders in priority order, by name: "housing_forks." names live in housing_forks.py, which imports
+# this module, so build_fork looks them up when it runs rather than at import.
+BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "housing_forks.repair_fork", "payday_fork",
+            "groceries_fork", "housing_forks.housing_trouble_fork", "housing_forks.house_hunt_fork",
+            "housing_forks.upkeep_fork", "lonely_fork", "free_time_fork"]
 
 
 # Minutes before the same kind of fork can come up again for a character.
 COOLDOWN = {"groceries": 360, "lonely": 150, "free_time": 90, "hunger": 45, "sleep": 20}
 
 
+def builders() -> list:
+    """BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too)."""
+    from . import housing_forks  # it imports this module, so not at the top
+
+    here = globals()
+    return [getattr(housing_forks, name[len("housing_forks."):]) if name.startswith("housing_forks.") else here[name]
+            for name in BUILDERS]
+
+
 def build_fork(sim: Simulation, agent: Agent) -> Fork | None:
-    for builder in BUILDERS:
-        if agent.cooldowns.get(builder.__name__.removesuffix("_fork"), 0) > sim.clock.tick:
+    from .housing_forks import MAJOR_KINDS
+
+    for name, builder in zip(BUILDERS, builders()):
+        if agent.cooldowns.get(name.rpartition(".")[2].removesuffix("_fork"), 0) > sim.clock.tick:
             continue
         fork = builder(sim, agent)
         if fork:
             assert len(fork.options) == 4, f"{fork.kind} fork must offer exactly four options"
+            fork.major = fork.major or fork.kind in MAJOR_KINDS
             return fork
     return None
