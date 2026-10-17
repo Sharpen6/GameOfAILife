@@ -79,6 +79,9 @@
   };
 
   const LIGHT_CYCLE = 6; // minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
+  const STOP_AT_LIGHTS = ["car", "taxi"]; // they wait at a red light on entering a junction; buses and ambulances don't
+  const ONE_WAY = ["taxi", "ambulance"]; // vehicles that take a character to one place: on arrival they are on foot again
+  const BUS_GIVE_UP = 26; // minutes at a stop (two headways, which the exact timetable never allows) before walking instead
   const FLIGHT_MINUTES = 12; // the daily planes (transit.FLIGHTS) take this long to cross the sky
 
   // One decimal, rounding half up (floor(x * 10 + 0.5) / 10), as the Python twin does.
@@ -206,8 +209,8 @@
     // God's `get_home` reply body, or null for an unknown home.
     home_page(home_id) { return G.housing.home_page(this, home_id); }
 
-    // `state.buses`: a pure function of the tick.
-    buses() { return G.transit.bus_rows(this.clock.tick); }
+    // `state.buses`: positions are a pure function of the tick; riders are counted from `agent.riding`.
+    buses() { return G.transit.bus_rows(this.clock.tick, this.agents.values()); }
 
     // God's `stats` push (PLAN 3.8), built by stats.stats_json.
     stats_json(full = false) { return G.stats.stats_json(this, full); }
@@ -374,10 +377,9 @@
         if (agent.state !== "idle" || agent.plan.length) return; // an outcome set the character off (a haggle's deal: moving house)
       }
       if (agent.health < 25 && agent.inside !== "hospital") {
-        this.event(`${agent.name} feels very unwell and goes to City Hospital.`, agent, null, { tag: "hospital" });
-        agent.plan = [["hospital", "hospital"]];
-        const [activity, where] = agent.plan.shift();
-        this._start_step(agent, activity, where);
+        this.event(`${agent.name} feels very unwell, and an ambulance takes them to `
+          + `${this.town.places.get("hospital").name}.`, agent, null, { tag: "hospital" });
+        this.start_plan(agent, [["hospital", "hospital"]], "ambulance"); // free; the hospital's fee stays
         return;
       }
       const fork = G.forks.build_fork(this, agent);
@@ -391,15 +393,19 @@
       this._start_step(agent, activity, where);
     }
 
-    // True once it's time to set off for today's shift, counting the walk by way of `via` if given.
+    // True once it's time to set off for today's shift: SHIFT_MARGIN minutes before the commute by the usual
+    // way (car, bus with its worst wait, or on foot) would start it, counting the trip by way of `via` if given.
     _must_leave_for_work(agent, via = null) {
       const start = this._shift_start_tick(agent);
       if (start === null) return false;
-      let route = this.walk_minutes(agent, agent.job.place_id);
       const place_id = this._resolve_place(agent, via);
+      let route;
       if (place_id && agent.inside !== place_id) {
-        route = this.town.walk_minutes([agent.x, agent.y], place_id)
-          + this.town.walk_minutes(this.town.places.get(place_id).entry, agent.job.place_id);
+        const mode = this.usual_mode(agent);
+        route = (this.travel_minutes(agent, place_id, mode, true)
+          + G.travel.leg_minutes(this, place_id, agent.job.place_id, mode));
+      } else {
+        route = this.commute_minutes(agent);
       }
       return this.clock.tick >= start - route - SHIFT_MARGIN;
     }
@@ -414,9 +420,11 @@
       const place_id = this._resolve_place(agent, where);
       agent.activity = activity;
       agent.activity_place = place_id;
+      agent.trip = agent.riding = null; // a new step is a new trip (a bus ride in progress ends here too)
       if (place_id && agent.inside !== place_id) {
         const place = this.town.places.get(place_id);
         const start = [agent.x, agent.y];
+        if (agent.vehicle === "bus" && this._take_bus(agent, place_id)) return;
         if (G.travel.ROAD_MODES.includes(agent.vehicle)) agent.path = this.town.drive_path(start, place_id);
         else agent.path = this.town.path(start, place.entry);
         agent.inside = null;
@@ -429,22 +437,97 @@
       this._begin_activity(agent);
     }
 
+    // Set off by bus: the trip `travel.bus_trip` finds leaving now, or false (walk) when no bus saves time.
+    //
+    // The rider walks to the board stop (`to_stop`), waits there (`waiting`) until a bus of the line stands at it,
+    // boards and pays (`riding`, `agent.riding` = the bus id, riding on the bus's tile), gets off on the first tick
+    // that bus stands at the alight stop and walks in (`from_stop`). So they walk in at departure + the trip's
+    // minutes, exactly as transit.best_trip counts them.
+    _take_bus(agent, place_id) {
+      const found = G.travel.bus_trip(this, agent, place_id);
+      if (found === null) return false;
+      const [, line, board, alight] = found;
+      agent.inside = null;
+      agent.state = "travelling";
+      agent.trip = { mode: "bus", line, board, alight, phase: "to_stop", since: this.clock.tick };
+      agent.path = this.town.path([agent.x, agent.y], G.transit.STOP_XY[board]);
+      if (!agent.path.length) { // already at the stop: a bus may be standing there now
+        this._bus_phase(agent, "waiting");
+        this._bus_step(agent, agent.trip);
+      }
+      return true;
+    }
+
+    _bus_phase(agent, phase) {
+      agent.trip.phase = phase;
+      agent.trip.since = this.clock.tick;
+    }
+
+    // One minute at the stop or on board (buses are a pure function of the tick, so they have moved already).
+    _bus_step(agent, trip) {
+      const tick = this.clock.tick;
+      if (trip.phase === "waiting") {
+        const bus = G.transit.bus_at_stop(trip.line, trip.board, tick);
+        if (bus) {
+          const fare = G.transit.fare(agent.age); // paid once, on boarding
+          if (fare) this._payer_for(agent, fare).money -= fare;
+          agent.riding = bus;
+          this._bus_phase(agent, "riding");
+        } else if (tick - trip.since >= BUS_GIVE_UP) {
+          agent.trip = null; // no bus came: walk the rest of the way
+          this._walk_on(agent);
+        }
+        return;
+      }
+      [agent.x, agent.y] = G.transit.bus_xy(agent.riding, tick);
+      if (G.transit.bus_at_stop(trip.line, trip.alight, tick) === agent.riding) {
+        agent.riding = null;
+        this._bus_phase(agent, "from_stop");
+        this._walk_on(agent);
+      }
+    }
+
+    // From a bus stop, walk to the step's place (starting next minute).
+    _walk_on(agent) {
+      agent.path = this.town.path([agent.x, agent.y], this.town.places.get(agent.activity_place).entry);
+      if (!agent.path.length) {
+        agent.trip = null;
+        this._begin_activity(agent);
+      }
+    }
+
     _travel(agent) {
+      const trip = agent.trip;
+      if (trip && (trip.phase === "waiting" || trip.phase === "riding")) {
+        this._bus_step(agent, trip);
+        return;
+      }
       let light = null;
       for (let i = 0; i < agent.speed; i++) {
         if (!agent.path.length) break;
         const nxt = agent.path[0];
-        if (agent.vehicle === "car" && this.town.junctions.has(G.town.xy(nxt[0], nxt[1]))) {
+        if (STOP_AT_LIGHTS.includes(agent.vehicle) && this.town.junctions.has(G.town.xy(nxt[0], nxt[1]))) {
           light = light || this.lights();
           const axis = nxt[0] === agent.x ? "ns" : "ew";
           if (light[axis] === "red") break; // wait at the junction
         }
         [agent.x, agent.y] = agent.path.shift();
       }
-      if (!agent.path.length) this._begin_activity(agent);
+      if (agent.path.length) return;
+      if (trip && trip.phase === "to_stop") { // at the stop: a bus may be standing there now
+        this._bus_phase(agent, "waiting");
+        this._bus_step(agent, trip);
+        return;
+      }
+      agent.trip = null;
+      this._begin_activity(agent);
     }
 
     _begin_activity(agent) {
+      if (ONE_WAY.includes(agent.vehicle)) { // the taxi or ambulance has gone: the next trip is on foot unless chosen
+        agent.vehicle = "walk";
+        agent.speed = G.travel.SPEEDS.walk;
+      }
       const act = ACTIVITIES[agent.activity];
       const place_id = agent.activity_place;
       const paid = agent.paid ?? null;
@@ -474,8 +557,12 @@
         const start = agent.job ? tick - this.clock.minute_of_day + agent.job.start_hour * 60 : tick;
         agent.work_started = Math.max(tick, Math.min(start, agent.busy_until - 30));
       } else if (agent.activity === "sleep") {
-        // Up with time for breakfast before the shift: 7:00 starters at about 5:30.
-        let wake = agent.job ? Math.min(7 * 60, agent.job.start_hour * 60 - 90) : 7 * 60;
+        // Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
+        // commute from home (the usual way, the worst bus wait counted) for the long ones.
+        let wake = 7 * 60;
+        if (agent.job) {
+          wake = Math.min(wake, agent.job.start_hour * 60 - Math.max(90, (this.commute_minutes(agent) || 0) + 60));
+        }
         wake += this.rng.randrange(0, 25);
         const m = this.clock.minute_of_day;
         let minutes = pyMod(wake - m, G.clock.MINUTES_PER_DAY);
@@ -492,7 +579,7 @@
       const start = this._shift_start_tick(agent);
       if (agent.activity !== "work" && agent.activity !== "hospital" && start !== null
         && !agent.plan.some(s => s[0] === "work")) {
-        const leave = start - this.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN;
+        const leave = start - this.commute_minutes(agent) - SHIFT_MARGIN; // as _must_leave_for_work counts it
         agent.busy_until = Math.max(tick + 1, Math.min(agent.busy_until, leave));
       }
       agent.activity_minutes = Math.max(1, agent.busy_until - tick);
@@ -537,8 +624,14 @@
       agent.activity = !agent.plan.length ? "idle" : agent.activity;
     }
 
+    // The park of the character's walk: the activity's own, else Riverside Park.
+    _park_of(agent) {
+      const place = this.town.places.get(agent.activity_place || "");
+      return place !== undefined && place.kind === "park" ? place : this.town.places.get("park");
+    }
+
     _wander_park(agent) {
-      const park = this.town.places.get("park");
+      const park = this._park_of(agent);
       const x = agent.x + this.rng.choice([-1, 0, 1]), y = agent.y + this.rng.choice([-1, 0, 1]);
       if (park.x <= x && x < park.x + park.w && park.y <= y && y < park.y + park.h && this.town.walkable(x, y)) {
         agent.x = x;
@@ -564,8 +657,7 @@
         this.event(`${agent.name} leaves City Hospital feeling better (paid $${fmt(HOSPITAL_FEE)}${by}).`,
           agent, null, { tag: "discharged" });
       } else if (agent.activity === "walk_park") {
-        const park = this.town.places.get("park");
-        [agent.x, agent.y] = park.entry;
+        [agent.x, agent.y] = this._park_of(agent).entry;
       }
       agent.state = "idle";
       agent.activity = !agent.plan.length ? "idle" : agent.activity;
@@ -655,9 +747,11 @@
         let minutes = null;
         const first = opt.steps.length ? opt.steps[0][1] : null;
         const place_id = this._resolve_place(agent, first);
-        if (place_id && agent.inside !== place_id) {
-          const mode = hasOwn(G.travel.SPEEDS, opt.vehicle) ? opt.vehicle : "walk";
-          minutes = this.travel_minutes(agent, place_id, mode);
+        const mode = hasOwn(G.travel.SPEEDS, opt.vehicle) ? opt.vehicle : "walk";
+        if (place_id && agent.inside !== place_id) minutes = this.travel_minutes(agent, place_id, mode);
+        if (place_id && agent.job && place_id !== agent.job.place_id && opt.steps.some(s => s[0] === "work")) {
+          // A stop on the way to work (a coffee first): the minutes count the leg on to work too.
+          minutes = (minutes || 0) + G.travel.leg_minutes(this, place_id, agent.job.place_id, mode);
         }
         options.push(opt.public(i, minutes));
       });
@@ -949,16 +1043,17 @@
           { tag: "saving" });
       }
       if (hasOwn(extra, "ask_shop")) {
-        const other = this.agents.get(extra.ask_shop);
-        const market = this.town.places.get("market");
-        if (other && other.alive && this._interruptible(other)
-          && !this._must_leave_for_work(other, "market")
-          && this._fits_before_closing(market, ACTIVITIES.buy_groceries.minutes, this.walk_minutes(other, "market"))) {
+        const other = this.agents.get(extra.ask_shop) ?? null;
+        // The market nearest the shopper's home that is open when they get there; it must stay open for the shop.
+        const market = other && other.alive ? this.nearest(other, ["market"], this.home_of(other)) : null;
+        if (market && this._interruptible(other)
+          && !this._must_leave_for_work(other, market.id)
+          && this._fits_before_closing(market, ACTIVITIES.buy_groceries.minutes, this.walk_minutes(other, market.id))) {
           const payer = other.money >= GROCERY_COST ? other : agent; // the asker covers it if the shopper can't
           payer.money -= GROCERY_COST;
           other.plan = [["relax_home", "home"]];
-          this._start_step(other, "buy_groceries", "market"); // started now so the paid shop happens
-          this.event(`${other.name} heads to Fresh Market for ${firstName(agent.name)}.`, other, null, { tag: "errand",
+          this._start_step(other, "buy_groceries", market.id); // started now so the paid shop happens
+          this.event(`${other.name} heads to ${market.name} for ${firstName(agent.name)}.`, other, null, { tag: "errand",
             agents: [agent.id] });
         }
       }
@@ -1199,6 +1294,7 @@
   G.sim = {
     ANSWER_SECONDS, LEARN_SECONDS, INVITE_MINUTES, PENSION, BILLS_PER_ADULT, CAR_BILL, HOSPITAL_FEE, GROCERY_COST,
     SHIFT_MARGIN, LEISURE, HISTORY_SIZE, NEWS_SIZE, HEADLINES_SIZE, LLM_LOG_SIZE, AGENT_LLM_FORKS, income_tax,
-    Activity, ACTIVITIES, DECAY_SCALE, LIGHT_CYCLE, FLIGHT_MINUTES, _r1, SimDice, Simulation,
+    Activity, ACTIVITIES, DECAY_SCALE, LIGHT_CYCLE, STOP_AT_LIGHTS, ONE_WAY, BUS_GIVE_UP, FLIGHT_MINUTES, _r1, SimDice,
+    Simulation,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

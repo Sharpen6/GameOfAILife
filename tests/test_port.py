@@ -6,8 +6,10 @@ port/build.py inlines it with the client into port/dist/millbrook.html. These te
 * node parity: the Rng(7920) vector and every Rng helper; the seed-1 city equals tests/fixtures/city_seed1.json,
   tiles_sha1 included; the recursive key sets of LocalHost's welcome, state, stats, agent and home messages
   equal the Python server's for seed 1, at the start and after a game day; LocalHost answers odd God messages
-  as GameServer does; with the same dice the two engines live the same days, event for event, down to the
-  stats pushes' samples and the final stats message; chronicle.on_affinity's rule case by case;
+  as GameServer does; with the same dice the two engines live the same days (plain, in debt, with friendships
+  and rifts, with the ambulance, with taxis): event for event, fork for fork with each fork's options and scores,
+  everyone's tile and bus each minute, down to the stats pushes' samples and the final stats message;
+  chronicle.on_affinity's rule case by case; the stats cadence with nobody watching;
 * a 3-day JS run of the 60 people through LocalHost raises nothing and every fork has four options;
 * the build reads its stylesheets and scripts from client/index.html (today's, and one in the PLAN 3.12 order),
   and the page it writes has no http(s):// URL and no href="character.html;
@@ -393,8 +395,10 @@ class DiceSim(Simulation):
 
 
 def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
-    """parity.cjs `trace` in Python: every event and decided fork, every agent at each whole hour, the samples a
-    stats push would carry at each midnight, and the full stats message and the richest person at the end."""
+    """parity.cjs `trace` in Python: every event and decided fork, each fork's options and scores as the Director gets
+    it, a checksum of everyone's tile and who rides which bus each minute, every agent at each whole hour, the
+    samples a stats push would carry at each midnight, and the full stats message and the richest person at the end.
+    """
     from gameofailife.agent import NEEDS
     from gameofailife.clock import MINUTES_PER_DAY
 
@@ -411,7 +415,25 @@ def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
                     rel.affinity = FRIEND_AT - 1.0
                 elif rel.kind.value in RIFT_KINDS:
                     rel.affinity = RIFT_AT + 1.0
-    out = {"events": [], "forks": [], "hours": [], "pushes": []}
+    if scenario == "ill":
+        for i, a in enumerate(sim.agents.values()):
+            if i % 5 == 0:
+                a.health = 20.0
+    if scenario == "taxi":
+        for i, a in enumerate([a for a in sim.agents.values() if a.job and a.job.hourly_wage > 0]):
+            if i % 2 == 0:
+                sim.start_plan(a, [("work", "job")], "taxi")
+    out = {"events": [], "forks": [], "hours": [], "pushes": [], "ticks": [], "asked": []}
+    agents = list(sim.agents.values())
+    director = sim.director
+
+    def asked(agent, fork):
+        options = sim.fork_message(agent, fork)["options"]
+        result = director(agent, fork)
+        out["asked"].append([fork.kind, options, fork.scores])
+        return result
+
+    sim.director = asked
 
     def drain():
         events, forks, _ = sim.drain()
@@ -424,11 +446,14 @@ def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
     while sim.clock.tick < end:
         sim.step()
         drain()
+        where = sum((i + 1) * (a.x * 131 + a.y) for i, a in enumerate(agents))
+        out["ticks"].append(f"{sim.clock.tick} {where} " + ",".join(f"{a.id}@{a.riding}" for a in agents if a.riding))
         if sim.clock.minute_of_day % 60 == 0:
             out["hours"].append([sim.clock.tick, [
                 [a.id, a.x, a.y, a.state, a.activity, a.inside, round(a.money, 2), round(a.savings, 2),
                  round(a.health, 2), [round(a.needs[n], 2) for n in NEEDS], a.household_id,
-                 sim.households[a.household_id].home_id] for a in sim.agents.values()]])
+                 sim.households[a.household_id].home_id, a.vehicle, a.riding, a.trip["phase"] if a.trip else None]
+                for a in sim.agents.values()]])
         if sim.clock.minute_of_day == 0:
             out["pushes"].append(sim.stats_json(full=False)["samples"])
     out["stats"] = sim.stats_json(full=True)
@@ -448,10 +473,14 @@ class LockstepRun(unittest.TestCase):
         js = node("trace", seed, days, dice, "-", scenario)
         py = python_trace(seed, days, dice, scenario)
         ids = lambda rows: [re.sub(r" f\d+ ", " f# ", r, count=1) for r in rows]  # noqa: E731
-        for name, a, b in (("events", py["events"], js["events"]), ("forks", ids(py["forks"]), ids(js["forks"]))):
+        for name, a, b in (("events", py["events"], js["events"]), ("forks", ids(py["forks"]), ids(js["forks"])),
+                           ("minutes", py["ticks"], js["ticks"])):
             at = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             self.assertEqual(a[at:at + 1], b[at:at + 1], f"{name} differ first at #{at} (Python first)")
             self.assertEqual(len(a), len(b), f"{name}: Python has {len(a)}, JS {len(b)}")
+        for i, (got, want) in enumerate(zip(js["asked"], py["asked"])):
+            self.assertEqual(got, want, f"fork #{i} offered to the Director differs (JS first)")
+        self.assertEqual(len(js["asked"]), len(py["asked"]))
         for (tick, rows), (_, js_rows) in zip(py["hours"], js["hours"]):
             js_rows = [json.loads(r) for r in js_rows.split(";")]
             for row, js_row in zip(rows, js_rows):
@@ -475,8 +504,27 @@ class LockstepRun(unittest.TestCase):
     def tags(self, trace):
         return collections.Counter(e.split(" ", 2)[1] for e in trace["events"])
 
+    def riders(self, trace):
+        return collections.Counter(r.split("@")[0] for t in trace["ticks"] for r in t.split(" ", 2)[2].split(",") if r)
+
     def test_three_days(self):
-        self.assertLockstep(1, 3, 5)
+        js, py = self.assertLockstep(1, 3, 5)
+        self.assertGreater(len(self.riders(py)), 3)  # people ride the buses ...
+        self.assertTrue(any(r[12] == "car" for _, rows in py["hours"] for r in rows))  # ... and drive
+
+    def test_four_days_with_the_ambulance(self):
+        # Every fifth character starts at health 20: the ambulance (free, on the roads, no lights) takes them in,
+        # they walk home after, and the hospital's fee is paid.
+        js, py = self.assertLockstep(1, 4, 1, "ill")
+        tags = self.tags(py)
+        self.assertGreaterEqual(tags["hospital"], 12)
+        self.assertGreaterEqual(tags["discharged"], 12)
+
+    def test_a_day_with_taxis(self):
+        # Every other worker takes a taxi to work at the start: on the roads, waiting at red lights, then on foot.
+        js, py = self.assertLockstep(1, 1, 6, "taxi")
+        first_hour = py["hours"][0][1]  # 07:00: every taxi has arrived and gone, so its riders are on foot again
+        self.assertEqual([r[0] for r in first_hour if r[12] == "taxi"], [])
 
     def test_ten_days_in_debt(self):
         # Every adult starts $3,000 in debt: the Sunday charges, arrears, hardship and the housing extras.
@@ -487,7 +535,7 @@ class LockstepRun(unittest.TestCase):
     def test_eight_days_of_friendships_and_rifts(self):
         # Every acquaintance and coworker starts one point short of a friendship, every friend and partner one
         # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts.
-        js, py = self.assertLockstep(1, 8, 3, "bonds")
+        js, py = self.assertLockstep(1, 8, 4, "bonds")
         tags = self.tags(py)
         self.assertGreater(tags["new_friend"], 0)
         self.assertGreater(tags["falling_out"], 0)
@@ -552,7 +600,8 @@ def python_affinity(seed: int, steps: list) -> list:
 
 
 def python_quiet(seed: int, frames: int) -> dict:
-    """parity.cjs `quiet` in Python, up to the God view: GameServer's frames on a hand-driven monotonic clock."""
+    """parity.cjs `quiet` in Python, up to the God view: GameServer's frames on a hand-driven monotonic clock, in a
+    city rolling the JS port's dice (a major event brings a push forward, so the events must be the same)."""
     from unittest import mock
 
     from gameofailife import server as py_server
@@ -560,7 +609,7 @@ def python_quiet(seed: int, frames: int) -> dict:
 
     clock = [1000.0]
     with mock.patch.object(py_server, "time", mock.Mock(monotonic=lambda: clock[0])):
-        sim = Simulation(seed=seed)
+        sim = DiceSim(seed, seed)
         server = GameServer(sim, speed=16)
         for _ in range(frames):  # GameServer._run's loop, without the sleep
             clock[0] += py_server.FRAME_SECONDS
@@ -571,7 +620,8 @@ def python_quiet(seed: int, frames: int) -> dict:
                 sim.step()
                 stepped = True
             server._flush(stepped)
-    return {"tick": sim.clock.tick, "samples": len(sim.stats.samples), "pushed": sim.stats._pushed}
+    return {"tick": sim.clock.tick, "samples": len(sim.stats.samples), "pushed": sim.stats._pushed,
+            "stats_at": server._stats_at}
 
 
 @needs_node

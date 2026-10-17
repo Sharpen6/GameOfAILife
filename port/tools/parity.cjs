@@ -133,7 +133,8 @@ function quiet(seed, frames) {
     host.frame();
   };
   for (let i = 0; i < frames; i++) step();
-  const out = { tick: sim.clock.tick, samples: sim.stats.samples.length, pushed: sim.stats._pushed };
+  const out = { tick: sim.clock.tick, samples: sim.stats.samples.length, pushed: sim.stats._pushed,
+    stats_at: host._stats_at };
   const god = new Client();
   host.connect(god);
   host.receive(god, JSON.stringify({ type: "hello", role: "god" }));
@@ -236,11 +237,14 @@ function run(seed, days, dice) {
 }
 
 // The whole run, step by step, for the Python twin to repeat with the same dice (tests/test_port.py gives the
-// Python Simulation these SimDice): every event and decided fork, every agent at each whole hour, the samples
-// a stats push would carry at each midnight, and the full stats message at the end.
+// Python Simulation these SimDice): every event and decided fork, each fork's options and scores as the Director
+// gets it, a checksum of everyone's tile and who rides which bus each minute, every agent at each whole hour, the
+// samples a stats push would carry at each midnight, and the full stats message at the end.
 // SCENARIO "hard": adults start broke and the over-40s 30 years older, to reach arrears and deaths; "debt":
 // adults start $3,000 in debt, to reach housing trouble, evictions and forced sales; "bonds": acquaintances
-// and coworkers start one point short of friends, friends and partners one point from falling out.
+// and coworkers start one point short of friends, friends and partners one point from falling out; "ill":
+// every fifth character starts at health 20, so the ambulance takes them to hospital; "taxi": every other
+// worker sets off for work by taxi at the start.
 function trace(seed, days, dice, luck = null, scenario = "") {
   const sim = new G.sim.Simulation(seed, null, null, dice);
   if (luck !== null) for (const a of sim.agents.values()) sim.set_luck(a.id, luck); // God's hand on everyone
@@ -260,7 +264,21 @@ function trace(seed, days, dice, luck = null, scenario = "") {
       }
     }
   }
-  const out = { events: [], forks: [], hours: [], pushes: [] };
+  if (scenario === "ill") Array.from(sim.agents.values()).forEach((a, i) => { if (i % 5 === 0) a.health = 20.0; });
+  if (scenario === "taxi") {
+    Array.from(sim.agents.values()).filter(a => a.job && a.job.hourly_wage > 0)
+      .forEach((a, i) => { if (i % 2 === 0) sim.start_plan(a, [["work", "job"]], "taxi"); });
+  }
+  const out = { events: [], forks: [], hours: [], pushes: [], ticks: [], asked: [] };
+  // Every fork the Director gets: its kind, the options as a controller would be offered them (labels, costs,
+  // travel minutes) and the profile's scores.
+  const director = sim.director.bind(sim);
+  sim.director = (agent, fork) => {
+    const options = sim.fork_message(agent, fork).options;
+    const result = director(agent, fork);
+    out.asked.push([fork.kind, options, fork.scores]);
+    return result;
+  };
   const end = sim.clock.tick + days * G.clock.MINUTES_PER_DAY;
   const drain = () => {
     const [events, forks] = sim.drain();
@@ -268,14 +286,20 @@ function trace(seed, days, dice, luck = null, scenario = "") {
     for (const f of forks) out.forks.push(`${f.tick} ${f.id} ${f.agent} ${f.kind} ${f.choice} ${f.decided_by} ${f.happened.join("|")}`);
   };
   drain();
+  const agents = Array.from(sim.agents.values());
   while (sim.clock.tick < end) {
     sim.step();
     drain();
+    // Every minute: a checksum of where everyone is, and who is on which bus.
+    let where = 0;
+    agents.forEach((a, i) => { where += (i + 1) * (a.x * 131 + a.y); });
+    out.ticks.push(`${sim.clock.tick} ${where} ${agents.filter(a => a.riding).map(a => `${a.id}@${a.riding}`).join(",")}`);
     if (sim.clock.minute_of_day % 60 === 0) {
       out.hours.push([sim.clock.tick, Array.from(sim.agents.values(), a => [a.id, a.x, a.y, a.state, a.activity,
         a.inside, G.py.pyRound(a.money, 2), G.py.pyRound(a.savings, 2), G.py.pyRound(a.health, 2),
         G.agent.NEEDS.map(n => G.py.pyRound(a.needs[n], 2)), a.household_id,
-        sim.households.get(a.household_id).home_id]).map(r => JSON.stringify(r)).join(";")]);
+        sim.households.get(a.household_id).home_id, a.vehicle, a.riding, a.trip ? a.trip.phase : null])
+        .map(r => JSON.stringify(r)).join(";")]);
     }
     if (sim.clock.minute_of_day === 0) out.pushes.push(sim.stats_json(false).samples);
   }

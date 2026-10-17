@@ -18,6 +18,7 @@
   const ROAD_MODES = ["car", "taxi", "ambulance"]; // they follow the roads
   const LIGHT_WAIT = 1; // minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
   const BUS_MIN_WALK = 25; // the bus is someone's usual way to work only when the walk is longer than this
+  const TAXI_MIN_WALK = 40; // the work fork offers a taxi to an adult without a car only when the walk is longer than this
 
   // The bus trip the character would make to a place leaving now: [minutes door to door, line, board stop,
   // alight stop], or null when they are inside it or no bus saves transit.MIN_SAVING minutes over walking.
@@ -35,16 +36,31 @@
   // Any other mode walks. UNREACHABLE when the place cannot be reached on foot.
   function travel_minutes(sim, agent, place_id, mode, worst = false) {
     if (agent.inside === place_id) return 0;
-    const at = [agent.x, agent.y];
-    const walk = sim.town.walk_minutes(at, place_id);
+    return _minutes(sim, [agent.x, agent.y], place_id, mode, worst);
+  }
+
+  // Minutes by `mode` from `start` (a place id, whose entry the leg starts at, or an [x, y] tile) to a place,
+  // as travel_minutes counts them: 0 when start is that place. It is the later leg of a trip with a stop on the
+  // way, such as a coffee before work, so a bus leg counts the worst wait by default: when it starts depends on
+  // how long the stop takes.
+  function leg_minutes(sim, start, place_id, mode, worst = true) {
+    if (typeof start === "string") {
+      if (start === place_id) return 0;
+      start = sim.town.places.get(start).entry;
+    }
+    return _minutes(sim, [start[0], start[1]], place_id, mode, worst);
+  }
+
+  function _minutes(sim, xy, place_id, mode, worst) {
+    const walk = sim.town.walk_minutes(xy, place_id);
     if (walk >= UNREACHABLE) return UNREACHABLE;
     if (ROAD_MODES.includes(mode)) {
-      const [tiles, junctions] = sim.town.drive_length(at, place_id);
+      const [tiles, junctions] = sim.town.drive_length(xy, place_id);
       if (tiles >= UNREACHABLE) return UNREACHABLE;
       return Math.ceil(tiles / SPEEDS[mode]) + (mode !== "ambulance" ? junctions * LIGHT_WAIT : 0);
     }
     if (mode === "bus") {
-      const trip = bus_trip(sim, agent, place_id, worst);
+      const trip = G.transit.best_trip(sim.town, xy, place_id, sim.clock.tick, worst);
       return trip ? trip[0] : walk;
     }
     return Math.ceil(walk / getd(SPEEDS, mode, 1));
@@ -139,7 +155,7 @@
   }
 
   G.travel = {
-    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, bus_trip, travel_minutes,
-    usual_mode, commute_minutes, weekly_commute_cost, _spot, _walk, nearest,
+    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, bus_trip,
+    travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, _spot, _walk, nearest,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));
