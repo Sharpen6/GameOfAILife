@@ -13,11 +13,13 @@ import struct
 import unittest
 
 from gameofailife import forks, ws
+from gameofailife.cast import CAST_SIZE
 from gameofailife.server import GameServer
 from gameofailife.sim import Simulation
 
 TIMEOUT = 3.0
-SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_log", "scores", "valence"}
+SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_log", "scores", "valence",
+               "due", "pending_emergency", "roll", "base_p", "hit"}
 
 
 def find_secret_keys(obj, path="") -> list[str]:
@@ -157,7 +159,7 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         agent = self.sim.agents[agent_id]
         agent.needs["hunger"] = 20
         fork = forks.hunger_fork(self.sim, agent)
-        scores = sorted(forks.default_scores(agent, fork), reverse=True)
+        scores = sorted(forks.default_scores(agent, fork, self.sim), reverse=True)
         self.assertLess(scores[0] - scores[1], forks.OBVIOUS_MARGIN, "precondition: the fork must not be obvious")
         self.sim.director(agent, fork)
         self.assertEqual(fork.status, "asked")
@@ -202,10 +204,10 @@ class TestGod(ServerCase):
         _, welcome = await self.god()
         self.assertEqual(welcome["role"], "god")
         tiles = welcome["town"]["tiles"]
-        self.assertEqual(len(tiles), 25)
-        self.assertTrue(all(len(row) == 40 for row in tiles))
-        self.assertEqual((welcome["town"]["w"], welcome["town"]["h"]), (40, 25))
-        self.assertEqual(len(welcome["state"]["agents"]), 20)
+        self.assertEqual(len(tiles), 50)
+        self.assertTrue(all(len(row) == 80 for row in tiles))
+        self.assertEqual((welcome["town"]["w"], welcome["town"]["h"]), (80, 50))
+        self.assertEqual(len(welcome["state"]["agents"]), CAST_SIZE)
         self.assertEqual(welcome["speed"], 0)
 
     async def test_speed_pause_resume(self):
@@ -227,7 +229,7 @@ class TestGod(ServerCase):
         first = await god.expect("state")
         second = await god.expect("state")
         self.assertEqual(first["speed"], 16)
-        self.assertEqual(len(first["state"]["agents"]), 20)
+        self.assertEqual(len(first["state"]["agents"]), CAST_SIZE)
         self.assertGreater(second["state"]["tick"], first["state"]["tick"] - 1)
         self.assertIn("events", first)
         self.assertIn("forks", first)
@@ -363,7 +365,7 @@ class TestController(ServerCase):
     async def test_queries(self):
         c, _ = await self.controller("bot", ["tom"])
         r = await c.request({"type": "query", "agent_id": "tom", "what": "possessions"}, "answer")
-        self.assertEqual(r["data"]["home"]["place"], "home_levi")
+        self.assertEqual(r["data"]["home"]["place"], self.sim.home_of(self.sim.agents["tom"]))
         self.assertIn("money", r["data"])
         r = await c.request({"type": "query", "agent_id": "tom", "what": "attributes"}, "answer")
         self.assertEqual(r["data"]["age"], 29)
@@ -420,7 +422,7 @@ class TestController(ServerCase):
 
     async def test_claim_all(self):
         _, welcome = await self.controller("all", "all")
-        self.assertEqual(len(welcome["characters"]), 20)
+        self.assertEqual(len(welcome["characters"]), CAST_SIZE)
         self.assertEqual(welcome["available"], [])
 
 

@@ -7,15 +7,16 @@ import unittest
 from collections import Counter
 from unittest import mock
 
-from gameofailife import forks, sim as sim_module
+from gameofailife import forks, housing, sim as sim_module
 from gameofailife.agent import START_LUCK
+from gameofailife.cast import CAST_SIZE, NAMED_HOMES, build_cast
 from gameofailife.clock import MINUTES_PER_DAY
 from gameofailife.forks import Fork, Option, Outcome, default_scores, luck_odds, payday_fork, work_fork
 from gameofailife.sim import Simulation
-from gameofailife.town import H, W, build_cast, build_map
+from gameofailife.town import H, W, build_map
 
 SEED = 1
-PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes"}
+PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes", "household"}
 
 
 class TownMapTest(unittest.TestCase):
@@ -23,12 +24,12 @@ class TownMapTest(unittest.TestCase):
     def setUpClass(cls):
         cls.town = build_map(SEED)
 
-    def test_map_is_40_by_25(self):
-        self.assertEqual((W, H), (40, 25))
-        self.assertEqual(len(self.town.tiles), 25)
+    def test_map_is_80_by_50(self):
+        self.assertEqual((W, H), (80, 50))
+        self.assertEqual(len(self.town.tiles), 50)
         for row in self.town.tiles:
-            self.assertEqual(len(row), 40)
-        self.assertEqual([len(r) for r in self.town.rows()], [40] * 25)
+            self.assertEqual(len(row), 80)
+        self.assertEqual([len(r) for r in self.town.rows()], [80] * 50)
 
     def test_every_entry_tile_is_walkable(self):
         for place in self.town.places.values():
@@ -48,7 +49,8 @@ class TownMapTest(unittest.TestCase):
                     self.assertEqual(path[-1], place.entry)
 
     def test_path_excludes_start_and_is_contiguous(self):
-        start = self.town.places["home_cohen"].entry
+        home = housing.build_homes(self.town)[NAMED_HOMES["cohen"]]  # the Cohens' house
+        start = self.town.places[home.place].entry
         goal = self.town.places["hospital"].entry
         path = self.town.path(start, goal)
         self.assertNotIn(start, path)
@@ -67,10 +69,12 @@ class TownMapTest(unittest.TestCase):
 class CastTest(unittest.TestCase):
     def setUp(self):
         self.town = build_map(SEED)
-        self.agents, self.households = build_cast(self.town, SEED)
+        self.homes = housing.build_homes(self.town)
+        self.agents, self.households = build_cast(self.town, self.homes, SEED)
 
-    def test_twenty_characters_with_luck_50(self):
-        self.assertEqual(len(self.agents), 20)
+    def test_sixty_characters_with_luck_50(self):
+        self.assertEqual(len(self.agents), CAST_SIZE)
+        self.assertEqual(CAST_SIZE, 60)
         for agent in self.agents.values():
             self.assertEqual(agent.luck, 50)
             self.assertEqual(agent.luck, START_LUCK)
@@ -81,7 +85,8 @@ class CastTest(unittest.TestCase):
         for hh in self.households.values():
             with self.subTest(household=hh.id):
                 self.assertTrue(hh.member_ids)
-                self.assertIn(hh.home_id, self.town.places)
+                self.assertIn(hh.home_id, self.homes)  # a home id: the house, or a flat in a block
+                self.assertIn(self.homes[hh.home_id].place, self.town.places)
                 for m in hh.member_ids:
                     self.assertEqual(self.agents[m].household_id, hh.id)
             seen.extend(hh.member_ids)
@@ -135,7 +140,7 @@ class DefaultScoresTest(unittest.TestCase):
             Option("too dear", [("relax_home", "home")], cost=500, **same),
             Option("also too dear", [("relax_home", "home")], cost=21, **same),
         ], sim.clock.tick)
-        scores = default_scores(agent, fork)
+        scores = default_scores(agent, fork, sim)
         self.assertEqual(len(scores), 4)
         self.assertGreater(scores[0], scores[2])
         self.assertGreater(scores[1], scores[2])
@@ -277,8 +282,10 @@ class PaydayTest(unittest.TestCase):
 class WorkForkSharedOutcomeTest(unittest.TestCase):
     def test_late_outcome_under_several_work_options(self):
         sim = Simulation(seed=SEED)
-        sim.clock.tick = 8 * 60 + 30  # Monday 08:30, Dana starts at 09:00
-        fork = work_fork(sim, sim.agents["dana"])
+        dana = sim.agents["dana"]
+        sim.clock.tick = dana.job.start_hour * 60 - 30  # Monday, half an hour before Dana's shift
+        self.assertLessEqual(30, max(forks.WORK_LEAD, sim.walk_minutes(dana, dana.job.place_id) + 15))
+        fork = work_fork(sim, dana)
         self.assertIsNotNone(fork)
         having_late = [o for o in fork.options if any(out.id == "late" for out in o.outcomes)]
         self.assertGreaterEqual(len(having_late), 2)

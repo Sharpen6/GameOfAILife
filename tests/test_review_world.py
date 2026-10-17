@@ -24,16 +24,14 @@ def labels(fork: Fork | None) -> list[str]:
     return [o.label for o in fork.options] if fork else []
 
 
-def best_route(town, start, goal) -> tuple[int, int] | None:
-    """Reference answer: (length, off-road tiles) of the best shortest path, by Dijkstra."""
+def best_routes(town, start) -> dict[tuple[int, int], tuple[int, int]]:
+    """Reference answer: (length, off-road tiles) of the best shortest path to every tile, by Dijkstra."""
     best = {start: (0, 0)}
     heap = [(0, 0, start)]
     while heap:
         steps, off, cur = heapq.heappop(heap)
         if best.get(cur) != (steps, off):
             continue
-        if cur == goal:
-            return steps, off
         x, y = cur
         for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
             if town.walkable(*nxt):
@@ -41,7 +39,12 @@ def best_route(town, start, goal) -> tuple[int, int] | None:
                 if key < best.get(nxt, (10 ** 9, 0)):
                     best[nxt] = key
                     heapq.heappush(heap, (*key, nxt))
-    return None
+    return best
+
+
+def best_route(town, start, goal) -> tuple[int, int] | None:
+    """(length, off-road tiles) of the best shortest path from start to goal, or None."""
+    return best_routes(town, start).get(goal)
 
 
 class RoadsTest(unittest.TestCase):
@@ -51,19 +54,26 @@ class RoadsTest(unittest.TestCase):
         town = build_map(SEED)
         entries = [p.entry for p in town.places.values()]
         for a in entries:
+            best = best_routes(town, a)  # one search from each start serves every goal
             for b in entries:
                 if a == b:
                     continue
                 with self.subTest(start=a, goal=b):
                     path = town.path(a, b)
                     got = (len(path), sum(town.tiles[y][x] != ROAD for x, y in path))
-                    self.assertEqual(got, best_route(town, a, b))
+                    self.assertEqual(got, best.get(b))
 
     def test_dana_drives_to_work_along_the_road(self):
-        town = build_map(SEED)
-        path = town.path(town.places["home_cohen"].entry, town.places["office"].entry)
-        self.assertEqual(len(path), 17)  # walking time unchanged
-        self.assertGreaterEqual(sum(town.tiles[y][x] == ROAD for x, y in path), 4)  # was 1 road tile
+        sim = Simulation(seed=SEED)
+        town, dana = sim.town, sim.agents["dana"]
+        start = town.places[sim.home_of(dana)].entry
+        path = town.path(start, town.places[dana.job.place_id].entry)
+        self.assertEqual(len(path), best_route(town, start, town.places[dana.job.place_id].entry)[0])  # still shortest
+        self.assertEqual(len(path), town.walk_minutes(start, dana.job.place_id))
+        length, off_road = best_route(town, start, town.places[dana.job.place_id].entry)
+        road = sum(town.tiles[y][x] == ROAD for x, y in path)
+        self.assertEqual(road, length - off_road)  # as much road as any shortest route has (it was once 1 tile)
+        self.assertGreaterEqual(road, 1)
 
     def test_red_light_stops_a_car(self):
         sim = Simulation(seed=SEED)
@@ -81,7 +91,7 @@ class RoadsTest(unittest.TestCase):
                 stops.append((sim.clock.stamp(), agent.id, sim.lights()))
 
         with mock.patch.object(sim, "_travel", travel):
-            sim.run_days(1)
+            sim.run_days(2)  # a few drivers in a city this size: give them two mornings at the lights
         self.assertTrue(crossings, "no car crossed a road intersection")
         self.assertTrue(stops, "no car ever waited at a red light")
         for _, _, light in stops:
@@ -143,9 +153,10 @@ class OpeningHoursForksTest(unittest.TestCase):
 
     def test_no_groceries_trip_that_arrives_before_opening(self):
         eli = self.hungry("eli")
-        at(self.sim, 2, 6, 40)  # would arrive 06:53; the market opens at 07:00
+        walk, opens = self.sim.walk_minutes(eli, "market"), self.sim.town.places["market"].hours[0] * 60
+        at(self.sim, 2, 0, opens - walk - 7)  # would arrive 7 minutes before the market opens
         self.assertIsNone(groceries_fork(self.sim, eli))
-        at(self.sim, 2, 6, 50)  # arrives 07:03
+        at(self.sim, 2, 0, opens - walk + 3)  # arrives 3 minutes after it opens
         self.assertIn("Buy groceries now", labels(groceries_fork(self.sim, eli)))
 
     def test_no_invite_fork_to_a_place_shut_on_arrival(self):
@@ -191,6 +202,13 @@ class ShutOnArrivalTest(unittest.TestCase):
         self.sim._decide(agent, fork, choice, "model", "")
         return fork
 
+    def trip(self, agent, place_id: str, stay: int) -> int:
+        """Ticks enough for the walk there, `stay` minutes there and the walk home, with some to spare."""
+        return 2 * self.sim.walk_minutes(agent, place_id) + stay + 30
+
+    def closes(self, place_id: str) -> int:
+        return self.sim.town.places[place_id].hours[1] * 60
+
     def run_until(self, agent, done, limit: int = 120) -> None:
         """Tick only this character, so nobody else in the house shops or eats meanwhile."""
         for _ in range(limit):
@@ -205,10 +223,13 @@ class ShutOnArrivalTest(unittest.TestCase):
         eli.needs["hunger"], eli.money = 20, 300.0
         hh = self.sim.household(eli)
         hh.groceries = 0
-        at(self.sim, 2, 20, 20)  # a 13-minute walk and 20 minutes' shopping fit before 21:00
-        fork = self.decide_late(eli, hunger_fork, "Buy groceries, then cook", (2, 20, 50))
+        walk, closes = self.sim.walk_minutes(eli, "market"), self.closes("market")
+        at(self.sim, 2, 0, closes - walk - 20 - 10)  # the walk and 20 minutes' shopping fit before closing
+        fork = self.decide_late(eli, hunger_fork, "Buy groceries, then cook", (2, 0, closes - walk + 3))
         self.assertEqual(eli.money, 265.0)  # paid on deciding
-        self.run_until(eli, lambda a: a.activity_place != "market" or a.state != "travelling")
+        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):  # no next meal spends the refund
+            self.run_until(eli, lambda a: a.activity_place != "market" or a.state != "travelling",
+                           limit=self.trip(eli, "market", 0))
         self.assertEqual(hh.groceries, 0)
         self.assertEqual(eli.money, 300.0)
         self.assertNotIn(("eat_home", "home"), eli.plan)  # no cooking from an empty fridge
@@ -219,10 +240,11 @@ class ShutOnArrivalTest(unittest.TestCase):
         omer = self.sim.agents["omer"]
         omer.needs["hunger"], omer.money = 20, 1300.0
         self.sim.household(omer).groceries = 0
-        at(self.sim, 2, 21, 50)
-        fork = self.decide_late(omer, hunger_fork, "Eat at Corner Cafe", (2, 22, 50))
+        walk, closes = self.sim.walk_minutes(omer, "cafe"), self.closes("cafe")
+        at(self.sim, 2, 0, closes - walk - 40 - 10)  # the walk and the 40-minute meal fit before closing
+        fork = self.decide_late(omer, hunger_fork, "Eat at Corner Cafe", (2, 0, closes - walk + 10))
         self.assertEqual(omer.money, 1286.0)
-        self.run_until(omer, lambda a: a.state != "travelling")
+        self.run_until(omer, lambda a: a.state != "travelling", limit=self.trip(omer, "cafe", 0))
         self.assertEqual(omer.money, 1300.0)
         self.assertNotEqual(omer.activity, "eat_out")
         self.assertFalse([p for p in omer.pending_outcomes if p["fork"] == fork.id])  # no food poisoning either
@@ -232,9 +254,10 @@ class ShutOnArrivalTest(unittest.TestCase):
         dana.money = 900.0
         coffee = Option("Coffee first", [("coffee", "cafe"), ("work", "job")], cost=4)
         fork = Fork(dana.id, "work", "?", [coffee] * 4, self.sim.clock.tick)
-        at(self.sim, 0, 5, 30)  # the cafe opens at 06:00
+        opens = self.sim.town.places["cafe"].hours[0] * 60
+        at(self.sim, 0, 0, opens - self.sim.walk_minutes(dana, "cafe") - 5)  # she'd get there before it opens
         self.sim._decide(dana, fork, 0, "model", "")
-        self.run_until(dana, lambda a: a.activity_place != "cafe")
+        self.run_until(dana, lambda a: a.activity_place != "cafe", limit=self.trip(dana, "cafe", 0))
         self.assertEqual(dana.money, 900.0)
         self.assertEqual(dana.activity_place, "office")
 
@@ -246,7 +269,7 @@ class ShutOnArrivalTest(unittest.TestCase):
         at(self.sim, 2, 12, 0)
         fork = hunger_fork(self.sim, eli)
         self.sim._decide(eli, fork, labels(fork).index("Buy groceries, then cook"), "model", "")
-        self.run_until(eli, lambda a: a.activity == "eat_home" and a.state == "busy")
+        self.run_until(eli, lambda a: a.activity == "eat_home" and a.state == "busy", limit=self.trip(eli, "market", 20))
         self.assertEqual(eli.money, 265.0)
         self.assertEqual(hh.groceries, 9)  # ten bought, one being cooked
 

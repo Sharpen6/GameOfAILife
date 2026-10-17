@@ -40,7 +40,7 @@ def run_headless(sim: Simulation, days: float) -> None:
         sim.step()
         events, forks, _ = sim.drain()
         for ev in events:
-            if ev["kind"] not in ("outcome",):
+            if ev["kind"] != "outcome" or ev["importance"] >= 1:  # everyday outcomes would drown the rest
                 print(f"{ev['time']}  {ev['text']}")
         for f in forks:
             if f["id"] in seen:
@@ -51,11 +51,14 @@ def run_headless(sim: Simulation, days: float) -> None:
     print()
     print(f"Forks: {sum(kinds.values())} ({', '.join(f'{k} {v}' for k, v in kinds.most_common())})")
     print(f"Decided by: {', '.join(f'{k} {v}' for k, v in deciders.most_common())}")
+    print(f"People: {len(sim.living())} of {len(sim.agents)} alive")
     print()
     for a in sim.agents.values():
         status = "alive" if a.alive else "died"
+        home = sim.homes[sim.household(a).home_id].name
         goal = f", saving for {a.goal['name']} ${a.goal['saved']:.0f}/{a.goal['target']}" if a.goal else ""
-        print(f"{a.name:<16} {status:<5} ${a.money:>8.2f}  health {a.health:>3.0f}  mood {a.mood:>3.0f}{goal}")
+        print(f"{a.name:<18} {status:<5} ${a.money:>8.2f}  saved ${a.savings:>8.2f}  health {a.health:>3.0f}  "
+              f"mood {a.mood:>3.0f}  {home}{goal}")
 
 
 if __name__ == "__main__":

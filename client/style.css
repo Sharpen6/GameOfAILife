@@ -45,7 +45,7 @@ body.watching .watchnote { display: block; color: #ffe1b8; }
 main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
 #world { flex: 1 1 auto; min-width: 0; position: relative; }
 #map {
-  width: 100%; max-width: 1280px; aspect-ratio: 640 / 400; display: block;
+  width: 100%; max-width: 1280px; aspect-ratio: 80 / 50; display: block;
   image-rendering: pixelated; image-rendering: crisp-edges;
   border: 3px solid #11151d; border-radius: 4px; background: #4a8a3c; cursor: pointer;
 }

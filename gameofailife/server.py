@@ -21,6 +21,7 @@ import socket
 from collections import deque
 from pathlib import Path
 
+from . import transit
 from .clock import TICKS_PER_REAL_SECOND
 from .sim import Simulation
 from .ws import ConnectionClosed, WebSocket, server_handshake
@@ -29,6 +30,8 @@ CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
+HOUSING_EVERY = 40  # frames carry `lots` and `homes` when they change, and in every 40th frame anyway
+WELCOME_HISTORY, WELCOME_NEWS, WELCOME_HEADLINES, WELCOME_LLM_LOG = 80, 120, 20, 80
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
 AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in the inbox
 UNSENT_BYTES = 16384  # how much the kernel may hold that is not on its way to the client yet
@@ -51,10 +54,13 @@ class GameServer:
         self._server: asyncio.base_events.Server | None = None
         self._loop_task: asyncio.Task | None = None
         self._pending_ticks = 0.0
+        self._frames = 0  # state frames encoded so far
+        self._housing_sent: dict[str, str] = {}  # the encoded `lots` and `homes` the views last got
 
     # --- lifecycle ------------------------------------------------------------
 
     async def start(self, host: str = "127.0.0.1", port: int = 8000) -> int:
+        self.sim.town.warm()  # every place's walk field, before the first tick needs one
         self._server = await asyncio.start_server(self._handle, host, port)
         self._loop_task = asyncio.create_task(self._run())
         return self._server.sockets[0].getsockname()[1]
@@ -95,10 +101,33 @@ class GameServer:
         viewers = [ws for ws in [self.god, *self.observers] if ws]
         if not viewers or not (stepped or events or forks):
             return
-        frame = json.dumps({"type": "state", "speed": self.speed, "state": self.sim.state_json(),
-                            "events": events, "forks": forks})
+        state = self.sim.state_json(housing=False)
+        state.update(self._housing_changes())
+        frame = json.dumps({"type": "state", "speed": self.speed, "state": state, "events": events, "forks": forks})
         for ws in viewers:
             self._push(ws, frame)
+
+    def _housing_changes(self) -> dict:
+        """The frame's `lots` and `homes`: each one when its encoded JSON differs from what was last sent, and
+        both in every HOUSING_EVERY-th frame. Views keep the last copy they got."""
+        self._frames += 1
+        every = self._frames % HOUSING_EVERY == 0
+        out = {}
+        for key, value in self.sim.housing_maps().items():
+            text = json.dumps(value)
+            if every or self._housing_sent.get(key) != text:
+                self._housing_sent[key] = text
+                out[key] = value
+        return out
+
+    def _welcome_god(self) -> dict:
+        """A new God view's (or watcher's) start: the town once, the full state, and the recent past."""
+        sim = self.sim
+        state = sim.state_json(housing=True)
+        return {"type": "welcome", "role": "god", "town": sim.town_json(), "state": state,
+                "history": sim.history[-WELCOME_HISTORY:], "news": sim.news[-WELCOME_NEWS:],
+                "headlines": sim.headlines[-WELCOME_HEADLINES:], "llm_log": sim.llm_log[-WELCOME_LLM_LOG:],
+                "host": {"kind": "server", "controllers": True}, "speed": self.speed}
 
     # --- HTTP -----------------------------------------------------------------
 
@@ -296,7 +325,7 @@ class GameServer:
             self._skipped.pop(ws, None)
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
-                self.sim.release(name)
+                self.sim.controller_left(name, self.sim.release(name))
             if ws is self.god:
                 self.god = None
             self.observers.discard(ws)
@@ -310,15 +339,15 @@ class GameServer:
                 self.observers.add(self.god)
                 self._push(self.god, json.dumps({"type": "demoted", "reason": "another God view took over"}))
             self.god = ws
-            await self._reply(ws, msg, {"type": "welcome", "role": "god", "town": self.sim.town_json(),
-                                        "state": self.sim.state_json(), "history": self.sim.history[-80:],
-                                        "speed": self.speed})
+            await self._reply(ws, msg, self._welcome_god())
             return "god", None
         if role == "controller":
             name = str(msg.get("name") or "controller")[:40]
             base, n = name, 2
             while name in self.controllers:
                 name, n = f"{base}-{n}", n + 1
+            model = msg.get("model")
+            model = str(model)[:60] if model is not None else None  # shown to God only, never to characters
             self.controllers[name] = ws
             try:
                 wanted = msg.get("characters") or []
@@ -328,18 +357,18 @@ class GameServer:
                     raise TypeError('characters must be a list of ids or "all"')
                 wanted = [str(w) for w in wanted]
                 claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
-                await self._reply(ws, msg, {
+                welcome = {
                     "type": "welcome", "role": "controller", "name": name, "characters": claimed,
                     "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
                     "answer_seconds": 5, "time": self.sim.clock.stamp(),
                     "available": [a.id for a in self.sim.living() if not a.controller],
-                })
-                for aid in claimed:
-                    self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
+                }
+                self.sim.controller_joined(name, model, claimed)  # one event for the whole hello
+                await self._reply(ws, msg, welcome)
             except BaseException:
                 # _session does not know this name yet, so a hello that fails undoes itself here.
                 del self.controllers[name]
-                self.sim.release(name)
+                self.sim.controller_left(name, self.sim.release(name))
                 raise
             return "controller", name
         await self._reply(ws, msg, {"type": "error", "error": "role must be god or controller"})
@@ -368,6 +397,9 @@ class GameServer:
         if t == "get_agent":
             data = self.sim.agent_json(str(msg.get("agent_id")))
             return {"type": "agent", "agent": data} if data else {"type": "error", "error": "unknown character"}
+        if t == "get_home":
+            home = self.sim.home_page(str(msg.get("home_id")))
+            return {"type": "home", "home": home} if home else {"type": "error", "error": "unknown home"}
         if t == "set_profile":
             ok = self.sim.set_profile(str(msg.get("agent_id")), msg.get("prompt"), msg.get("traits"))
             return {"type": "agent", "agent": self.sim.agent_json(msg["agent_id"])} if ok else {"type": "error", "error": "unknown character"}
@@ -381,30 +413,34 @@ class GameServer:
             return {"type": "ack", "fork_id": msg.get("fork_id"), **res}
         if t == "claim":
             aid = str(msg.get("agent_id"))
+            mine = aid in sim.agents and sim.agents[aid].controller == name
             ok = sim.claim(aid, name)
+            if ok and not mine:
+                sim.controller_joined(name, None, [aid])
             return {"type": "claimed", "agent_id": aid, "ok": ok,
                     "profile": sim.agents[aid].profile.prompt if ok else None}
         if t == "release":
-            sim.release(name, str(msg.get("agent_id")))
+            sim.controller_left(name, sim.release(name, str(msg.get("agent_id"))), release=True)
             return {"type": "released", "agent_id": msg.get("agent_id")}
         agent = sim.agents.get(str(msg.get("agent_id")))
         if t in ("query", "send_message", "invite") and (not agent or agent.controller != name):
             return {"type": "error", "error": "not your character"}
         if t == "query":
-            hh = sim.household(agent)
             what = msg.get("what", "attributes")
             answers = {
-                "possessions": lambda: agent.possessions(hh, sim.town.places[hh.home_id].name),
+                "possessions": lambda: sim.possessions(agent),
                 "attributes": agent.attributes,
                 "relationships": lambda: {oid: {**r.to_json(), "name": sim.agents[oid].name}
                                           for oid, r in agent.relationships.items()},
                 "memory": lambda: agent.memory[-30:],
                 "inbox": lambda: agent.inbox[-20:],
                 "world": lambda: {"time": sim.clock.stamp(), "season": sim.clock.season, "weather": sim.weather,
-                                  "places": {p.id: {"name": p.name, "kind": p.kind, "open": p.is_open(sim.clock.hour)}
+                                  "places": {p.id: {"name": p.name, "kind": p.kind, "district": p.district,
+                                                    "open": p.is_open(sim.clock.hour)}
                                              for p in sim.town.places.values()},
-                                  "timetable": sim.timetable()},
+                                  "timetable": transit.timetable_json()},
                 "people": lambda: {a.id: a.name for a in sim.living()},
+                "market": lambda: sim.market_json(),
             }
             if what not in answers:
                 return {"type": "error", "error": f"what must be one of {sorted(answers)}"}

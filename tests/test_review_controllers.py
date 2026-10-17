@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
 
 import claude_controller as cc  # noqa: E402
 import simple_controller as sc  # noqa: E402
-from gameofailife.town import CAST  # noqa: E402
+from gameofailife.cast import NAMED  # noqa: E402
 
 ANSWER = '{"choice": 0, "reason": "fine"}'
 
@@ -236,7 +236,7 @@ class TestUsageExamples(unittest.TestCase):
     """Findings 43 and 55: the documented commands must claim real characters."""
 
     def test_documented_character_ids_exist(self):
-        ids = {row[0] for row in CAST}
+        ids = {row[0] for row in NAMED}
         for module in (cc, sc):
             examples = re.findall(r"--characters (\S+)", module.__doc__)
             self.assertTrue(examples, module.__name__)

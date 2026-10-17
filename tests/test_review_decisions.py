@@ -148,7 +148,7 @@ class TestChoiceHappensAtLeaveTime(Case):
     def test_park_walk_at_leave_time_still_gets_to_work(self):
         ari = self.sim.agents["ari"]
         self.at(0, 9)
-        self.sim.clock.tick = self.leave_tick("ari")  # Monday 09:35: the office is 15 minutes away, the park 29
+        self.sim.clock.tick = self.leave_tick("ari")  # Monday, when he must set off for the office
         ari.needs["fun"] = 20
         fork = free_time_fork(self.sim, ari)
         self.assertEqual(fork.options[0].label, "Walk in Riverside Park")
@@ -234,25 +234,27 @@ class TestSavingsWithoutGoal(Case):
 
     def test_money_moves_into_savings(self):
         dana = self.sim.agents["dana"]
+        saved = dana.savings  # what the cast starts her with
         self.at(4, 18)
         fork = payday_fork(self.sim, dana)
         self.assertIsNone(dana.goal)
         self.assertEqual(fork.options[0].label, "Put $100 toward savings")
         self.sim._decide(dana, fork, 0, "model", "")
         self.assertEqual(dana.money, 800)
-        self.assertEqual(dana.savings, 100)
+        self.assertEqual(dana.savings, saved + 100)
         possessions = self.sim.agent_json("dana")["possessions"]
-        self.assertEqual((possessions["money"], possessions["savings"]), (800, 100))
+        self.assertEqual((possessions["money"], possessions["savings"]), (800, saved + 100))
         self.assertTrue(any("puts $100 into savings" in e["text"] for e in self.sim.events))
 
     def test_goal_saving_unchanged(self):
         ari = self.sim.agents["ari"]
+        saved = ari.savings
         self.at(4, 18)
         fork = payday_fork(self.sim, ari)
         self.sim._decide(ari, fork, 0, "model", "")
         self.assertEqual(ari.goal["saved"], 100)
         self.assertEqual(ari.money, 312)
-        self.assertEqual(ari.savings, 0)
+        self.assertEqual(ari.savings, saved)  # the goal pot, not his savings
 
 
 class TestDeadCharactersDoNotAct(Case):
@@ -406,8 +408,14 @@ class TestLeaveTimeCountsTheDetour(Case):
 
     def test_rina_goes_straight_to_the_hospital(self):
         rina = self.sim.agents["rina"]
-        self.at(7, 7, 37)  # Monday; her shift starts at 08:00
         market = self.sim.town.places["market"]
+        town, home, job = self.sim.town, self.sim.home_of(rina), rina.job.place_id
+        direct = town.walk_minutes(market.entry, job)
+        detour = town.walk_minutes(market.entry, home) + town.walk_minutes(town.places[home].entry, job)
+        self.assertGreater(detour, direct + 1)  # going home first would make her late
+        # Monday; a minute before she must set off from the market for her shift.
+        self.at(7, rina.job.start_hour)
+        self.sim.clock.tick -= direct + SHIFT_MARGIN + 1
         rina.x, rina.y = market.entry
         rina.inside = "market"
         rina.plan = [("relax_home", "home")]

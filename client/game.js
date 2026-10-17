@@ -30,9 +30,14 @@ const SEASON_GRASS = {
   winter: ["#b9c9c2", "#a3b5ae", "#d4e0db"],
 };
 const ROOF = { home: "#c4533b", office: "#4b6ea8", school: "#d18f2f", market: "#3f9c6a",
-  cafe: "#9a5aa8", hospital: "#e9e9ef" };
+  cafe: "#9a5aa8", hospital: "#e9e9ef", bank: "#2f6f73", townhall: "#8a6d3b", shop: "#d0663a", works: "#6e6a62" };
 const WALL = { home: "#f2dfbd", office: "#c9d3e3", school: "#f0d9a8", market: "#e3efe0",
-  cafe: "#efe0f0", hospital: "#ffffff" };
+  cafe: "#efe0f0", hospital: "#ffffff", bank: "#dfe9e6", townhall: "#efe4cf", shop: "#f6e3cf", works: "#b9b4aa" };
+// Homes by style: blocks of flats and big houses stand out from the ordinary houses.
+const HOME_ROOF = { apartments: "#7d5a8c", big_house: "#3d6b4f" };
+const HOME_WALL = { apartments: "#e6dccd", big_house: "#f4ead2" };
+const roofOf = p => (p.kind === "home" && HOME_ROOF[p.style]) || ROOF[p.kind] || "#8a8a8a";
+const wallOf = p => (p.kind === "home" && HOME_WALL[p.style]) || WALL[p.kind] || "#dddddd";
 
 function hash(s) {
   let h = 2166136261;
@@ -111,6 +116,9 @@ function buildTerrain() {
           g.fillStyle = "#d9dbe0";
           for (let i = 1; i < T; i += 4) { g.fillRect(px + i, py, 2, 2); g.fillRect(px + i, py + T - 2, 2, 2); }
         }
+      } else if (c === "~") { // the river: not walkable
+        g.fillStyle = "#3d8fd1"; g.fillRect(px, py, T, T);
+        if (r % 3 === 0) { g.fillStyle = "#79b9ea"; g.fillRect(px + (r % 9) + 2, py + ((r >> 3) % 10) + 3, 5, 1); }
       } else if (c === "P" || c === "T") {
         g.fillStyle = grassDark; g.fillRect(px, py, T, T);
         if (r % 7 === 0) { g.fillStyle = ["#f4e04d", "#f08ab4", "#ffffff"][r % 3]; g.fillRect(px + 5, py + 6, 2, 2); g.fillRect(px + 10, py + 10, 2, 2); }
@@ -144,16 +152,13 @@ function buildTerrain() {
     lamps.push([px + 1, py + 2]);
   }
   for (const p of town.places) if (p.kind !== "park") drawBuilding(g, p);
-  // A park sign at the park's entrance tile.
-  const park = town.places.find(p => p.kind === "park");
-  if (park) {
+  // A sign at each park's entrance tile.
+  for (const park of town.places) {
+    if (park.kind !== "park") continue;
     const ex = park.entry[0] * T, ey = park.entry[1] * T;
     g.fillStyle = "#6b4a2b"; g.fillRect(ex + 3, ey + 8, 2, 7); g.fillRect(ex + 11, ey + 8, 2, 7);
     plate(g, park.name, ex + 8, ey + 1, "#ffffff", "#7a5530");
   }
-  // Pond in the park corner, for some life.
-  g.fillStyle = "#3d8fd1"; g.fillRect(33 * T + 2, 18 * T + 4, 2 * T + 8, T + 6);
-  g.fillStyle = "#79b9ea"; g.fillRect(33 * T + 6, 18 * T + 7, 10, 2);
   terrain = off;
   terrainSeason = season;
 }
@@ -162,8 +167,8 @@ function drawBuilding(g, p) {
   const x = p.x * T, y = p.y * T, w = p.w * T, h = p.h * T;
   const roofH = Math.floor(h * 0.55);
   g.fillStyle = "rgba(0,0,0,.28)"; g.fillRect(x + 3, y + 4, w, h); // shadow
-  g.fillStyle = WALL[p.kind]; g.fillRect(x, y + roofH, w, h - roofH); // front wall
-  g.fillStyle = ROOF[p.kind]; g.fillRect(x - 1, y, w + 2, roofH); // roof
+  g.fillStyle = wallOf(p); g.fillRect(x, y + roofH, w, h - roofH); // front wall
+  g.fillStyle = roofOf(p); g.fillRect(x - 1, y, w + 2, roofH); // roof
   g.fillStyle = "rgba(0,0,0,.18)"; g.fillRect(x - 1, y + roofH - 3, w + 2, 3); // eave
   g.fillStyle = "rgba(255,255,255,.18)";
   for (let i = 4; i < roofH - 4; i += 4) g.fillRect(x + 1, y + i, w - 2, 1); // tiles
@@ -180,7 +185,7 @@ function drawBuilding(g, p) {
   g.fillStyle = "#e3b54a"; g.fillRect(dx + 6, dy + 6, 1, 2);
   // Chimney on houses, roof ridge highlight on everything.
   g.fillStyle = "rgba(255,255,255,.25)"; g.fillRect(x - 1, y, w + 2, 2);
-  if (p.kind === "home") {
+  if (p.kind === "home" && p.style !== "apartments") {
     g.fillStyle = "#7a3a2a"; g.fillRect(x + w - 11, y - 4, 5, 8);
     g.fillStyle = "#5a2a1e"; g.fillRect(x + w - 12, y - 5, 7, 2);
   }
@@ -207,7 +212,12 @@ function nightAlpha(minute) {
   return 0;
 }
 
-const drops = Array.from({ length: 140 }, () => ({ x: Math.random() * 640, y: Math.random() * 400, s: 2 + Math.random() * 3 }));
+let drops = [];
+// Rain (or snow) drops for the whole canvas: about one for every 1,800 square pixels.
+function makeDrops() {
+  const n = Math.round(canvas.width * canvas.height / 1800);
+  drops = Array.from({ length: n }, () => ({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, s: 2 + Math.random() * 3 }));
+}
 
 function draw(now) {
   const dt = Math.min(0.1, (now - lastFrame) / 1000);
@@ -219,10 +229,10 @@ function draw(now) {
 
   const night = nightAlpha(state.minute);
   drawLights();
-  drawBus();
+  drawBuses();
 
   // Agents, sorted by y so lower ones overlap higher ones like in Pokémon.
-  const ppl = state.agents.filter(a => a.alive && !a.inside).sort((a, b) => a.y - b.y);
+  const ppl = state.agents.filter(a => a.alive && !a.inside && !a.riding).sort((a, b) => a.y - b.y);
   const step = Math.max(1, (state.speed || speed) * 2.4 * 3) * dt;
   for (const a of state.agents) {
     const s = shown[a.id] || (shown[a.id] = { x: a.x, y: a.y });
@@ -290,7 +300,8 @@ function drawSelectedInside(now) {
 
 function drawLights() {
   const col = { green: "#3ee06a", yellow: "#ffd23f", red: "#ff4040" };
-  for (const y of town.road_rows) for (const x of town.road_cols) {
+  const crossings = town.junctions || town.road_rows.flatMap(y => town.road_cols.map(x => [x, y]));
+  for (const [x, y] of crossings) {
     const px = x * T, py = y * T;
     ctx.fillStyle = "#222"; ctx.fillRect(px - 2, py - 2, 4, 4); ctx.fillRect(px + T - 2, py + T - 2, 4, 4);
     ctx.fillStyle = col[state.lights.ns]; ctx.fillRect(px - 1, py - 1, 2, 2);
@@ -298,13 +309,14 @@ function drawLights() {
   }
 }
 
-function drawBus() {
-  const b = state.bus;
-  const px = b.x * T, py = b.y * T;
-  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.fillRect(px + 1, py + 4, 15, 11);
-  ctx.fillStyle = "#f2b705"; ctx.fillRect(px, py + 2, 15, 11);
-  ctx.fillStyle = "#3a5a7a"; for (let i = 1; i < 14; i += 4) ctx.fillRect(px + i, py + 4, 3, 3);
-  ctx.fillStyle = "#222"; ctx.fillRect(px + 2, py + 12, 3, 2); ctx.fillRect(px + 10, py + 12, 3, 2);
+function drawBuses() {
+  for (const b of state.buses || []) {
+    const px = b.x * T, py = b.y * T;
+    ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.fillRect(px + 1, py + 4, 15, 11);
+    ctx.fillStyle = b.line === "2" ? "#e2553f" : "#f2b705"; ctx.fillRect(px, py + 2, 15, 11);
+    ctx.fillStyle = "#3a5a7a"; for (let i = 1; i < 14; i += 4) ctx.fillRect(px + i, py + 4, 3, 3);
+    ctx.fillStyle = "#222"; ctx.fillRect(px + 2, py + 12, 3, 2); ctx.fillRect(px + 10, py + 12, 3, 2);
+  }
 }
 
 function drawAgent(a, s, now) {
@@ -369,8 +381,8 @@ function drawRain(dt, snow) {
   for (const d of drops) {
     d.y += (snow ? 30 : 260) * dt * (d.s / 3);
     d.x += (snow ? Math.sin(d.y / 20) * 10 : -40) * dt;
-    if (d.y > 400) { d.y = -5; d.x = Math.random() * 680; }
-    if (d.x < -10) d.x = 650;
+    if (d.y > canvas.height) { d.y = -5; d.x = Math.random() * (canvas.width + 40); }
+    if (d.x < -10) d.x = canvas.width + 10;
     if (snow) ctx.fillRect(d.x, d.y, 2, 2); else ctx.fillRect(d.x, d.y, 1, d.s + 2);
   }
 }
@@ -553,7 +565,7 @@ function renderDetail(box) {
     <h3>Recent decisions</h3><ul class="feed">${forksHtml}</ul>
     <h3>Owns</h3>
     <ul class="list">
-      <li>${esc(a.possessions.home.name)} <span class="small">rented, $${a.possessions.home.weekly_rent}/week</span></li>
+      <li>${esc(a.possessions.home.name)} <span class="small">${homeTerms(a.possessions.home)}</span></li>
       <li>${a.possessions.car ? "A car" : "No car"}</li>
       <li>Phone <span class="small">${a.possessions.phone.condition}</span></li>
       <li>${a.possessions.groceries_at_home} meals in the fridge</li>
@@ -603,6 +615,12 @@ function liveHtml(a) {
     ${bars}`;
 }
 
+// "rented, $220/week" or "owned, $76/week in property tax".
+function homeTerms(h) {
+  if (h.tenure === "owned") return `owned, $${h.weekly_cost}/week in property tax`;
+  return `rented from ${esc(h.landlord || "the landlord")}, $${h.weekly_cost}/week`;
+}
+
 function placeName(id) { const p = town.places.find(p => p.id === id); return p ? p.name : id; }
 
 function forkHtml(f) {
@@ -639,6 +657,16 @@ function renderFeeds(newEvents, newForks, reset = false) {
 
 function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
 
+// One canvas pixel block per tile for the whole town (80 x 50 tiles is 1280 x 800); CSS scales it down.
+function fitCanvas() {
+  if (canvas.width !== town.w * T || canvas.height !== town.h * T) {
+    canvas.width = town.w * T; canvas.height = town.h * T; // this resets the context state too
+    ctx.imageSmoothingEnabled = false;
+  }
+  canvas.style.aspectRatio = `${town.w} / ${town.h}`;
+  if (drops.length === 0 || drops.length !== Math.round(canvas.width * canvas.height / 1800)) makeDrops();
+}
+
 let lastDetailAsk = 0, lastRoster = 0;
 function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`);
@@ -647,13 +675,17 @@ function connect() {
     const msg = JSON.parse(ev.data);
     if (msg.type === "welcome") {
       town = msg.town; state = msg.state; speed = msg.speed; terrain = null;
+      fitCanvas();
       role = msg.role;
       document.getElementById("role").textContent = "You are God of this city";
       lockControls();
       // A reconnect starts the feeds again from the welcome, as a fresh page would.
       renderHeader(); renderPeople(); renderFeeds(msg.history || [], [], true);
     } else if (msg.type === "state") {
+      const last = state;
       state = msg.state; state.speed = msg.speed; speed = msg.speed;
+      if (last && !("lots" in state)) state.lots = last.lots; // frames carry them only when they change
+      if (last && !("homes" in state)) state.homes = last.homes;
       renderHeader();
       renderFeeds(msg.events, msg.forks);
       const now = performance.now();
