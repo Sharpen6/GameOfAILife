@@ -163,7 +163,7 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
             tags = {"family": 0.6, "adventure": 0.4, "thrift": -0.6 if rises(h) else -0.2}
         return Option(label(h, cheaper), [("move_house", h.place)], cost=max(0, housing.net_cost(sim, hh, h.id)),
                       base=(0.30 if cheaper else 0.35) + bonus(h), tags=tags, gains={"fun": 15 if cheaper else 20},
-                      outcomes=_move_outcomes(sim, hh, agent, h.id, cheaper, rises(h)),
+                      outcomes=_move_outcomes(sim, hh, agent, h.id, cheaper, rises(h) and not cheaper),
                       extra={"move": h.id, "how": how}, household_pays=True, charge=False)
 
     best = move(a, False)

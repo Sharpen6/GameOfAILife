@@ -183,7 +183,8 @@ class Lot:
     condition: float  # 0-100
     works_until: int = 0  # builders on site until this tick
     moving_until: int = 0  # a moving van at the curb until this tick
-    reported: int = 0  # worst stage already announced; starts at the current stage
+    reported: int = 0  # worst stage already announced; starts at the current stage, back to it at stage 0-1
+    worst: int = 0  # worst stage since the lot was last kept (stage 0), for "looks as good as new"
 
 
 def build_homes(town: TownMap) -> dict[str, Home]:
@@ -209,7 +210,7 @@ def build_lots(town: TownMap, homes: dict[str, Home]) -> dict[str, Lot]:
     for place in town.places.values():
         if place.id in used:
             c = float(start[place.id])
-            lots[place.id] = Lot(place.id, c, reported=stage_of(c))
+            lots[place.id] = Lot(place.id, c, reported=stage_of(c), worst=stage_of(c))
     return lots
 
 
@@ -909,17 +910,16 @@ def weekly_charges(sim) -> None:
                 hh.arrears += 1
                 went_up = True
         hh.last_funds = f
-        # 6. The news.
-        if f < 0:
+        # 6. The news: in_the_red at arrears 1, in_the_red_again each time arrears climbs past it. A red week that
+        # holds (grace, or paying it down) at 0 or 2+ is quiet.
+        if f < 0 and (hh.arrears == 1 or (hh.arrears >= 2 and went_up)):
             worst = min(payers, key=lambda a: a.money)
             ids = [a.id for a in payers]
             red = f"{who} {'is' if one else 'are'} ${-f:,.0f} in the red"
-            if hh.arrears >= 2 and went_up:
+            if hh.arrears >= 2:
                 warning = "The bank warns them: pay up or sell." if owned else f"{LANDLORD} sends a final warning."
                 nth = ORDINALS[hh.arrears - 1] if hh.arrears <= len(ORDINALS) else f"{hh.arrears}th"
                 _event(sim, f"{red} for a {nth} week. {warning}", "in_the_red_again", home.place, worst, ids)
-            elif hh.arrears >= 2:
-                _event(sim, f"{red}, but paying it down.", "in_the_red", home.place, worst, ids)
             else:
                 _event(sim, f"{red} after the week's bills.", "in_the_red", home.place, worst, ids)
         # 7. Back on their feet.
@@ -953,16 +953,21 @@ def weekly_charges(sim) -> None:
 
 def _stage_news(sim, lot: Lot) -> None:
     """Announce a newly reached shabby, neglected or derelict stage, or a return to kept, for an owner-occupied
-    home. `lot.reported` is the worst stage seen since the lot was last kept, so a home bouncing around a
-    threshold is announced once; it resets when the lot is kept again. Rentals and vacant homes are silent."""
+    home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
+    poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
+    when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
+    silent."""
     st = stage_of(lot.condition)
     homes = lot_homes(sim, lot.place)
     home = homes[0] if len(homes) == 1 and owner_occupied(homes[0]) else None
-    if st == 0:
-        if home and lot.reported >= 2:
-            _event(sim, f"{home.name} looks as good as new.", "restored", lot.place,
-                   agents=[a.id for a in _members(sim, sim.households[home.household])])
-        lot.reported = 0
+    lot.worst = max(lot.worst, st)
+    if st <= 1:
+        if st == 0:
+            if home and lot.worst >= 2:
+                _event(sim, f"{home.name} looks as good as new.", "restored", lot.place,
+                       agents=[a.id for a in _members(sim, sim.households[home.household])])
+            lot.worst = 0
+        lot.reported = st
     elif st > lot.reported:
         if home and st in STAGE_NEWS:
             tag, text = STAGE_NEWS[st]
@@ -1112,7 +1117,10 @@ def apply_extra(sim, agent: Agent, fork, opt) -> None:
         how = extra.get("how", "buy")
         down = how == "rent" and fork is not None and fork.kind == "housing_trouble"
         if not move_household(sim, hh, extra["move"], how, decider=agent, plan_decider=False, check=not down):
-            agent.plan = [("idle", "home")]  # nothing to move into: home instead,
+            # Nothing to move into: home instead. _decide starts the option's own steps once the extras are done
+            # (PLAN 3.11), so those are what must change; the plan is set too for a caller that doesn't.
+            opt.steps = [("idle", "home")]
+            agent.plan = [("idle", "home")]
             opt.outcomes = []  # and none of what the move promised happens
     lot = sim.lots[sim.homes[hh.home_id].place]
     if "repair" in extra:

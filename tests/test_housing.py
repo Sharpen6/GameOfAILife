@@ -77,6 +77,9 @@ class FakeSim:
     def household(self, agent):
         return self.households[agent.household_id]
 
+    def home_of(self, agent):
+        return self.homes[self.household(agent).home_id].place
+
     def on_shift_now(self, agent):
         return False
 
@@ -166,11 +169,12 @@ class AffordabilityTest(unittest.TestCase):
         self.assertGreater(commute, 0)  # Dana drives to work
         self.assertEqual(housing.weekly_outgo(sim, cohen),
                          420 + housing.bills(sim, cohen) + housing.living(sim, cohen) + commute)
-        before = housing.weekly_outgo(sim, cohen)
-        sim.agents["yossi"].owns_car = True
+        yossi = sim.agents["yossi"]
+        before, fare = housing.weekly_outgo(sim, cohen), travel.weekly_commute_cost(sim, yossi)  # on foot or the bus
+        yossi.owns_car = True
         from gameofailife.sim import CAR_BILL
         self.assertEqual(housing.weekly_outgo(sim, cohen) - before,
-                         CAR_BILL + travel.weekly_commute_cost(sim, sim.agents["yossi"]))
+                         CAR_BILL + travel.weekly_commute_cost(sim, yossi) - fare)
 
     def test_a_rental_needs_the_income_to_carry_it(self):
         sim, tal = self.sim, self.sim.households["tal"]
@@ -273,9 +277,12 @@ class MoveTest(unittest.TestCase):
         self.assertEqual(opt.outcomes, ["promised"])
         tom = sim.agents["tom"]
         tom.plan = [("move_house", "river_28")]
-        opt = SimpleNamespace(extra={"move": "river_28", "how": "buy"}, outcomes=["promised"])
+        opt = SimpleNamespace(extra={"move": "river_28", "how": "buy"}, steps=[("move_house", "river_28")],
+                              outcomes=["promised"])
         housing.apply_extra(sim, tom, fork, opt)
-        self.assertEqual(tom.plan, [("idle", "home")])  # nothing to move into: home instead
+        self.assertEqual(sim.households["levi"].home_id, "main_28")
+        self.assertEqual(opt.steps, [("idle", "home")])  # nothing to move into: the option now goes home,
+        self.assertEqual(tom.plan, [("idle", "home")])  # and so does the plan
         self.assertEqual(opt.outcomes, [])  # and nothing the move promised happens
 
     def test_a_deal_buys_at_the_agreed_price(self):
@@ -392,14 +399,24 @@ class ConditionTest(unittest.TestCase):
         self.assertEqual(sim.texts("neglect", place="main_28"), ["28 Main Street is falling into neglect."])
         housing._change_condition(sim, lot, 1.5)  # back to shabby, briefly
         self.night()  # and down again: already announced
-        housing._change_condition(sim, lot, 30)  # worn
-        self.night()
         self.assertEqual(len(sim.texts("neglect", place="main_28")), 1)
         self.assertEqual(len(sim.texts("shabby", place="main_28")), 1)
+        housing._change_condition(sim, lot, 30)  # worn: reported resets at stage 0-1 (housing.md 7.2)
+        self.assertEqual((lot.reported, lot.worst), (1, 3))
+        self.night()
         self.assertEqual(sim.texts("restored", place="main_28"), [])
-        housing._change_condition(sim, lot, 30)  # kept
+        lot.condition = 60.9
+        self.night()  # let slip to shabby again: news again
+        self.assertEqual(sim.texts("shabby", place="main_28"), ["28 Main Street is looking shabby."] * 2)
+        housing._change_condition(sim, lot, 15)  # worn
+        self.assertEqual(sim.texts("restored", place="main_28"), [])
+        housing._change_condition(sim, lot, 15)  # kept, after being shabby or worse
         self.assertEqual(sim.texts("restored", place="main_28"), ["28 Main Street looks as good as new."])
-        self.assertEqual(lot.reported, 0)
+        self.assertEqual((lot.reported, lot.worst), (0, 0))
+        lot.condition = 80.5
+        self.night()  # just worn ...
+        housing._change_condition(sim, lot, 5)  # ... and kept again: nothing to celebrate
+        self.assertEqual(len(sim.texts("restored", place="main_28")), 1)
         lot.condition = 20.8
         self.night()
         self.assertEqual(sim.texts("falling_apart", place="main_28"), ["28 Main Street is close to falling apart."])
@@ -569,17 +586,33 @@ class ChargesTest(unittest.TestCase):
         before_charges(sim, "avraham", -50)  # $50 better: recovering, so it holds
         self.sunday()
         self.assertEqual(hh.arrears, 2)
-        self.assertEqual(sim.texts("in_the_red", "tamar")[-1], "Tamar Avraham is $50 in the red, but paying it down.")
         before_charges(sim, "avraham", -60)
         hh.grace_until = sim.clock.tick + 1  # granted grace: it holds
         self.sunday()
         self.assertEqual(hh.arrears, 2)
+        # Weeks that hold at 2 are quiet: in_the_red only at arrears 1 (PLAN 5.3 step 6).
+        self.assertEqual(len(sim.texts("in_the_red", "tamar")), 1)
+        self.assertEqual(len(sim.texts("in_the_red_again", "tamar")), 1)
         before_charges(sim, "avraham", -30)  # only $30 better: it climbs
         self.sunday()
         self.assertEqual(hh.arrears, 3)
+        self.assertEqual(sim.texts("in_the_red_again", "tamar")[-1],
+                         "Tamar Avraham is $30 in the red for a third week. Millbrook Homes sends a final warning.")
         before_charges(sim, "avraham", 0)
         self.sunday()
         self.assertEqual((hh.arrears, hh.clean_sundays), (0, 1))
+
+    def test_a_red_week_under_grace_is_quiet(self):
+        sim, hh = self.sim, self.sim.households["avraham"]
+        hh.grace_until = sim.clock.tick + 2 * DAY
+        before_charges(sim, "avraham", -100)
+        self.sunday()
+        self.assertEqual((hh.arrears, hh.last_funds), (0, -100))
+        self.assertEqual(sim.texts("in_the_red") + sim.texts("in_the_red_again"), [])
+        before_charges(sim, "avraham", -100)  # grace is over: the first counted week
+        self.sunday()
+        self.assertEqual(hh.arrears, 1)
+        self.assertEqual(sim.texts("in_the_red", "tamar"), ["Tamar Avraham is $100 in the red after the week's bills."])
 
     def test_owners_get_the_banks_warning(self):
         sim, levi = self.sim, self.sim.households["levi"]
@@ -798,6 +831,11 @@ class ForkTest(unittest.TestCase):
         self.assertAlmostEqual(doubts[0].p, 0.6 * sim.agents["mor"].profile.traits["thrift"])
         self.assertEqual(doubts[0].effects, {("rel", "mor"): -3, "fun": -3})
         self.assertAlmostEqual(best.base, 0.35 + 0.3)  # crowded, and more bedrooms
+        cheaper, hh = fork.options[2], sim.households[sim.agents["gil"].household_id]
+        self.assertEqual(cheaper.label, "Move into the cheaper Elm Court, flat 2B (flat) for $220/week")
+        self.assertGreater(housing.weekly_outgo(sim, hh, "elm_court_2b"), housing.weekly_outgo(sim, hh))  # rises too
+        self.assertEqual([o.id for o in cheaper.outcomes],  # but the doubts are option 0's alone (housing.md 9.1)
+                         ["bargain", "hidden_fault", "nice_neighbours", "moving_chaos"])
 
     def test_house_hunt_best_and_cheaper(self):
         sim = FakeSim(tick=at(0, 18, 30))
@@ -1105,10 +1143,11 @@ class EngineTest(unittest.TestCase):
             if expect == "asked":
                 self.assertEqual(fork.status, "asked", (who, lead))
                 self.assertIn(("tester", fork.id), [(c, m.get("fork_id")) for c, m in sim.outbox])
+                self.assertEqual(fork.controller, "tester")  # the controller asked (PLAN 3.6) ...
             else:
                 self.assertEqual((fork.status, fork.decided_by), ("decided", "habit"), (who, lead))
+                self.assertIsNone(fork.controller, who)  # ... or none, when habit settled it
             self.assertEqual(fork.profile_choice, 0)
-            self.assertEqual(fork.controller, "tester")
 
     def test_outcome_groups_are_exclusive(self):
         from gameofailife.forks import Fork, Outcome
@@ -1158,6 +1197,27 @@ class EngineTest(unittest.TestCase):
         self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST)
         self.assertEqual(dana.activity_place, "river_28")
         self.assertEqual(sim.homes["main_20"].listing, "for_rent")
+
+    def test_a_failed_move_sends_the_decider_home(self):
+        """The listing goes while the controller thinks: _decide's start_plan(opt.steps) must not take the decider
+        to move house in a home that isn't theirs, and nothing the move promised is rolled."""
+        sim = self.sim
+        sim.clock.tick = at(0, 18, 30)
+        dana = sim.agents["dana"]
+        cohen = sim.households["cohen"]
+        fork = housing_forks.house_hunt_fork(sim, dana)
+        self.assertEqual(fork.options[0].extra, {"move": "river_28", "how": "buy"})
+        funds = housing.funds(sim, cohen)
+        hide(sim, "river_28")  # another buyer has it under offer
+        sim._decide(dana, fork, 0, "model", "")
+        self.assertEqual(cohen.home_id, "main_20")
+        self.assertAlmostEqual(housing.funds(sim, cohen), funds)
+        self.assertIn("The Cohens were too late: 28 River Road has been sold.", [e["text"] for e in sim.events])
+        self.assertEqual(dana.activity_place, "main_20")
+        self.assertNotIn(fork.id, " ".join(str(e.get("what")) for e in sim.luck_log))
+        for _ in range(120):
+            sim.step()
+            self.assertFalse(dana.activity == "move_house" or dana.activity_place == "river_28", sim.clock.stamp())
 
     def test_build_fork_asks_one_partner(self):
         from gameofailife.forks import build_fork
