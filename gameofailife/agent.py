@@ -54,10 +54,22 @@ class Job:
 @dataclass
 class Household:
     id: str
-    home_id: str
-    weekly_rent: float
+    home_id: str  # a home id (housing.Home): a house's place id, or "<block>_<unit>" for a flat
+    weekly_rent: float  # 0 while the household owns its home
     groceries: int = 8  # meals in the fridge
     member_ids: list[str] = field(default_factory=list)
+    # Housing state, run by housing.py.
+    cooldowns: dict[str, int] = field(default_factory=dict)  # housing fork kind or extra -> tick it may come again
+    arrears: int = 0  # Sundays in a row the household ended in the red without recovering
+    last_funds: float | None = None  # funds at the last Sunday charge
+    grace_until: int = 0  # tick a granted grace ends
+    hardship_rent: int | None = None  # lowered rent while getting back on their feet
+    clean_sundays: int = 0  # Sundays in a row out of the red
+    tax_deferred: bool = False
+    moved_tick: int | None = None  # tick of the last move; None = never moved
+    tight_until: int = 0  # belt-tightening until this tick
+    trouble_seen: int = 0
+    history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "home", "name", "price"}
 
 
 @dataclass
@@ -139,6 +151,10 @@ class Agent:
     memory: list[str] = field(default_factory=list)
     inbox: list[dict] = field(default_factory=list)
     forks: list[dict] = field(default_factory=list)  # recent decided forks
+    llm_forks: list[dict] = field(default_factory=list)  # the last 30 decided by a model or timed out
+    trip: dict | None = None  # {"mode": "bus", "line", "board", "alight", "phase", "since"} while on a bus trip
+    riding: str | None = None  # bus id while on board
+    died: dict | None = None  # {"tick", "time", "how"}
 
     def relate(self, other_id: str, kind: RelationKind, affinity: float) -> None:
         self.relationships[other_id] = Relationship(kind, affinity)
