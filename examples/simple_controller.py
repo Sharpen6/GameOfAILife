@@ -13,6 +13,10 @@ Styles:
   social   prefer options that involve other people, then the urgent need
   random   pick any option the character can afford
 
+The four housing forks (house_hunt, upkeep, repair, housing_trouble) have their own rules in
+choose_housing(): their costs come from the household's pooled money ("household": true on an option), so
+they are weighed against `you.household_funds`, and moves are only made with money to spare.
+
 Only the standard library and the game's own client (gameofailife.ws) are used.
 """
 
@@ -56,8 +60,78 @@ def helps(label: str, words) -> bool:
     return mentions(label, words) and not mentions(label, BAD_WORDS)
 
 
+HOUSING_KINDS = ("house_hunt", "upkeep", "repair", "housing_trouble")
+SPARE = 2  # a household spends on its home only when it keeps this many times the cost
+MOVE_CUSHION = 2000  # dollars a household keeps after a move, at least
+
+
+def choose_housing(fork: dict, style: str) -> tuple[int, str] | None:
+    """The housing rules, or None to fall back on the general rules (the random style, other kinds).
+
+    Option order is fixed by the game: house_hunt 0 best home, 1 haggle for it, 2 the cheaper home (or keep
+    looking), 3 stay; upkeep 0 builders, 1 DIY, 2 tidy up, 3 leave it; repair 0 call the trade, 1 fix it
+    yourself, 2 ask a friend (or a cheap handyman), 3 wait; housing_trouble 0-1 the ways out on offer (downsize,
+    ask for help, sell the car or belongings, ask for grace, odd jobs), 2 cut back, 3 hope.
+    """
+    kind = fork.get("kind")
+    if kind not in HOUSING_KINDS or style == "random":
+        return None
+    you = fork.get("you", {})
+    money = float(you.get("money", 0))
+    funds = float(you.get("household_funds", money + float(you.get("savings", 0))))
+    opts = fork["options"]
+
+    def cost(i: int) -> float:
+        return float(opts[i].get("cost", 0))
+
+    def can(i: int, spare: float = SPARE) -> bool:
+        """The household (or the character, for a personal cost) keeps `spare` times the cost."""
+        pot = funds if opts[i].get("household") else money
+        return cost(i) == 0 or pot >= spare * cost(i)
+
+    if kind == "house_hunt":
+        # A move costs most of the savings, so the test is what is left: a cushion of ten weeks of today's
+        # housing cost, and never under MOVE_CUSHION.
+        cushion = max(MOVE_CUSHION, 10 * float((you.get("home") or {}).get("weekly_cost", 0)))
+        order = (1, 2, 0) if style == "thrifty" else (0, 1, 2)  # thrifty haggles; social wants room
+        for i in order:
+            if cost(i) > 0 and funds - cost(i) >= cushion:
+                return i, f"can afford it and keep ${funds - cost(i):,.0f}"
+        return 3, f"moving would leave less than ${cushion:,.0f}"
+    if kind == "upkeep":
+        if style == "social" and can(0, 3):
+            return 0, "the family deserves a proper job"
+        if "falling apart" in fork.get("question", "") and can(0):
+            return 0, "too far gone for a weekend of DIY"
+        for i, why in ((1, "a weekend of DIY saves the builders' bill"), (2, "a quick tidy-up is all we can spare")):
+            if can(i):
+                return i, why
+        return 3, "no money for it this weekend"
+    if kind == "repair":
+        friend = opts[2]["label"].startswith("Ask ")
+        if style == "social" and friend:
+            return 2, "a friend will help, and it's cheaper"
+        if funds > 1000 and can(0):
+            return 0, "fix it properly, now"
+        if style == "thrifty" and friend:
+            return 2, "a friend will help, and it's cheaper"
+        return (1, "try fixing it ourselves") if can(1, 1) else (3, "nothing to pay for it with")
+    # housing_trouble: never just hope. From the final warning on, take the first way out on offer.
+    question = fork.get("question", "")
+    if "final warning" in question or "wants its money" in question:
+        return 0, "it's serious now: take the first way out"
+    if style == "social" and opts[1]["label"].startswith("Ask "):
+        return 1, "ask for help before it gets worse"
+    if style == "social" and opts[0]["label"].startswith("Ask "):
+        return 0, "ask for help before it gets worse"
+    return 2, "cut back hard until we're out of the red"
+
+
 def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
     """Return (option index, short reason) for a fork message."""
+    housing = choose_housing(fork, style)
+    if housing:
+        return housing
     you = fork.get("you", {})
     money = float(you.get("money", 0))
     needs = you.get("needs", {})

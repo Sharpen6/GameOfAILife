@@ -69,11 +69,25 @@
 #promptnote { margin-top: 4px; }
 
 .decisions .feed li .q { display: block; }
+.decisions .feed .meta { margin-top: 3px; }
+.tag.major { background: #5a3a5e; color: #f3d6f6; }
+
+.homecard .hname { font-weight: 600; font-size: 15px; }
+.homecard .facts { margin-top: 8px; }
+.stagebar { display: inline-flex; gap: 2px; vertical-align: middle; margin-left: 6px; }
+.stagebar span { width: 12px; height: 8px; border-radius: 2px; border: 1px solid #11151d; }
+.homecard .emergency {
+  margin-top: 10px; padding: 6px 10px; border-radius: 4px; border: 2px solid #11151d;
+  background: #5a2626; color: #ffd9d9; font-size: 13px; box-shadow: 2px 2px 0 #11151d;
+}
+.homecard .emergency .small { color: #f3b3b3; }
+.homecard .list .time { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
 .footer { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 4px 2px 20px; }
 
 @media (max-width: 900px) {
   .charpage main#page { grid-template-columns: minmax(0, 1fr); }
   .col { display: contents; } /* on phones: who, play style, lessons, then decisions */
-  .who { order: 1; } .style { order: 2; } .learned { order: 3; } .decisions { order: 4; } .footer { order: 5; }
+  .who { order: 1; } .homecard { order: 2; } .style { order: 3; } .learned { order: 4; } .decisions { order: 5; }
+  .footer { order: 6; }
   .charpage select { min-width: 0; max-width: 60vw; }
 }
