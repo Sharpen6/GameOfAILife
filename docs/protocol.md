@@ -1,9 +1,9 @@
 # GameOfAILife WebSocket protocol
 
 This is the complete reference for the one WebSocket endpoint the game server
-exposes. Everything here is taken from `gameofailife/server.py` and
-`gameofailife/sim.py`. If this document and the code disagree, the code is right
-and this document has a bug.
+exposes. Everything here is taken from `gameofailife/server.py`,
+`gameofailife/ws.py`, `gameofailife/sim.py` and `gameofailife/forks.py`. If this
+document and the code disagree, the code is right and this document has a bug.
 
 - [Connecting](#connecting)
 - [Message basics](#message-basics)
@@ -42,29 +42,54 @@ Two roles share the endpoint. The first message you send picks yours:
 
 - Every message in both directions is one JSON object in one text frame.
   Binary and fragmented frames are accepted and decoded as UTF-8. The largest
-  accepted message is 4 MiB.
+  accepted frame or message is 4 MiB: a bigger one gets a close frame with code
+  1000 and the server closes the connection.
+- Pings get a pong with the same payload. Control frames (ping, pong, close)
+  carry at most 125 bytes and are never fragmented (RFC 6455 5.5): a longer or
+  fragmented one fails the connection with close code 1002.
 - Every message has a `type` field.
 - A frame that is not valid JSON gets `{"type": "error", "error": "messages must be JSON"}`
-  and the connection stays open.
-- A frame that is valid JSON but not an object (an array, a number) is silently
-  ignored.
+  and the connection stays open. That includes a frame that is not valid UTF-8,
+  a number too long to parse and nesting too deep to parse.
+- A frame that is valid JSON but not an object (an array, a number, a string,
+  `null`) gets `{"type": "error", "error": "messages must be JSON objects"}` and
+  the connection stays open.
 - Until you have said `hello`, every message gets
   `{"type": "error", "error": "say hello first"}`.
 - **`req_id`**: if a client message has a `req_id` field (any JSON value), the
   server copies it unchanged into the direct reply to that message, errors
-  included. Pushes never carry a `req_id`. Use it to match replies to requests.
+  included. That covers the `welcome` and the errors before `hello` too. Only
+  `messages must be JSON` and `messages must be JSON objects` never carry one,
+  since the server could not read the message. Pushes never carry a `req_id`.
+  Use it to match replies to requests.
 - A message whose fields have the wrong type usually gets
   `{"type": "error", "error": "bad message: <detail>"}` (the server catches
-  `ValueError`, `TypeError`, `KeyError` and `AttributeError`). A controller
+  `ValueError`, `TypeError`, `KeyError`, `AttributeError` and `OverflowError`,
+  so a number too big to use gets this too). A controller
   `hello` whose `characters` is neither a list nor `"all"` gets
   `{"type": "error", "error": "bad hello: ..."}` and may say hello again. A
   `set_profile` `prompt` that is not a string, or `traits` that is not an
   object, is ignored.
-- Each request gets at most one direct reply, sent right away. Pushes (state
-  frames, forks, messages) are sent by the server's frame loop, which runs every
-  50 ms. So a direct reply can arrive before a push that the same request
-  caused: `send_message` replies `sent` before the recipient's controller gets
-  the `message` push.
+- Each request gets at most one direct reply, sent right away (paced
+  `send_message` and `invite` requests wait their turn first, see below).
+  Pushes (state frames, forks, messages) are queued by the server's frame loop,
+  which runs every 50 ms, and each client's pushes are sent in order. So a
+  direct reply can arrive before a push that the same request caused:
+  `send_message` replies `sent` before the recipient's controller gets the
+  `message` push.
+- **Pacing.** `send_message` and `invite` share one allowance per controller
+  connection: a burst of 100, then 20 a second (the burst refills at that rate
+  while you send fewer). Nothing is refused. Over the pace, the server waits
+  before handling the next one and reads nothing else from your connection
+  meanwhile, so your other requests, `choose` included, queue behind it. For
+  example, 140 texts sent at once get their first 100 replies right away and the
+  other 40 over the next 2 seconds.
+- **Slow clients are dropped.** A slow client never holds up the city or other
+  clients. But a client still waiting to receive a push that was queued more
+  than 5 seconds ago (it stopped reading, or reads too slowly to keep up) is
+  dropped at its next push: the connection is cut with no close frame. As with
+  any disconnect, a dropped controller's characters are released, and if the
+  dropped view was God, the city has no God until the next God `hello`.
 
 ## Hello and welcome
 
@@ -141,8 +166,12 @@ For each claimed character the server also logs an event of kind
 ### Bad hello
 
 Any other `role` gets `{"type": "error", "error": "role must be god or controller"}`
-and the server stops reading from the connection. Open a new connection to try
-again.
+and the server closes the connection (close code 1000). Open a new connection
+to try again.
+
+A controller `hello` whose `characters` is neither a list nor `"all"` gets
+`{"type": "error", "error": "bad hello: characters must be a list of ids or \"all\""}`
+instead. The connection stays open and you may say `hello` again.
 
 Sending `hello` again after the welcome does not change your role; it gets
 `unknown message type 'hello'`.
@@ -164,7 +193,7 @@ ever sees the odds themselves.
 | Field      | Meaning |
 |------------|---------|
 | `agent_id` | Character id. |
-| `luck`     | Number. Clamped to 0..100. Default 50 if missing. |
+| `luck`     | A JSON number (integer or decimal). Clamped to 0..100. Default 50 if missing. |
 
 Reply:
 
@@ -173,7 +202,11 @@ Reply:
 ```
 
 `ok` is `false` and `luck` is `null` for an unknown id. Dead characters still
-accept luck. A `luck` that is not a number gets a `bad message` error.
+accept luck. A `luck` that is not a finite JSON number gets
+`{"type": "error", "error": "bad message: luck must be a number"}` and changes
+nothing: that includes numeric strings such as `"80"`, `true` and `false`,
+`null`, `NaN` and `Infinity`. An integer too big to turn into a decimal gets a
+`bad message` error too.
 
 ### `set_speed`
 
@@ -182,8 +215,8 @@ accept luck. A `luck` that is not a number gets a `bad message` error.
 ```
 
 `speed` must be one of `0 1 2 4 8 16`; any other integer sets speed `1`. A
-non-integer string gets a `bad message` error; a float is truncated (`2.7` is
-`2`). Speed `1` is one game day per ten real minutes (2.4 game minutes per real
+non-integer string, `NaN` or `Infinity` gets a `bad message` error; a float is
+truncated (`2.7` is `2`). Speed `1` is one game day per ten real minutes (2.4 game minutes per real
 second); `0` is paused.
 
 Reply: `{"type": "speed", "speed": 4}`
@@ -238,7 +271,7 @@ Director plays when no controller answers.
 |------------|---------|
 | `agent_id` | Character id. |
 | `prompt`   | Optional string. If non-blank it replaces the prompt (trimmed, cut to 1000 characters) and marks the prompt as hand-edited, so it stops being rewritten automatically. `null` or blank leaves the prompt alone. |
-| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. |
+| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. A value that cannot be read as a number (for example `"lots"` or `null`) gets a `bad message` error, and then no trait changes. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. |
 
 Reply: `{"type": "agent", "agent": { ...agent page... }}` with the updated page.
 Unknown id: `{"type": "error", "error": "unknown character"}`.
@@ -274,11 +307,15 @@ Reply is an `ack`. Its fields depend on the result:
 | Result | Reply |
 |--------|-------|
 | In time (within 5 s): the choice is played and teaches the profile. | `{"type": "ack", "fork_id": "f2", "accepted": true, "applied": true}` |
-| Late (5 to 10 s, after the default was played): the choice is not played but still teaches the profile. | `{"type": "ack", "fork_id": "f2", "accepted": true, "applied": false, "note": "too late to act on; saved to the profile"}` |
-| Fork already decided by an earlier answer, or the late window is closed. | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "too late"}` |
+| Late (5 to 10 s, after the default was played), and the first late answer for this fork: the choice is not played but still teaches the profile. | `{"type": "ack", "fork_id": "f2", "accepted": true, "applied": false, "note": "too late to act on; saved to the profile"}` |
+| Fork already decided by an earlier answer, a late answer for it was already saved, or the late window is closed. | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "too late"}` |
 | Unknown or forgotten fork id (forks are forgotten 10 s after they were asked). | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "unknown fork"}` |
 | The fork's character is not yours (for example you released it). | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "not your character"}` |
+| The fork's character has died. Nothing is played for the dead: their open fork stops being asked. | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "character is dead"}` |
+| The fork was withdrawn: an `invite` fork whose host died while it was being asked. Nothing is played, and the guest moves on to their next decision. | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "fork withdrawn"}` |
 | `choice` is not an integer 0 to 3. | `{"type": "ack", "fork_id": "f2", "accepted": false, "error": "choice must be 0 to 3"}` |
+
+A withdrawn fork never reaches God's view, since nothing decided it.
 
 Note that a rejected `choose` is still an `ack` with `accepted: false`, not an
 `error` message.
@@ -335,7 +372,7 @@ Reply:
 
 | `what`          | `data` |
 |-----------------|--------|
-| `possessions`   | `{"home": {"place", "name", "tenure", "weekly_rent"}, "car": bool, "phone": {"condition": "fine" or "cracked"}, "money": number, "savings_goal": goal or null, "groceries_at_home": int}`. `tenure` is always `"rented"`. `goal` is `{"name", "target", "saved"}`. |
+| `possessions`   | `{"home": {"place", "name", "tenure", "weekly_rent"}, "car": bool, "phone": {"condition": "fine" or "cracked"}, "money": number, "savings": number, "savings_goal": goal or null, "groceries_at_home": int}`. `tenure` is always `"rented"`. `savings` is money put aside on payday by a character with no goal to save for; it is not part of `money`. `goal` is `{"name", "target", "saved"}`. |
 | `attributes`    | `{"age", "health", "mood", "needs": {"hunger", "energy", "social", "fun"}, "reputation", "job": job or null, "traits": {trait: 0..1}}`. Health, mood, needs and reputation are rounded to integers on a 0..100 scale. See [Job](#job). |
 | `relationships` | Object of other character id to `{"kind", "affinity", "trust", "name"}`. `kind` is `partner`, `family`, `friend`, `coworker` or `acquaintance`; `affinity` is -100..100; `trust` is 0..100. |
 | `memory`        | List of up to the last 30 memory strings, each `"<time stamp>: <text>"`. |
@@ -355,7 +392,10 @@ One of your characters texts another character.
 
 `text` is cut to 500 characters. Reply: `{"type": "sent", "ok": true}`, or
 `{"type": "sent", "ok": false, "error": "unknown or dead character"}` when either
-side is unknown or dead.
+side is unknown or dead, or
+`{"type": "sent", "ok": false, "error": "can't message yourself"}` when `to` is
+the sending character. `send_message` is [paced](#message-basics) together
+with `invite`.
 
 On success the text lands in the recipient's inbox (which keeps 30), both
 characters gain a little social need, an event of kind `"message"` is logged,
@@ -376,16 +416,35 @@ One of your characters invites another to meet at a place.
  "invite": {"id": "i1", "from": "ari", "to": "tom", "place": "cafe", "tick": 363, "status": "pending"}}
 ```
 
-`ok` is `false` and `invite` is `null` if the guest is unknown or dead or the
-place does not exist.
+`ok` is `false` and `invite` is `null` if the guest is unknown, dead or the
+inviting character itself, if your character is dead, or if the place does not
+exist. `invite` is [paced](#message-basics) together with `send_message`.
 
 The guest gets `"Want to meet at <place name>?"` in their inbox. The guest's
 controller gets **no** direct push for the invite: the next time the guest is
 free, they meet an `invite` fork (accept, decline, suggest another day, ignore),
 which reaches their controller as a normal [fork](#fork) unless the Director
-decides it from habit. When the guest decides, your controller gets an
+decides it from habit. The guest only meets that fork between 06:00 and 22:00
+(and before 19:00 for characters under 18, who stay home after curfew), not
+while they should be setting off for a shift (counting the walk by way of the
+invite's place), and only if the place will be open when they get there. Until
+then the invite waits. When the guest decides, your controller gets an
 [`invite_answer`](#invite_answer) push. An invite not answered within 120 game
-minutes expires silently (`status` becomes `"expired"`; nothing is pushed).
+minutes expires silently (`status` becomes `"expired"`; nothing is pushed), so
+an invite sent in the evening to a child, or to someone about to leave for
+work, often expires before the guest sees it.
+
+If the host dies, their pending invites expire at once, and a guest's `invite`
+fork for one of them that is still being asked is withdrawn: its `choose` gets
+`fork withdrawn`.
+
+Characters also invite friends on their own. When a payday
+`"Go out for drinks with <friend>"` option or a lonely
+`"Invite <friend> to Corner Cafe"` option is chosen (by habit, default, timeout
+or a controller), the character invites that friend to Corner Cafe and heads
+there. The host's controller first learns that invite's id from the
+`invite_answer` push, since the `choose` `ack` carries none. Such an invite also
+expires as soon as the host stops hanging out at the cafe.
 
 ### Errors
 
@@ -420,7 +479,7 @@ something happens (for example a controller sends a message).
 | `speed`  | Current speed. |
 | `state`  | Full snapshot, see [State](#state). |
 | `events` | Every [event](#event) since the previous frame (possibly empty). |
-| `forks`  | Every fork decided since the previous frame, see [Decided fork](#decided-fork). God sees forks only once decided, never while a controller is still thinking. |
+| `forks`  | Every fork decided since the previous frame, plus every earlier fork one of whose hidden outcomes landed since then. See [Decided fork](#decided-fork). God sees forks only once decided, never while a controller is still thinking. A fork id appears at most once in a frame, but can come again in later frames: the later copy supersedes the earlier one. |
 
 ### `fork`
 
@@ -465,7 +524,7 @@ Characters without a controller play their profile default.)
 | `agent_id`         | Which of your characters is deciding. |
 | `kind`             | One of `invite`, `work`, `sleep`, `hunger`, `payday`, `groceries`, `lonely`, `free_time`. |
 | `question`         | The situation in plain language. |
-| `options`          | Always exactly 4. `index` is what you send as `choice`; `cost` is money spent up front; `travel_minutes` (game minutes) is present only when the option starts somewhere other than where the character is now. Outcome odds are never included. |
+| `options`          | Always exactly 4. `index` is what you send as `choice`; `cost` is money spent up front; `travel_minutes` (game minutes) is present only when the option starts somewhere other than where the character is now. Outcome odds are never included. Options only send the character to a place that will be open when they get there (for a meal or a shop, also for the visit). If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands; when that place is the option's first stop, the `cost` also comes back and that choice's hidden outcomes are dropped. |
 | `time`             | Game time stamp. |
 | `deadline_seconds` | Always `5.0`, real seconds. |
 | `weather`          | `"clear"` or `"rain"`. |
@@ -477,6 +536,16 @@ Characters without a controller play their profile default.)
 
 While a fork is open the character's `state` and `activity` are `"deciding"`
 and the character stands still.
+
+Some options move money besides their `cost`. In a `groceries` fork,
+`"Ask <name> to do the shopping"` shows `cost` 0, but if that person is free
+(idle or doing something leisurely, not asleep, working, deciding or due to
+leave for work) they go to Fresh Market at once, and the groceries cost $35,
+paid by the shopper or, if the shopper has less than that, by your character.
+If they are not free, nobody shops and nothing is paid. A payday
+`"Put $<amount> toward savings"` option, offered to a character with no
+savings goal, moves the money into `savings` (see [`query`](#query)
+`possessions`).
 
 ### `message`
 
@@ -491,7 +560,8 @@ To the controller of the character that received a `send_message`.
 
 ### `invite_answer`
 
-To the controller of a character whose invite was just answered.
+To the controller of a character whose invite was just answered, including an
+invite the character made on its own from a fork (see [`invite`](#invite)).
 
 ```json
 {"type": "invite_answer", "invite_id": "i1", "from": "tom", "answer": "accept", "agent_id": "ari"}
@@ -527,15 +597,37 @@ connection stays open, except after a bad hello role. All error strings:
 
 | `error` | When |
 |---------|------|
-| `messages must be JSON` | A frame was not valid JSON. |
+| `messages must be JSON` | A frame was not valid JSON: also bad UTF-8, a number too long to parse, or nesting too deep. Never carries a `req_id`. |
+| `messages must be JSON objects` | Valid JSON that is not an object (an array, a number, a string, `null`). Never carries a `req_id`. |
 | `say hello first` | Any message before `hello`. |
-| `role must be god or controller` | Bad hello role; the server stops reading. |
-| `bad message: <detail>` | A field had an unusable value (for example `"luck": "lots"`). |
+| `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list nor `"all"`: `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
+| `role must be god or controller` | Bad hello role; the server closes the connection. |
+| `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. |
 | `unknown message type '<type>'` | The type is not one your role can send. |
 | `unknown character` | `get_agent` or `set_profile` with an unknown id. |
 | `not your character` | `query`, `send_message` or `invite` for a character you do not hold. |
 | `what must be one of [...]` | `query` with an unknown `what`. |
 | `only God can do that; this view is watching` | A demoted view tried a God action. |
+
+Some refusals are not `error` messages but come in the normal reply, with
+`accepted` or `ok` false and an `error` field:
+
+| Reply | `error` | When |
+|-------|---------|------|
+| `ack` | `unknown fork` | `choose` for an unknown or forgotten fork. |
+| `ack` | `not your character` | `choose` for a fork whose character you do not hold. |
+| `ack` | `character is dead` | `choose` for a fork whose character has died. |
+| `ack` | `fork withdrawn` | `choose` for an `invite` fork whose host died while it was asked. |
+| `ack` | `choice must be 0 to 3` | `choice` is not an integer 0 to 3. |
+| `ack` | `too late` | The fork was already decided by your answer, already has a saved late answer, or its late window closed. |
+| `sent` | `unknown or dead character` | `send_message` where either character is unknown or dead. |
+| `sent` | `can't message yourself` | `send_message` to the sending character. |
+
+`claimed` (from `claim`) and `invited` (from `invite`) report a refusal with
+`ok: false` only, and no `error` field. The frame-level failures in
+[Message basics](#message-basics) (a frame over 4 MiB, a bad control frame,
+falling more than 5 seconds behind) close the connection instead of sending an
+error.
 
 ## Answer windows: 5 seconds and 10 seconds
 
@@ -549,14 +641,16 @@ running while the game is paused.
    the option's style, and the prompt is regenerated unless it was hand-edited).
 2. **At 5 s** without an answer, the Director plays the profile default. The
    fork is decided by `"timeout"` and God sees it in the next state frame.
-3. **5 to 10 s.** A `choose` for a fork decided by timeout is not played, but it
-   is saved and teaches the profile exactly as an in-time answer would:
-   `accepted: true, applied: false`. The next fork of that kind is then more
-   likely to go the way the controller wanted, even if the controller is slow.
+3. **5 to 10 s.** The first `choose` for a fork decided by timeout is not
+   played, but it is saved and teaches the profile exactly as an in-time answer
+   would: `accepted: true, applied: false`. The next fork of that kind is then
+   more likely to go the way the controller wanted, even if the controller is
+   slow.
 4. **After 10 s** the server forgets the fork: `choose` gets `"unknown fork"`.
 
 Only the first answer counts. A second `choose` for a fork already decided by
-your earlier answer gets `"too late"`.
+your earlier answer, or for one whose late answer was already saved, gets
+`"too late"` and teaches nothing.
 
 `decided_by` in a [decided fork](#decided-fork) tells God who made each call:
 
@@ -649,13 +743,20 @@ In the `forks` list of state frames and in the agent page.
 
 `options` are the four labels; `choice` is the index played. `happened` lists
 the labels of hidden outcomes that came true. It is usually empty when the
-fork is first pushed, because outcomes land once the plan is carried out; the
-agent page shows it filled in later.
+fork is first pushed, because outcomes land once the plan is carried out, and
+some only hours later. When an outcome lands after the fork was pushed, the
+fork is pushed again in the next state frame's `forks`, with the same `id` and
+the longer `happened`
+(while it is among the character's last 20 decisions), so keep the latest copy
+of each id. The agent page shows it filled in too.
 
 ### Job
 
 `{"title", "place", "hourly_wage", "hours": [start_hour, end_hour], "workdays": [0..6, ...]}`.
-`place` is a place id; workday 0 is Monday.
+`place` is a place id; workday 0 is Monday. `hourly_wage` is before income tax:
+each shift pays `hourly_wage` x hours worked x (1 - min(0.45, 0.15 + 0.004 x
+`hourly_wage`)), so about 22% is withheld from a cashier's $17 and 43% from a
+doctor's $70.
 
 ### Agent page
 
@@ -711,7 +812,7 @@ server to client. State frames to God are trimmed.
 < {"type": "invited", "ok": true,
    "invite": {"id": "i1", "from": "ari", "to": "tom", "place": "cafe", "tick": 363, "status": "pending"}}
 
-# When Tom is next free, his invite fork reaches the controller
+# When Tom is next free (in the hours the invite section gives), his invite fork reaches the controller
 < {"type": "fork", "fork_id": "f2", "agent_id": "tom", "kind": "invite",
    "question": "Ari Ben-David invites you to Corner Cafe. What do you do?",
    "options": [{"index": 0, "label": "Accept and meet Ari at Corner Cafe", "cost": 0.0, "travel_minutes": 22},
@@ -741,6 +842,12 @@ server to client. State frames to God are trimmed.
                           "Suggest another day instead", "Ignore the message"],
               "choice": 0, "decided_by": "model", "reason": "Ari is a good friend.", "happened": []}]}
 
+# Once Tom's time at the cafe is over, its outcomes land and the same fork comes again
+< {"type": "state", "speed": 1, "state": {...}, "events": [...],
+   "forks": [{"id": "f2", "agent": "tom", "kind": "invite", "time": "Day 1 Mon 06:21", ...,
+              "choice": 0, "decided_by": "model", "reason": "Ari is a good friend.",
+              "happened": ["Has a great time together"]}]}
+
 # God, moved by the friendship, makes Tom luckier
 > {"type": "set_luck", "agent_id": "tom", "luck": 75, "req_id": 1}
 < {"type": "luck_set", "ok": true, "agent_id": "tom", "luck": 75.0, "req_id": 1}
@@ -752,4 +859,8 @@ default plays:
 ```text
 > {"type": "choose", "fork_id": "f2", "choice": 0, "reason": "Ari is a good friend."}
 < {"type": "ack", "fork_id": "f2", "accepted": true, "applied": false, "note": "too late to act on; saved to the profile"}
+
+# Changing its mind still inside the 10 s window teaches nothing more
+> {"type": "choose", "fork_id": "f2", "choice": 1, "reason": "Actually, I'm tired."}
+< {"type": "ack", "fork_id": "f2", "accepted": false, "error": "too late"}
 ```

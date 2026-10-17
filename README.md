@@ -351,7 +351,7 @@ The world runs on fixed rules that no agent and no God can change: lights cycle,
 | Weather | Rolled each morning from the season's odds, and again in the afternoon | Rain: drive instead of cycling, take an umbrella, cancel the picnic, or go anyway? |
 | Opening hours | Every place has fixed hours and closes on some holidays | Shop now on the way home, or risk the market being closed? |
 | School terms and holidays | Fixed calendar of terms, breaks and exams | Who looks after the kids in the break: a grandparent, paid childcare, or a day off? |
-| Paydays and bills | Wages on fixed days; rent on a fixed day; utilities monthly (in the first build wages land at the end of every shift, payday is Friday evening, and rent is due every Sunday night) | The forks in Money and the economy, timed by the calendar |
+| Paydays and bills | Wages on fixed days; rent on a fixed day; utilities monthly (in the first build wages, after income tax, land at the end of every shift; payday is Friday evening, or Saturday from 09:00 for anyone who missed it; retirees get a $400 pension every Friday at 09:00; and rent, plus weekly bills of $80 per adult and $40 per car, is due every Sunday night) | The forks in Money and the economy, timed by the calendar |
 
 **Season defaults** (tunable per city):
 
@@ -522,20 +522,20 @@ Useful flags:
 
 ### What you see and can do as God
 
-- **The map.** Millbrook's 40 by 25 tile town: eight family homes, Brightline Tech, Millbrook School, Fresh Market, Corner Cafe, City Hospital and Riverside Park, joined by a grid of roads. Characters walk, run or drive to work, school, the shops and each other. Traffic lights change at every junction, a bus loops the ring road, planes cross the sky three times a day, rain falls (snow in winter) and the town darkens at night with lit windows.
+- **The map.** Millbrook's 40 by 25 tile town: eight family homes, Brightline Tech, Millbrook School, Fresh Market, Corner Cafe, City Hospital and Riverside Park, joined by a grid of roads. Characters walk, run or drive to work, school, the shops and each other, keeping to the roads wherever that is no longer, so drivers wait at red lights. Traffic lights change at every junction, a bus loops the ring road, planes cross the sky three times a day, rain falls (snow in winter) and the town darkens at night with lit windows.
 - **Hover and click.** Hover over a character to see what they are doing, or over a building to see its hours and who is inside. Click a character, or a building with people in it, to open their panel.
-- **People, Events and Decisions tabs.** The roster shows everyone's activity, Luck and whether a controller plays them. The event feed tells the town's story. The decisions feed shows every fork: the question, all four options, the one chosen, who decided it (`habit`, `default`, `model` or `timeout`), the model's reason, and what came of it.
+- **People, Events and Decisions tabs.** The roster shows everyone's activity, Luck and whether a controller plays them. The event feed tells the town's story. The decisions feed shows every fork: the question, all four options, the one chosen, who decided it (`habit`, `default`, `model` or `timeout`), the model's reason, and what came of it, added to the fork's entry as its hidden outcomes land (often once the plan is carried out, sometimes hours later).
 - **A character's panel.** Needs bars (hunger, energy, social, fun), money, health, mood, reputation, recent decisions, what they own, the people they know and their memories.
 - **Luck.** The slider on the panel is your only power over the world. It runs from 0 to 100, everyone starts at 50, and it tilts the hidden odds of every outcome. The character never knows.
-- **Play style.** You can rewrite a character's play-style prompt and move their trait sliders (thrift, family, social, diligence, health, adventure). The Decision Director uses them for every fork no model answers.
+- **Play style.** You can rewrite a character's play-style prompt and move their trait sliders (thrift, family, social, diligence, health, adventure). The Decision Director uses them for every fork no model answers. Saving changes only the sliders you moved, and the prompt only if you edited it, so the rest keeps learning from the character's choices.
 - **Time.** Pause, or run at 1x, 2x, 4x, 8x or 16x.
-- **The character page.** `client/character.html` shows one character on a full page.
+- **The character page.** `client/character.html` shows one character on a full page. A plain click on the link in a character's panel opens it as God in the same tab; opened in a new tab, reloaded or from a bookmark, it first asks before taking God over from your other tabs (unless you ticked "Don't ask again in this tab").
 
-There is one God per city. If a second browser opens the God view, it takes over and the first one keeps watching without powers.
+There is one God per city. If a second browser opens the God view, it takes over and the first one keeps watching without powers: it says "Watching only", and its speed buttons, Luck slider and play-style Save are locked until you reload it, which makes it God again. When the server refuses something, the view shows why for a few seconds.
 
 ### Connect a controller
 
-Anything that speaks the WebSocket API can play characters: an AI model, a script, or a person typing JSON. Connect to `ws://localhost:8000/ws`, say hello as a controller, and claim the characters you want. Forks arrive as messages with four options; answer within 5 seconds or the Director plays the default for you. An answer that arrives within 10 seconds is too late to act on but still teaches the character's play style. [docs/protocol.md](docs/protocol.md) describes every message.
+Anything that speaks the WebSocket API can play characters: an AI model, a script, or a person typing JSON. Connect to `ws://localhost:8000/ws`, say hello as a controller, and claim the characters you want. Forks arrive as messages with four options; answer within 5 seconds or the Director plays the default for you. The first answer that arrives within 10 seconds is too late to act on but still teaches the character's play style; any answer after it is refused. Texts and invites are paced at 20 a second per controller after a burst of 100, and a controller that falls more than 5 seconds behind in reading what the server sends it is dropped and loses its characters. [docs/protocol.md](docs/protocol.md) describes every message.
 
 Two example controllers come with the game. Start the city first, then in another terminal:
 
@@ -546,7 +546,7 @@ Two example controllers come with the game. Start the city first, then in anothe
     export ANTHROPIC_API_KEY=your-key-here
     python3 examples/claude_controller.py --url ws://localhost:8000/ws --characters all
 
-The Claude controller uses `claude-haiku-5-5` by default and runs on your own API key. Characters played by a controller show a robot icon in the roster, and their decisions are tagged `model` with the reason the model gave. Characters no controller plays still live full days on their play-style defaults.
+The Claude controller uses `claude-haiku-5-5` by default and runs on your own API key. It asks Claude at low effort so answers arrive inside the 5 second window (a model you pick with `--model` must support the effort setting), and it leaves a fork to the play-style default when no worker thread is free before the deadline. Characters played by a controller show a robot icon in the roster, and their decisions are tagged `model` with the reason the model gave. Characters no controller plays still live full days on their play-style defaults.
 
 ### Run without a browser
 
@@ -565,16 +565,16 @@ The first build is the foundation from the roadmap: one small town, running live
 **Working now**
 
 - A clock of one tick per game minute, about ten real minutes per game day at 1x, with weekdays, weekends and seasons of 90 days.
-- A 40 by 25 tile map with eight homes, an office, a school, a market, a cafe, a hospital and a park, each with opening hours.
+- A 40 by 25 tile map with eight homes, an office, a school, a market, a cafe, a hospital and a park, each with opening hours. Forks only send characters to places that will be open when they get there, and a place that is shut when a character arrives anyway serves nothing, and what that choice cost is refunded.
 - A starter cast of 20 characters in eight households, with ages from 6 to 74, jobs, wages, school places, cars for some, friendships, family ties, and savings goals for a few (Ari's new phone, Tom's guitar).
 - Four needs (hunger, energy, social, fun) that fall over time and are restored by sleeping, eating, seeing people and having fun.
-- Eight kinds of fork, each with exactly four options: getting to work or school, sleep, hunger, payday, groceries, loneliness, free time, and answering an invitation. Every option carries hidden outcomes with odds that the character's Luck shifts, and some outcomes land hours later.
+- Eight kinds of fork, each with exactly four options: getting to work or school, sleep, hunger, payday, groceries, loneliness, free time, and answering an invitation. On payday, someone who lives alone is offered a takeaway night in instead of a family dinner. Every option carries hidden outcomes with odds that the character's Luck shifts, and some outcomes land hours later.
 - The Decision Director: obvious forks are decided by habit, close ones go to the character's controller with a 5 second window and a 10 second learning window, and characters with no controller play their default.
 - Play-style profiles that learn from a controller's choices and that God can edit.
 - Weather by season, traffic lights that stop cars, a bus on a fixed loop, three daily flights overhead, day and night.
-- Money that moves: wages for each shift, weekly rent, groceries, cafe bills, a $50 hospital stay.
+- Money that moves: wages for each shift with income tax withheld (15% plus 0.4% for each $1 of hourly wage, capped at 45%: about 22% for a cashier, 43% for a doctor), a $400 weekly pension for retirees, weekly rent and bills, groceries (also when one adult asks another to do the shopping), cafe bills, a $50 hospital stay, and money put aside on payday, toward a goal or into plain savings.
 - Health that drops when characters go hungry or exhausted, hospital visits, and deaths from old age (from 70, softened by Luck) or from health running out.
-- Text messages and invitations between characters, sent by controllers.
+- Text messages and invitations between characters, sent by controllers. Characters also invite a friend to Corner Cafe on their own from the payday and loneliness forks.
 - The God view in the browser, the character page, and the WebSocket API for controllers, with two example controllers.
 
 **Not built yet (design only)**
@@ -586,7 +586,7 @@ The first build is the foundation from the roadmap: one small town, running live
 - Saving, loading, replaying or branching a world.
 - Natural-language conversations and meetings with a time and an agenda. Characters can text and invite, but not hold a conversation.
 - The other four needs (hygiene, bladder, comfort, safety), emotions, the Big Five personality and skills.
-- Finding, changing or losing jobs, promotions, businesses, banks, loans, taxes, the housing market and evictions.
+- Finding, changing or losing jobs, promotions, businesses, banks, loans, taxes other than income tax, the housing market and evictions.
 - Illness and contagion, schools with grades, government, elections, crime, news and religion.
 - The chronicle, per-model dashboards, the fortune log and Luck history in the God view.
 
