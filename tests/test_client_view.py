@@ -4,10 +4,12 @@ The view is a set of classic browser scripts that share one global, window.CityV
 it that way: every file is present, nothing uses ES module syntax, nothing reaches for the network or
 for image files (or data:image URIs), view.css styles only .cv-* classes, the dev fixture has the PLAN 3.2
 and 3.3 shapes, and (when Node is installed) every script parses and the scripts define only CityView.
-With Node and Playwright installed, tests/browser/view_smoke.cjs runs the view in headless Chromium.
+With Node and Playwright installed and GOAL_SLOW=1, tests/browser/view_smoke.cjs runs the view in headless
+Chromium (about 80 s).
 """
 
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -186,6 +188,7 @@ class ClientViewFixture(unittest.TestCase):
 
 
 class ClientViewBrowser(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the browser run of the city view (about 80 s) runs with GOAL_SLOW=1")
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_view_smoke(self):
         # tests/browser/view_smoke.cjs prints SKIP and exits 0 without Playwright or a browser to launch
