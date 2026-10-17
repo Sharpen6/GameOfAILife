@@ -1,46 +1,21 @@
-"""Agents: who they are, what they need, what they own and whom they know."""
+"""Characters: who they are, what they need, own and know, and how they play by default."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
 
-# Needs run from 0 (desperate) to 100 (fully satisfied).
-NEED_NAMES = ("hunger", "energy", "social", "fun")
+NEEDS = ("hunger", "energy", "social", "fun")
 
-# How much each need drops per tick when nothing is done about it.
-NEED_DECAY = {"hunger": 1.0, "energy": 0.55, "social": 0.35, "fun": 0.45}
+# Points lost per game minute while awake.
+NEED_DECAY = {"hunger": 0.09, "energy": 0.065, "social": 0.035, "fun": 0.045}
 
-
-@dataclass
-class Job:
-    title: str
-    workplace_id: str
-    hourly_wage: float
-    start_hour: int
-    end_hour: int
-    workdays: tuple[int, ...] = (0, 1, 2, 3, 4)  # Mon..Fri
-
-    def on_shift(self, weekday: int, hour: float) -> bool:
-        return weekday in self.workdays and self.start_hour <= hour < self.end_hour
-
-
-@dataclass
-class Household:
-    """People who share a home, a fridge and the rent."""
-
-    id: str
-    home_id: str
-    weekly_rent: float
-    groceries: int = 6  # meals stocked at home
-    member_ids: list[str] = field(default_factory=list)
+START_LUCK = 50.0
 
 
 class RelationKind(str, Enum):
     PARTNER = "partner"
-    PARENT = "parent"
-    CHILD = "child"
-    SIBLING = "sibling"
+    FAMILY = "family"
     FRIEND = "friend"
     COWORKER = "coworker"
     ACQUAINTANCE = "acquaintance"
@@ -50,19 +25,90 @@ class RelationKind(str, Enum):
 class Relationship:
     kind: RelationKind
     affinity: float  # -100 .. 100
+    trust: float = 50.0
 
     def bump(self, amount: float) -> None:
         self.affinity = max(-100.0, min(100.0, self.affinity + amount))
 
+    def to_json(self) -> dict:
+        return {"kind": self.kind.value, "affinity": round(self.affinity), "trust": round(self.trust)}
+
 
 @dataclass
-class Message:
-    sender_id: str
-    recipient_id: str
-    sent_tick: int
-    kind: str  # "invite", "accept", "decline", "chat"
-    place_id: str | None = None
-    text: str = ""
+class Job:
+    title: str
+    place_id: str
+    hourly_wage: float
+    start_hour: int
+    end_hour: int
+    workdays: tuple[int, ...]
+
+    def on_shift(self, weekday: int, hour: float) -> bool:
+        return weekday in self.workdays and self.start_hour <= hour < self.end_hour
+
+    def to_json(self) -> dict:
+        return {"title": self.title, "place": self.place_id, "hourly_wage": self.hourly_wage,
+                "hours": [self.start_hour, self.end_hour], "workdays": list(self.workdays)}
+
+
+@dataclass
+class Household:
+    id: str
+    home_id: str  # a home id (housing.Home): a house's place id, or "<block>_<unit>" for a flat
+    weekly_rent: float  # 0 while the household owns its home
+    groceries: int = 8  # meals in the fridge
+    member_ids: list[str] = field(default_factory=list)
+    # Housing state, run by housing.py.
+    cooldowns: dict[str, int] = field(default_factory=dict)  # housing fork kind or extra -> tick it may come again
+    arrears: int = 0  # Sundays in a row the household ended in the red without recovering
+    last_funds: float | None = None  # funds at the last Sunday charge
+    grace_until: int = 0  # tick a granted grace ends
+    hardship_rent: int | None = None  # lowered rent while getting back on their feet
+    clean_sundays: int = 0  # Sundays in a row out of the red
+    tax_deferred: bool = False
+    moved_tick: int | None = None  # tick of the last move; None = never moved
+    tight_until: int = 0  # belt-tightening until this tick
+    trouble_seen: int = 0
+    history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "home", "name", "price"}
+
+
+@dataclass
+class Profile:
+    """The character's default play style.
+
+    `traits` drive the Decision Director's default answers; `prompt` is the
+    plain-language version shown on the character page and sent to controllers.
+    Both update as the character's controller makes choices.
+    """
+
+    TRAITS = ("thrift", "family", "social", "diligence", "health", "adventure")
+
+    traits: dict[str, float]
+    prompt: str = ""
+    prompt_edited: bool = False  # the player wrote the prompt by hand
+    learned: list[str] = field(default_factory=list)
+
+    def learn(self, tags: dict[str, float], note: str, rate: float = 0.04) -> None:
+        for trait, value in tags.items():
+            if trait in self.traits:
+                self.traits[trait] = round(max(0.0, min(1.0, self.traits[trait] + rate * value)), 3)
+        self.learned.append(note)
+        del self.learned[:-10]
+
+    def describe(self, agent: Agent) -> str:
+        t = self.traits
+        words = {
+            "thrift": ("careful with money", "spends freely"),
+            "family": ("puts family first", "values independence"),
+            "social": ("loves company", "enjoys time alone"),
+            "diligence": ("never late for work", "takes work lightly"),
+            "health": ("looks after their health", "ignores their health"),
+            "adventure": ("tries new things", "sticks to routine"),
+        }
+        strong = sorted(t, key=lambda k: abs(t[k] - 0.5), reverse=True)[:4]
+        parts = [words[k][0] if t[k] >= 0.5 else words[k][1] for k in strong]
+        role = agent.job.title if agent.job else "retired"
+        return f"{agent.name}, {agent.age}, {role}. " + ", ".join(parts).capitalize() + "."
 
 
 @dataclass
@@ -71,44 +117,82 @@ class Agent:
     name: str
     age: int
     household_id: str
-    location_id: str
-    money: float = 100.0
-    job: Job | None = None
-    owns_car: bool = False
-    # Personality traits in 0..1 shape how the brain weighs options.
-    sociability: float = 0.5
-    diligence: float = 0.5
-    frugality: float = 0.5
-    needs: dict[str, float] = field(
-        default_factory=lambda: {n: 75.0 for n in NEED_NAMES}
-    )
+    money: float
+    job: Job | None
+    owns_car: bool
+    x: int
+    y: int
+    profile: Profile
+    inside: str | None = None  # place id when inside a building
+    luck: float = START_LUCK
+    health: float = 90.0
+    reputation: float = 50.0  # at work or school
+    needs: dict[str, float] = field(default_factory=lambda: {n: 75.0 for n in NEEDS})
     relationships: dict[str, Relationship] = field(default_factory=dict)
-    inbox: list[Message] = field(default_factory=list)
-    # Accepted plan to meet someone: (place_id, other_agent_id, expires_tick).
-    meetup: tuple[str, str, int] | None = None
-    # What the agent is doing right now (set by the simulation).
+    goal: dict | None = None  # {"name", "target", "saved"}
+    savings: float = 0.0  # money put aside on payday with no goal to save for
+    controller: str | None = None  # name of the connected controller, if any
+    # Movement and activity state, run by the simulation.
+    state: str = "idle"  # idle, deciding, travelling, busy
     activity: str = "idle"
     activity_place: str | None = None
     busy_until: int = 0
-    travel_to: str | None = None
-    pending: str | None = None  # activity to start on arrival
+    path: list[tuple[int, int]] = field(default_factory=list)
+    speed: int = 1  # tiles per minute while travelling
+    vehicle: str = "walk"
+    plan: list = field(default_factory=list)  # remaining (activity, place) steps
+    fork_id: str | None = None  # the fork whose choice is being carried out
+    alive: bool = True
+    cooldowns: dict[str, int] = field(default_factory=dict)  # fork kind -> tick it may come up again
+    pending_outcomes: list = field(default_factory=list)
+    worked_today: int = -1  # day number of the last shift started
+    last_payday: int = -1
+    week_earnings: float = 0.0
     memory: list[str] = field(default_factory=list)
+    inbox: list[dict] = field(default_factory=list)
+    forks: list[dict] = field(default_factory=list)  # recent decided forks
+    llm_forks: list[dict] = field(default_factory=list)  # the last 30 decided by a model or timed out
+    trip: dict | None = None  # {"mode": "bus", "line", "board", "alight", "phase", "since"} while on a bus trip
+    riding: str | None = None  # bus id while on board
+    died: dict | None = None  # {"tick", "time", "how"}
 
     def relate(self, other_id: str, kind: RelationKind, affinity: float) -> None:
         self.relationships[other_id] = Relationship(kind, affinity)
 
-    def adjust_need(self, need: str, delta: float) -> None:
+    def adjust(self, need: str, delta: float) -> None:
         self.needs[need] = max(0.0, min(100.0, self.needs[need] + delta))
 
-    def remember(self, line: str, limit: int = 50) -> None:
-        self.memory.append(line)
-        if len(self.memory) > limit:
-            del self.memory[0]
+    def remember(self, stamp: str, text: str) -> None:
+        self.memory.append(f"{stamp}: {text}")
+        del self.memory[:-60]
 
     @property
-    def in_transit(self) -> bool:
-        return self.travel_to is not None
+    def is_adult(self) -> bool:
+        return self.age >= 18
 
     @property
-    def wellbeing(self) -> float:
+    def mood(self) -> float:
         return sum(self.needs.values()) / len(self.needs)
+
+    def possessions(self, household: Household, home_name: str) -> dict:
+        return {
+            "home": {"place": household.home_id, "name": home_name, "tenure": "rented",
+                     "weekly_rent": household.weekly_rent},
+            "car": self.owns_car,
+            "phone": {"condition": "cracked" if self.goal and "phone" in self.goal["name"] else "fine"},
+            "money": round(self.money, 2),
+            "savings": round(self.savings, 2),
+            "savings_goal": self.goal,
+            "groceries_at_home": household.groceries,
+        }
+
+    def attributes(self) -> dict:
+        return {
+            "age": self.age,
+            "health": round(self.health),
+            "mood": round(self.mood),
+            "needs": {k: round(v) for k, v in self.needs.items()},
+            "reputation": round(self.reputation),
+            "job": self.job.to_json() if self.job else None,
+            "traits": dict(self.profile.traits),
+        }
