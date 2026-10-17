@@ -25,6 +25,7 @@ from .ws import ConnectionClosed, WebSocket, server_handshake
 CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
+GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 
 
 class GameServer:
@@ -148,12 +149,16 @@ class GameServer:
                         continue
                     role, name = await self._hello(ws, msg)
                     continue
+                watching = role == "god" and ws is not self.god
                 try:
-                    reply = self._god(msg) if role in ("god", "observer") else self._controller(name, msg)
+                    if watching and msg.get("type") in GOD_ONLY:
+                        reply = {"type": "error", "error": "only God can do that; this view is watching"}
+                    elif role == "god":
+                        reply = self._god(msg)
+                    else:
+                        reply = self._controller(name, msg)
                 except (ValueError, TypeError, KeyError) as exc:
                     reply = {"type": "error", "error": f"bad message: {exc}"}
-                if role == "observer" and msg.get("type") in ("set_luck", "set_speed", "pause", "resume", "set_profile"):
-                    reply = {"type": "error", "error": "only God can do that; this view is watching"}
                 if reply:
                     if "req_id" in msg:
                         reply["req_id"] = msg["req_id"]
