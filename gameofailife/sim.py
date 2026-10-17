@@ -15,7 +15,7 @@ from typing import Callable
 
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
-from .forks import COOLDOWN, OBVIOUS_MARGIN, RAIN_CHANCE, Fork, build_fork, default_scores, luck_odds
+from .forks import COOLDOWN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, Fork, build_fork, default_scores, luck_odds
 from .town import ROAD_COLS, ROAD_ROWS, TownMap, build_cast, build_map
 
 ANSWER_SECONDS = 5.0  # a controller's answer applies if it arrives within this
@@ -144,10 +144,10 @@ class Simulation:
         return len(self.town.path((agent.x, agent.y), self.town.places[place_id].entry))
 
     def _shift_start_tick(self, agent: Agent) -> int | None:
-        """Tick today's shift starts, if the character still has one ahead of them."""
+        """Tick today's shift starts, while the character can still turn up for it (up to WORK_LATE late)."""
         job = agent.job
         if (not job or agent.worked_today == self.clock.day or self.clock.weekday not in job.workdays
-                or self.clock.minute_of_day >= job.start_hour * 60):
+                or self.clock.minute_of_day > job.start_hour * 60 + WORK_LATE):
             return None
         return self.clock.tick - self.clock.minute_of_day + job.start_hour * 60
 
@@ -470,12 +470,14 @@ class Simulation:
         agent.plan = []
         agent.path = []
         agent.inside = None
-        fork = self.forks.get(agent.fork_id or "")
-        if fork and fork.status == "asked":
-            fork.status = "decided"  # no longer asked: nothing is played for the dead
+        self._withdraw_fork(agent)  # nothing is played for the dead
         for inv in self.invites.values():
             if inv["from"] == agent.id and inv["status"] == "pending":
                 inv["status"] = "expired"
+                guest = self.agents[inv["to"]]
+                asked = self.forks.get(guest.fork_id or "")
+                if asked and asked.kind == "invite" and asked.options[0].extra.get("invite") == inv["id"]:
+                    self._withdraw_fork(guest)  # the guest can't accept a dead host's invite
         self.event(f"{agent.name} {how}, aged {agent.age}.", agent, kind="death")
         for other_id, rel in agent.relationships.items():
             other = self.agents.get(other_id)
@@ -484,6 +486,15 @@ class Simulation:
                 other.adjust("social", -20)
                 other.remember(self.clock.stamp(), f"Lost {agent.name}.")
         self.household(agent).member_ids = [m for m in self.household(agent).member_ids if m != agent.id]
+
+    def _withdraw_fork(self, agent: Agent) -> None:
+        """Stop asking a character's open fork: nothing is played for it and answers are refused."""
+        fork = self.forks.get(agent.fork_id or "")
+        if fork and fork.status == "asked":
+            fork.status = "withdrawn"
+            agent.fork_id = None
+            if agent.state == "deciding":
+                agent.state = agent.activity = "idle"  # the Director finds their next decision
 
     # --- the Decision Director -------------------------------------------------
 
@@ -538,6 +549,8 @@ class Simulation:
             return {"accepted": False, "error": "not your character"}
         if not agent.alive:
             return {"accepted": False, "error": "character is dead"}
+        if fork.status == "withdrawn":
+            return {"accepted": False, "error": "fork withdrawn"}
         if not isinstance(choice, int) or isinstance(choice, bool) or not 0 <= choice < len(fork.options):
             return {"accepted": False, "error": "choice must be 0 to 3"}
         elapsed = self.now() - self.asked_at.get(fork_id, self.now())
@@ -609,7 +622,8 @@ class Simulation:
         self.fork_log.append(summary)
         if agent.plan:
             # The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave
-            # for work: _begin_activity cuts it short, and _next drops any later steps.
+            # for work: _begin_activity cuts it short (even once the shift has begun), and _next drops any
+            # later steps.
             self._start_step(agent, *agent.plan.pop(0))
         else:
             self._next(agent)

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import re
 import unittest
 from unittest import mock
 
 from gameofailife import sim as sim_module
+from gameofailife.__main__ import run_headless
 from gameofailife.clock import MINUTES_PER_DAY
-from gameofailife.forks import Fork, Option, Outcome, build_fork, groceries_fork, hunger_fork, invite_fork, payday_fork, work_fork
+from gameofailife.forks import (Fork, Option, Outcome, build_fork, free_time_fork, groceries_fork, hunger_fork, invite_fork,
+                                payday_fork, work_fork)
 from gameofailife.server import GameServer
 from gameofailife.sim import ANSWER_SECONDS, GROCERY_COST, SHIFT_MARGIN, Simulation
 
@@ -140,6 +145,39 @@ class TestChoiceHappensAtLeaveTime(Case):
         self.assertEqual((ari.activity, ari.state), ("rest", "busy"))
         self.assertEqual(ari.busy_until - sim.clock.tick, 240)  # a full rest, not cut short
 
+    def test_park_walk_at_leave_time_still_gets_to_work(self):
+        ari = self.sim.agents["ari"]
+        self.at(0, 9)
+        self.sim.clock.tick = self.leave_tick("ari")  # Monday 09:35: the office is 15 minutes away, the park 29
+        ari.needs["fun"] = 20
+        fork = free_time_fork(self.sim, ari)
+        self.assertEqual(fork.options[0].label, "Walk in Riverside Park")
+        self.sim._decide(ari, fork, 0, "timeout", "No answer in time; played the default.")
+        self.step_until(lambda: ari.state == "busy" and ari.activity == "walk_park")
+        self.assertGreater(self.sim.clock.minute_of_day, 10 * 60)  # he reaches the park after his shift began
+        self.assertEqual(ari.busy_until, self.sim.clock.tick + 1)  # still cut short
+        self.step_until(lambda: ari.state == "busy" and ari.activity == "work", limit=60)
+        self.assertEqual(ari.worked_today, self.sim.clock.day)
+        self.assertEqual(ari.forks[-1]["kind"], "work")
+        money = ari.money
+        self.step_until(lambda: ari.activity != "work", limit=8 * 60)
+        self.assertGreater(ari.money, money)  # paid for the shift he nearly missed
+
+    def test_leave_cap_holds_until_the_work_fork_closes(self):
+        ari, tom = self.sim.agents["ari"], self.sim.agents["tom"]
+        self.at(0, 10, 20)  # twenty minutes into Ari's shift and he isn't there yet
+        self.assertTrue(self.sim._must_leave_for_work(ari))
+        self.sim.invite(tom, "ari", "cafe")
+        self.assertIsNone(invite_fork(self.sim, ari))
+        self.assertEqual(build_fork(self.sim, ari).kind, "work")
+        self.sim._start_step(ari, "relax_home", None)
+        self.assertEqual(ari.busy_until, self.sim.clock.tick + 1)
+        self.at(0, 11, 1)  # past the work fork's last call: the shift is missed and the day is his own
+        self.assertIsNone(work_fork(self.sim, ari))
+        self.assertFalse(self.sim._must_leave_for_work(ari))
+        self.sim._start_step(ari, "relax_home", None)
+        self.assertEqual(ari.busy_until, self.sim.clock.tick + 60)
+
 
 class TestAskPartnerToShop(Case):
     """Finding 2: the groceries someone else buys for you are paid for."""
@@ -264,6 +302,41 @@ class TestDeadCharactersDoNotAct(Case):
         self.sim._check_timeouts()
         self.assertIsNone(fork.decided_by)  # nothing is played for the dead
         self.assertFalse(any(f["id"] == fork.id for f in self.sim.fork_log))
+
+    def ask_ari_about_toms_invite(self) -> tuple[Fork, dict]:
+        tom, ari = self.sim.agents["tom"], self.sim.agents["ari"]
+        self.at(5, 11)
+        inv = self.sim.invite(tom, "ari", "cafe")
+        ari.controller = "bot"
+        fork = invite_fork(self.sim, ari)
+        with always_ask():
+            self.sim.director(ari, fork)
+        self.assertEqual(fork.status, "asked")
+        self.sim._die(tom, "collapsed and could not be saved")
+        return fork, inv
+
+    def test_guest_cannot_accept_once_the_host_dies(self):
+        fork, inv = self.ask_ari_about_toms_invite()
+        ari = self.sim.agents["ari"]
+        self.clock.advance(2)
+        self.assertEqual(self.sim.answer(fork.id, 0, controller="bot"), {"accepted": False, "error": "fork withdrawn"})
+        self.assertEqual(inv["status"], "expired")
+        self.assertEqual(ari.profile.learned, [])
+        self.assertNotEqual(ari.activity, "hang_out")
+        self.assertFalse(any("accepts" in e["text"] for e in self.sim.events))
+        self.assertFalse(any(m.get("type") == "invite_answer" for _, m in self.sim.outbox))
+        self.sim.step()
+        self.assertNotEqual(ari.fork_id, fork.id)  # free for the next decision
+
+    def test_no_default_played_for_a_dead_hosts_invite(self):
+        fork, inv = self.ask_ari_about_toms_invite()
+        ari = self.sim.agents["ari"]
+        self.clock.advance(ANSWER_SECONDS + 1)
+        self.sim.step()
+        self.assertIsNone(fork.decided_by)
+        self.assertEqual(inv["status"], "expired")
+        self.assertFalse(any(f["id"] == fork.id for f in ari.forks))
+        self.assertFalse(any("Tom's invite" in e["text"] for e in self.sim.events))
 
     def test_late_answer_refused_after_death(self):
         fork = self.ask()
@@ -403,6 +476,29 @@ class TestForkSentAgainWithOutcomes(Case):
         logged = [f for f in self.sim.drain()[1] if f["id"] == fork.id]
         self.assertEqual(len(logged), 1)
         self.assertEqual(logged[0]["happened"], ["First thing", "Second thing"])
+
+
+class TestHeadlessCountsEachForkOnce(Case):
+    """The headless summary counts a fork once, though it is sent again when its outcomes land."""
+
+    def test_resent_forks_not_counted_twice(self):
+        drained = []
+        drain = self.sim.drain
+
+        def recording_drain():
+            out = drain()
+            drained.extend(out[1])
+            return out
+
+        self.sim.drain = recording_drain
+        with contextlib.redirect_stdout(io.StringIO()) as printed:
+            run_headless(self.sim, 1)
+        ids = {f["id"] for f in drained}
+        self.assertGreater(len(drained), len(ids))  # some forks were sent twice
+        forks = re.search(r"^Forks: (\d+) ", printed.getvalue(), re.M)
+        deciders = re.search(r"^Decided by: (.*)$", printed.getvalue(), re.M).group(1)
+        self.assertEqual(int(forks.group(1)), len(ids))
+        self.assertEqual(sum(int(n) for n in re.findall(r"\d+", deciders)), len(ids))
 
 
 class TestOldAgeOdds(Case):

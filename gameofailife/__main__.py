@@ -35,6 +35,7 @@ def main() -> None:
 def run_headless(sim: Simulation, days: float) -> None:
     kinds: collections.Counter = collections.Counter()
     deciders: collections.Counter = collections.Counter()
+    seen: set[str] = set()
     for _ in range(int(days * 24 * 60)):
         sim.step()
         events, forks, _ = sim.drain()
@@ -42,6 +43,9 @@ def run_headless(sim: Simulation, days: float) -> None:
             if ev["kind"] not in ("outcome",):
                 print(f"{ev['time']}  {ev['text']}")
         for f in forks:
+            if f["id"] in seen:
+                continue  # sent again once its outcomes landed; count each decision once
+            seen.add(f["id"])
             kinds[f["kind"]] += 1
             deciders[f["decided_by"]] += 1
     print()

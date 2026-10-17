@@ -20,6 +20,7 @@ OBVIOUS_MARGIN = 0.45  # default-score lead at which the Director decides on its
 LUCK_STRENGTH = 0.6  # Luck 100 multiplies good odds by 1.6 and bad odds by 0.4
 KID_CURFEW = 19  # hour after which characters under 18 stay home for the night
 WORK_LEAD = 45  # minutes before a shift the work fork opens (more if the walk is long)
+WORK_LATE = 60  # minutes after a shift starts that the work fork still opens, for a late arrival
 
 _ids = itertools.count(1)
 
@@ -61,7 +62,7 @@ class Fork:
     options: list[Option]
     tick: int
     id: str = field(default_factory=lambda: f"f{next(_ids)}")
-    status: str = "open"  # open, asked, decided
+    status: str = "open"  # open, asked, decided, withdrawn (no longer asked, nothing played)
     choice: int | None = None
     decided_by: str | None = None  # habit, default, model, timeout
     reason: str = ""
@@ -161,7 +162,7 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if not job or agent.worked_today == sim.clock.day:
         return None
     minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day
-    if not job.workdays.count(sim.clock.weekday) or not -60 <= minutes_to_start <= 180:
+    if not job.workdays.count(sim.clock.weekday) or not -WORK_LATE <= minutes_to_start <= 180:
         return None
     if minutes_to_start > max(WORK_LEAD, sim.walk_minutes(agent, job.place_id) + 15):
         return None
