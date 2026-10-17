@@ -156,6 +156,13 @@ class LayoutTest(unittest.TestCase):
     def test_house_addresses(self):
         self.assertEqual(street_of(10, 24), ("Main Street", 20))
         self.assertEqual(street_of(6, 26), ("Main Street", 13))
+        # A north-south street: y * 2 on its east side, y * 2 + 1 on its west side.
+        self.assertEqual(street_of(17, 20), ("Oak Street", 40))
+        self.assertEqual(street_of(15, 20), ("Oak Street", 41))
+        self.assertEqual(self.town.places["school"].entry, (28, 21))
+        self.assertEqual(street_of(28, 21), ("Market Street", 43))
+        self.assertEqual(street_of(30, 21), ("Market Street", 42))
+        self.assertEqual(street_of(10, 10), (None, None))
         self.assertEqual(self.town.places["main_20"].name, "20 Main Street")
         self.assertEqual(self.town.places["park_78"].name, "78 Park Avenue")
         self.assertEqual(self.town.places["river_28"].entry, (14, 35))

@@ -125,6 +125,18 @@ class CastTest(unittest.TestCase):
                     a = self.agents[m]
                     self.assertEqual((a.inside, a.x, a.y), (place.id, *place.entry))
 
+    def test_home_ids_reach_a_place_only_through_the_homes(self):
+        # A flat's home id is not a place id, so sim.home_of must be homes[hh.home_id].place (PLAN 3.10).
+        flats = [hh for hh in self.households.values() if self.homes[hh.home_id].unit]
+        self.assertIn("bendavid", {hh.id for hh in flats})
+        for hh in self.households.values():
+            with self.subTest(household=hh.id):
+                home = self.homes[hh.home_id]
+                self.assertEqual(hh.home_id in self.town.places, home.unit is None)
+                self.assertEqual(self.town.places[home.place].kind, "home")
+        self.assertNotIn(self.households["bendavid"].home_id, self.town.places)
+        self.assertEqual(self.homes[self.households["bendavid"].home_id].place, "birch_court")
+
     def test_named_savings(self):
         self.assertEqual(SAVINGS, NAMED_SAVINGS)
         for aid, _, age, *_ in NAMED:

@@ -260,9 +260,9 @@ def street_of(ex: int, ey: int) -> tuple[str, int] | tuple[None, None]:
     for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
         rx, ry = ex + dx, ey + dy
         if dy and ry in rows:
-            return rows[ry], ex * 2 + (1 if dy < 0 else 0)
+            return rows[ry], ex * 2 + (1 if dy < 0 else 0)  # road to the north: the entry is on the south side
         if dx and rx in cols:
-            return cols[rx], ey * 2 + (1 if dx < 0 else 0)
+            return cols[rx], ey * 2 + (1 if dx > 0 else 0)  # road to the east: the entry is on the west side
     return None, None
 
 
