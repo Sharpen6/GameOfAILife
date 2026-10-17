@@ -229,7 +229,13 @@ class WalkFieldTest(unittest.TestCase):
             prev = step
         self.assertEqual(self.town.path(goal, goal), [])
         self.assertEqual(self.town.walk_minutes(goal, "hospital"), 0)
-        self.assertEqual(self.town.drive_path(start, "hospital"), path)
+        drive = self.town.drive_path(start, "hospital")  # roads only, apart from the first and last step
+        self.assertEqual(drive[-1], goal)
+        prev = start
+        for i, step in enumerate(drive):
+            self.assertEqual(abs(step[0] - prev[0]) + abs(step[1] - prev[1]), 1)
+            self.assertEqual(self.town.tiles[step[1]][step[0]] == ROAD, i < len(drive) - 1)
+            prev = step
 
     def test_field_shape(self):
         dist, off = self.town.walk_field(self.town.places["cafe"].entry)
