@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import random
 import subprocess
 import sys
 import time
@@ -33,9 +34,10 @@ NAMED_SAVINGS = {"dana": 15000, "yossi": 5000, "miriam": 2000, "tom": 0, "ari": 
 
 
 def make_sim(seed: int = SEED) -> SimpleNamespace:
-    """Just enough of a Simulation for the housing helpers: the town, the homes, the cast and a clock."""
+    """Just enough of a Simulation for the housing helpers: the town, the homes, the cast, a clock and dice."""
     town = build_map(seed)
-    sim = SimpleNamespace(town=town, clock=Clock(), logged=[])
+    sim = SimpleNamespace(town=town, clock=Clock(), logged=[], rng=random.Random(seed), weather="clear",
+                          _log_roll=lambda *args, **kw: None)
     sim.homes = housing.build_homes(town)
     sim.lots = housing.build_lots(town, sim.homes)
     sim.agents, sim.households = build_cast(town, sim.homes, seed)
@@ -417,35 +419,37 @@ class HousingDataTest(unittest.TestCase):
 
 
 class HousingHooksTest(unittest.TestCase):
-    """Group B stubs: today's behaviour behind the hooks the engine calls."""
+    """The hooks the engine calls, on a quiet first morning (P2 fills them; tests/test_housing.py pins the rest)."""
 
     def setUp(self):
         self.sim = make_sim()
 
-    def test_weekly_charges_owners_pay_no_rent(self):
+    def test_weekly_charges_owners_pay_tax_not_rent(self):
         sim = self.sim
         before = {a.id: a.money for a in sim.agents.values()}
         housing.weekly_charges(sim)
         a = sim.agents
         self.assertEqual(before["dana"] - a["dana"].money, 420 / 2 + 80 + 40)  # renters split the rent
         self.assertEqual(before["yossi"] - a["yossi"].money, 420 / 2 + 80)
-        self.assertEqual(before["tom"] - a["tom"].money, 80)  # the Levis own 28 Main Street
+        tax = housing.property_tax(sim.homes["main_28"])  # the Levis own 28 Main Street
+        self.assertEqual(before["tom"] - a["tom"].money, tax / 2 + 80)
         self.assertEqual(before["noa"], a["noa"].money)
         paid = [e for e in sim.logged if e["tag"] == "bills_paid"]
         self.assertEqual(len(paid), 27)
         self.assertTrue(all(e["place"] in sim.town.places for e in paid))
-        self.assertIn("Miriam and Tom paid $160 in bills.", [e["text"] for e in paid])
-        self.assertIn("Dana and Yossi paid $420 rent and $200 in bills.", [e["text"] for e in paid])
+        self.assertIn(f"The Levis paid ${tax} property tax and $160 in bills.", [e["text"] for e in paid])
+        self.assertIn("The Cohens paid $420 rent and $200 in bills.", [e["text"] for e in paid])
         red = [e for e in sim.logged if e["tag"] == "in_the_red"]
         self.assertTrue(all(sim.agents[e["agent"]].money < 0 for e in red))
 
-    def test_stubs(self):
+    def test_quiet_hooks(self):
         sim, dana = self.sim, self.sim.agents["dana"]
         self.assertIsNone(housing.nightly(sim))
         self.assertIsNone(housing.tick(sim))
         self.assertIsNone(housing.on_death(sim, dana))
         self.assertIsNone(housing.apply_extra(sim, dana, None, None))
-        self.assertFalse(housing.apply_effect(sim, dana, "home_condition", 5))
+        self.assertTrue(housing.apply_effect(sim, dana, "home_condition", 5))
+        self.assertFalse(housing.apply_effect(sim, dana, "not_housing", 5))
         self.assertEqual(housing.activity_gain_scale(sim, dana), 1.0)
         thrift = dana.profile.traits["thrift"]
         self.assertEqual(housing.afford_score(sim, dana, SimpleNamespace(cost=1000)), -2.0)

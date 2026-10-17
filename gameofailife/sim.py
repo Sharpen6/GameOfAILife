@@ -377,6 +377,8 @@ class Simulation:
             return
         if agent.fork_id:
             self._finish_fork(agent)
+            if agent.state != "idle" or agent.plan:
+                return  # an outcome set the character off (a haggle's deal: moving house)
         if agent.health < 25 and agent.inside != "hospital":
             self.event(f"{agent.name} feels very unwell and goes to City Hospital.", agent, tag="hospital")
             agent.plan = [("hospital", "hospital")]
