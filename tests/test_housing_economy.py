@@ -20,6 +20,7 @@ DAYS = int(os.environ.get("SOAK_DAYS", "360"))
 SEEDS = (1, 2, 3)
 FUNDS_FLOOR = -2500
 MOVES = (10, 150)
+LATE_PURCHASE_DAY = 150  # the market keeps moving: some household still buys a home after this day
 
 
 def soak(seed: int, days: int) -> dict:
@@ -28,8 +29,9 @@ def soak(seed: int, days: int) -> dict:
 
     sim = Simulation(seed=seed, now=lambda: 0.0)
     out = {"seed": seed, "days": days, "forks": collections.Counter(), "bad_forks": [], "moves": 0, "purchases": 0,
-           "first_purchase_day": None, "forced": 0, "hardship": 0, "emergencies": 0, "stuff": collections.Counter(),
-           "max_arrears": 0, "min_monday_funds": None, "house_days": 0, "shabby_days": 0, "in_the_red": 0}
+           "first_purchase_day": None, "last_purchase_day": None, "forced": 0, "hardship": 0, "emergencies": 0,
+           "stuff": collections.Counter(), "max_arrears": 0, "min_monday_funds": None, "house_days": 0,
+           "shabby_days": 0, "in_the_red": 0}
     director = sim.director
 
     def watch(agent, fork):
@@ -50,6 +52,7 @@ def soak(seed: int, days: int) -> dict:
                 out["forced"] += 1
             if how == "buy":
                 out["purchases"] += 1
+                out["last_purchase_day"] = s.clock.day
                 if out["first_purchase_day"] is None:
                     out["first_purchase_day"] = s.clock.day
         return moved
@@ -92,10 +95,10 @@ def soak(seed: int, days: int) -> dict:
 def report(r: dict, seconds: float) -> str:
     share = r["shabby_days"] / r["house_days"] if r["house_days"] else 0.0
     return (f"seed {r['seed']}, {r['days']} days ({seconds:.0f}s): moves {r['moves']}, purchases {r['purchases']} "
-            f"(first on day {r['first_purchase_day']}), forced moves {r['forced']}, hardship episodes "
-            f"{r['hardship']}, emergencies {r['emergencies']}, owner-occupied house-days at stage 2+ "
-            f"{share:.1%}, in the red {r['in_the_red']}, max arrears {r['max_arrears']}, lowest Monday funds "
-            f"${r['min_monday_funds']:,.0f}, belongings sales {sum(r['stuff'].values())}, "
+            f"(first on day {r['first_purchase_day']}, last on day {r['last_purchase_day']}), forced moves "
+            f"{r['forced']}, hardship episodes {r['hardship']}, emergencies {r['emergencies']}, owner-occupied "
+            f"house-days at stage 2+ {share:.1%}, in the red {r['in_the_red']}, max arrears {r['max_arrears']}, "
+            f"lowest Monday funds ${r['min_monday_funds']:,.0f}, belongings sales {sum(r['stuff'].values())}, "
             f"housing forks {dict((k, v) for k, v in r['forks'].items() if k in ('house_hunt', 'upkeep', 'repair', 'housing_trouble'))}")
 
 
@@ -116,6 +119,8 @@ class HousingEconomyTest(unittest.TestCase):
                 self.assertTrue(all(n <= limit for n in r["stuff"].values()), r["stuff"])
                 self.assertIsNotNone(r["first_purchase_day"])
                 self.assertLess(r["first_purchase_day"], 30)
+                if DAYS > LATE_PURCHASE_DAY + 30:  # homes keep changing hands: the market never freezes for good
+                    self.assertGreater(r["last_purchase_day"], LATE_PURCHASE_DAY)
                 self.assertGreaterEqual(r["moves"], MOVES[0] * DAYS // 360)  # the gate's 10 a year, pro rata
                 self.assertLessEqual(r["moves"], MOVES[1])
 

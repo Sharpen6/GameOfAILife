@@ -45,6 +45,7 @@ LANDLORD_FLOOR = {"flat": 45, "house": 60}  # the landlord repairs a let buildin
 LANDLORD_RESTORE = 85  # ... back up to this
 VACANT_DECAY = 0.7  # per day, any tier, nobody living there
 MARKET_FLOOR = 20  # a home held for sale never drops below "neglected"
+NEWS_SETTLE_DAYS = 1  # a home's poor stage is not news until its household has lived there this long
 WINTER_DECAY = 1.25
 CROWD_DECAY = 0.10  # +10% decay per resident beyond two
 EMERGENCY_DECAY = 4.0  # extra decay per day while an emergency is unfixed
@@ -55,6 +56,9 @@ CALLOUT = 40  # added to every builders' quote
 RENO_FACTOR = 2.0  # per-point price multiplier when condition < 50 (a full renovation)
 RESERVE_WEEKS = 6
 MOVE_GAP_DAYS = 28
+DOWNSIZE_SHARE = 0.8  # an owner downsizes to a home worth at most this share of today's ...
+DOWNSIZE_CONDITION = 50  # ... in at least this condition
+SPARE_BEDROOMS = 2  # an owner household with this many more bedrooms than residents has outgrown its home
 CAR_SALE = 2500
 EMERGENCY_DAYS = 3
 LIVING_PER_PERSON = 75  # weekly living estimate (affordability, hardship)
@@ -531,6 +535,24 @@ def hunt_candidates(sim, hh: Household) -> list[Home]:
     return [h for h in vacancies(sim) if fits(sim, hh, h) and is_upgrade(sim, hh, h.id) and affordable(sim, hh, h.id)]
 
 
+def outgrown(sim, hh: Household) -> bool:
+    """An owner household that has outgrown its home: every adult is retired, or it has at least SPARE_BEDROOMS
+    more bedrooms than residents. `house_hunt` offers it a smaller home when nothing better is on the market."""
+    home = sim.homes[hh.home_id]
+    people = adults(sim, hh)
+    if home.owner != hh.id or not people:
+        return False
+    return all(retired(a) for a in people) or residents(sim, hh) <= home.bedrooms - SPARE_BEDROOMS
+
+
+def downsize_candidates(sim, hh: Household) -> list[Home]:
+    """The smaller homes an owner could sell up and buy: for sale, vacant, fitting, in at least DOWNSIZE_CONDITION,
+    worth at most DOWNSIZE_SHARE of the home they own now, and affordable (hunt_candidates' rules)."""
+    worth = value(sim, hh.home_id)
+    return [h for h in vacancies(sim, "for_sale") if fits(sim, hh, h) and condition_of(sim, h.id) >= DOWNSIZE_CONDITION
+            and value(sim, h.id) <= DOWNSIZE_SHARE * worth and affordable(sim, hh, h.id)]
+
+
 def cheapest_rental(sim, hh: Household, below: float | None = None, per_bedroom: int = 2) -> Home | None:
     """The cheapest fitting home to let, with rent under `below` when given (ties: better condition, then id)."""
     pool = [h for h in vacancies(sim, "for_rent") if fits(sim, hh, h, per_bedroom) and (below is None or h.rent < below)]
@@ -799,6 +821,8 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
     hh.home_id = new.id
     hh.moved_tick = now
     hh.trouble_seen = 0
+    hh.cooldowns.pop("upkeep", None)  # the upkeep and repair cooldowns were the old home's
+    hh.cooldowns.pop("repair", None)
     hh.hardship_rent = None
     hh.tax_deferred = False
     sim.lots[new.place].moving_until = now + MOVE_VAN_MINUTES
@@ -993,7 +1017,9 @@ def _stage_news(sim, lot: Lot) -> None:
     home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
     poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
     when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
-    silent."""
+    silent. So is a home whose household moved in less than NEWS_SETTLE_DAYS ago: a poor stage it reaches then
+    is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
+    first evening never makes the news as falling apart."""
     st = stage_of(lot.condition)
     homes = lot_homes(sim, lot.place)
     home = homes[0] if len(homes) == 1 and owner_occupied(homes[0]) else None
@@ -1006,11 +1032,18 @@ def _stage_news(sim, lot: Lot) -> None:
             lot.worst = 0
         lot.reported = st
     elif st > lot.reported:
+        if home and _just_moved_in(sim, sim.households[home.household]):
+            return  # not news yet
         if home and st in STAGE_NEWS:
             tag, text = STAGE_NEWS[st]
             _event(sim, text.format(home=home.name), tag, lot.place,
                    agents=[a.id for a in _members(sim, sim.households[home.household])])
         lot.reported = st
+
+
+def _just_moved_in(sim, hh: Household) -> bool:
+    """The household moved into its home less than NEWS_SETTLE_DAYS ago."""
+    return hh.moved_tick is not None and sim.clock.tick - hh.moved_tick < NEWS_SETTLE_DAYS * DAY
 
 
 def _change_condition(sim, lot: Lot, delta: float) -> None:
