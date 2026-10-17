@@ -16,6 +16,7 @@ const TRAITS = {
   adventure: ["tries new things", "sticks to routine"],
 };
 const CONSENT_KEY = "goal.character.god-ok";
+const FROM_CITY_KEY = "goal.character.from-city"; // left by a plain click on the city view's link
 const REFRESH_MS = 2000;
 
 const $ = id => document.getElementById(id);
@@ -25,6 +26,8 @@ let agents = [];         // roster from state frames
 let current = null;      // last agent payload from the server
 let selectedId = null;
 let dirty = false;       // the player has unsaved edits in the form
+let formPrompt = "";     // the prompt text the form was last filled with
+const touched = new Set(); // traits the player moved since the form was filled
 let reqSeq = 0;
 let pendingSave = null;  // req_id of the save we are waiting on
 let lastAsk = 0;
@@ -95,10 +98,11 @@ function onMessage(msg) {
     $("gate").hidden = true;
     $("page").hidden = false;
     banner("This page is God of the city now. Other God tabs are only watching until you give God back and reload them.", "info");
+    setClock(msg.state);
     roster(msg.state.agents);
     ask();
   } else if (msg.type === "state") {
-    $("clock").textContent = `${msg.state.time} · ${msg.state.season}`;
+    setClock(msg.state);
     roster(msg.state.agents);
     if (performance.now() - lastAsk > REFRESH_MS) ask();
   } else if (msg.type === "agent") {
@@ -106,7 +110,7 @@ function onMessage(msg) {
     if (msg.agent.id !== selectedId) return;
     if (saved) { pendingSave = null; dirty = false; }
     current = msg.agent;
-    render(saved ? "all" : dirty ? "keep-form" : "all");
+    render(saved ? "all" : dirty ? "keep-form" : "live");
     if (saved) {
       status(`Saved. ${current.name} will play this way from now on${current.profile.edited ? ", using your words" : ""}.`, "ok");
       for (const el of document.querySelectorAll(".trait.changed")) el.classList.remove("changed");
@@ -119,6 +123,8 @@ function onMessage(msg) {
     if (pendingSave && msg.req_id === pendingSave) { pendingSave = null; status(`Not saved: ${msg.error}`, "err"); }
   }
 }
+
+function setClock(s) { $("clock").textContent = `${s.time} · ${s.season}`; }
 
 function updateRole() {
   const label = role === "god" ? "God (this tab)" : role === "observer" ? "Watching" : released ? "Not God" : "Not connected";
@@ -202,7 +208,7 @@ function render(mode) {
       <span class="small">${r.affinity > 0 ? "+" : ""}${r.affinity}</span></li>`;
   }).join("") || '<li class="small">Nobody yet.</li>';
 
-  if (mode !== "keep-form") renderForm(a);
+  if (mode !== "keep-form") renderForm(a, mode === "live");
   $("promptnote").textContent = a.profile.edited
     ? "Written by you. The sliders still learn from choices, but these words stay until you change them."
     : "Written from the sliders. It rewrites itself as the character's choices teach the profile, until you edit it.";
@@ -213,9 +219,9 @@ function render(mode) {
 
   const forks = (a.forks || []).slice().reverse();
   $("forks").innerHTML = forks.map(f => {
-    const by = f.decided_by === "default" ? '<span class="tag habit">profile</span>'
-      : f.decided_by === "timeout" ? '<span class="tag timeout">timed out</span>'
-      : `<span class="tag model">${f.decided_by === "model" ? "controller" : esc(f.decided_by)}</span>`;
+    // The same badge classes as the city view, with friendlier words.
+    const label = { default: "profile", timeout: "timed out", model: "controller" }[f.decided_by] || f.decided_by;
+    const by = `<span class="tag ${esc(f.decided_by)}">${esc(label)}</span>`;
     const opts = (f.options || []).map((o, i) => `<li class="${i === f.choice ? "chosen" : ""}">${i === f.choice ? "▶ " : ""}${esc(o)}</li>`).join("");
     return `<li><span class="time">${esc(f.time)} ${by}</span><span class="q">${esc(f.question)}</span>
       <ul class="opts">${opts}</ul>${f.reason ? `<span class="small">${esc(f.reason)}</span>` : ""}
@@ -223,24 +229,37 @@ function render(mode) {
   }).join("") || '<li class="small">No decisions yet.</li>';
 }
 
-function renderForm(a) {
-  $("prompt").value = a.profile.prompt;
-  $("traits").innerHTML = Object.keys(TRAITS).map(t => {
-    const v = a.profile.traits[t] ?? 0.5;
-    const [hi, lo] = TRAITS[t];
-    return `<div class="trait" data-wrap="${t}">
-      <div class="top"><span class="tname">${t}</span><span class="now" data-now="${t}">${lean(t, v)} · ${v.toFixed(2)}</span></div>
-      <input type="range" min="0" max="1" step="0.01" value="${v}" data-trait="${t}" aria-label="${t}: 0 ${lo}, 1 ${hi}">
-      <div class="ends"><span>◀ ${lo}</span><span>${hi} ▶</span></div>
-    </div>`;
-  }).join("");
+// The sliders are built once and then updated in place: replacing them on every refresh would cancel
+// a drag in progress and drop keyboard focus. A live refresh also leaves the focused field alone.
+function renderForm(a, live) {
+  const skip = live ? document.activeElement : null;
+  if (skip !== $("prompt")) { $("prompt").value = a.profile.prompt; formPrompt = a.profile.prompt; }
+  touched.clear();
+  if (!$("traits").children.length) {
+    $("traits").innerHTML = Object.keys(TRAITS).map(t => {
+      const [hi, lo] = TRAITS[t];
+      return `<div class="trait" data-wrap="${t}">
+        <div class="top"><span class="tname">${t}</span><span class="now" data-now="${t}"></span></div>
+        <input type="range" min="0" max="1" step="0.01" data-trait="${t}" aria-label="${t}: 0 ${lo}, 1 ${hi}">
+        <div class="ends"><span>◀ ${lo}</span><span>${hi} ▶</span></div>
+      </div>`;
+    }).join("");
+    for (const r of document.querySelectorAll("[data-trait]")) {
+      r.oninput = () => {
+        const t = r.dataset.trait, v = Number(r.value);
+        touched.add(t);
+        document.querySelector(`[data-now=${t}]`).textContent = `${lean(t, v)} · ${v.toFixed(2)}`;
+        document.querySelector(`[data-wrap=${t}]`).classList.toggle("changed", Math.abs(v - (current.profile.traits[t] ?? 0.5)) > 0.001);
+        edited();
+      };
+    }
+  }
   for (const r of document.querySelectorAll("[data-trait]")) {
-    r.oninput = () => {
-      const t = r.dataset.trait, v = Number(r.value);
-      document.querySelector(`[data-now=${t}]`).textContent = `${lean(t, v)} · ${v.toFixed(2)}`;
-      document.querySelector(`[data-wrap=${t}]`).classList.toggle("changed", Math.abs(v - (current.profile.traits[t] ?? 0.5)) > 0.001);
-      edited();
-    };
+    const t = r.dataset.trait, v = a.profile.traits[t] ?? 0.5;
+    document.querySelector(`[data-wrap=${t}]`).classList.remove("changed");
+    if (r === skip) continue;
+    r.value = v;
+    document.querySelector(`[data-now=${t}]`).textContent = `${lean(t, v)} · ${v.toFixed(2)}`;
   }
 }
 
@@ -271,11 +290,12 @@ function save() {
   if (!current) return;
   if (role !== "god") { status("Not saved: this page is only watching. Take God back first.", "err"); return; }
   const traits = {};
-  for (const r of document.querySelectorAll("[data-trait]")) traits[r.dataset.trait] = Number(r.value);
+  for (const r of document.querySelectorAll("[data-trait]")) if (touched.has(r.dataset.trait)) traits[r.dataset.trait] = Number(r.value);
   const text = $("prompt").value.trim();
   if (!text && current.profile.prompt) { status("The prompt can't be empty; write something or press Undo edits.", "err"); return; }
-  // Send the prompt only when the player changed it, so an untouched prompt keeps learning.
-  const prompt = text !== current.profile.prompt.trim() ? text : null;
+  // Send only what the player changed since the form was filled, so an untouched prompt keeps
+  // learning and untouched sliders keep what the profile learned meanwhile.
+  const prompt = text !== formPrompt.trim() ? text : null;
   pendingSave = send({ type: "set_profile", agent_id: current.id, prompt, traits });
   status(pendingSave ? "Saving…" : "Not saved: not connected.", pendingSave ? "" : "err");
 }
@@ -299,7 +319,10 @@ $("takeover").onclick = () => {
 };
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-// Coming from the city view in this same tab, that view has already let go of God.
-const fromCity = new URLSearchParams(location.search).get("from") === "city";
+// A plain click on the city view's link opens this page in that same tab, which lets go of God as it
+// unloads, so there is nothing to ask. The click leaves a one-shot note; a new tab, a reload or a
+// bookmark finds none and asks first.
+const note = storage(s => { const t = s.getItem(FROM_CITY_KEY); s.removeItem(FROM_CITY_KEY); return t; });
+const fromCity = note !== null && Date.now() - Number(note) < 10000;
 if (fromCity || storage(s => s.getItem(CONSENT_KEY)) === "1") connect();
 else { $("gate").hidden = false; $("role").textContent = "Not God yet"; }
