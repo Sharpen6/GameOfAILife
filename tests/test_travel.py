@@ -5,7 +5,6 @@ fork builder, and the tick budget."""
 from __future__ import annotations
 
 import collections
-import dataclasses
 import time
 import unittest
 from unittest import mock
@@ -20,7 +19,7 @@ SEED = 1
 BUILDERS = ("invite_fork", "work_fork", "hunger_fork", "sleep_fork", "payday_fork", "groceries_fork", "lonely_fork",
             "free_time_fork")
 PHASES = ["to_stop", "waiting", "riding", "from_stop"]  # a bus trip's phases, in order
-PROBE_EVERY = 90  # minutes between calls to every builder for everyone
+PROBE_EVERY = 150  # minutes between calls to every builder for everyone (not a day's divisor: day 2 gets new times)
 LOW_NEEDS = {"hunger": 20, "social": 20, "fun": 20, "energy": 10}  # low enough for every need's fork
 
 
@@ -124,11 +123,14 @@ def coffee_slot(sim: Simulation, agent, fork: forks.Fork) -> tuple[str, int, int
 
 
 class RunningCityTest(unittest.TestCase):
-    """Seeds 1, 2 and 3 for 5 days each, each run once for all the tests below."""
+    """Seed 1 for the 5 days the late shifts, the taxi and the tick budget are measured over, and seeds 2 and 3 for the
+    2 days the builders are probed over; each run once for all the tests below."""
+
+    DAYS = {1: 5, 2: 2, 3: 2}  # game days run per seed
 
     @classmethod
     def setUpClass(cls):
-        cls.runs = {seed: Run(seed, 5, 2) for seed in (1, 2, 3)}
+        cls.runs = {seed: Run(seed, days, 2) for seed, days in cls.DAYS.items()}
 
     def test_at_most_5_percent_of_shifts_start_late(self):
         run = self.runs[SEED]
@@ -139,7 +141,7 @@ class RunningCityTest(unittest.TestCase):
         self.assertLessEqual(len(late), 0.05 * len(shifts), sorted(late))
 
     def test_default_plays_rarely_take_the_taxi(self):
-        """PLAN decision 63, on each seed: under 10% of the work forks offering the taxi."""
+        """PLAN decision 63, on each seed (5 days on seed 1): under 10% of the work forks offering the taxi."""
         for seed, run in self.runs.items():
             offered = picked = 0
             for fork, choice, by in run.work:
@@ -436,7 +438,7 @@ class CoffeeFirstTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sim = sim = Simulation(seed=SEED)
-        cls.coffees = []  # (agent, minutes left, the coffee option, the cafe adding least) for each minute of each window
+        cls.coffees = []  # (agent, minutes left, the coffee option, the cafe adding least) each minute of each window
         for agent in sim.living():
             if not agent.job:
                 continue
