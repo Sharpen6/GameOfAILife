@@ -28,6 +28,7 @@ FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
+AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in the inbox
 PACED = ("send_message", "invite")  # what lands on other controllers and in every view's frames
 PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
 
@@ -41,6 +42,7 @@ class GameServer:
         self.controllers: dict[str, WebSocket] = {}
         self._outboxes: dict[WebSocket, asyncio.Queue] = {}  # every session's pushes waiting to be sent
         self._sending: dict[WebSocket, float] = {}  # when the push each sender is on was queued
+        self._urgent: dict[WebSocket, float] = {}  # when each session's last push that is never skipped was queued
         self._connections: set[asyncio.StreamWriter] = set()
         self._server: asyncio.base_events.Server | None = None
         self._loop_task: asyncio.Task | None = None
@@ -85,7 +87,7 @@ class GameServer:
         for name, msg in outbox:
             ws = self.controllers.get(name)
             if ws:
-                self._push(ws, json.dumps(msg), skippable=msg["type"] == "message")  # its text is in the inbox
+                self._push(ws, json.dumps(msg), inbox=msg["agent_id"] if msg["type"] == "message" else None)
         viewers = [ws for ws in [self.god, *self.observers] if ws]
         if not viewers or not (stepped or events or forks):
             return
@@ -156,14 +158,17 @@ class GameServer:
             text = json.dumps({"type": "error", "error": "bad message: nested too deeply to echo back"})
         await self._send_raw(ws, text)
 
-    def _push(self, ws: WebSocket, text: str, skippable: bool = False) -> None:
+    def _push(self, ws: WebSocket, text: str, inbox: str | None = None) -> None:
         """Queue a message the client did not ask for, without waiting on the client.
 
         A client still on a push queued more than STALL_SECONDS ago (it stopped reading,
         or reads too slowly to keep up) is dropped, so it can never hold up the city or
         pile up more than that many seconds of pushes. A burst of pushes is not lag.
-        A skippable push still waiting after half of that is skipped instead, so however
-        many controllers flood a client with messages, they cannot get a reading client dropped.
+        A controller's `message` push names the character whose inbox has its text, and
+        _sender may skip it, so a flood of texts cannot get a controller dropped that keeps
+        up with everything else. Views see every text as an event in their state frames,
+        which are never skipped, so enough flooding controllers can still get a slow view
+        dropped; anyone may take over as God, so that is a nuisance, not a theft.
         """
         outbox = self._outboxes.get(ws)
         if outbox is None or ws.closed:
@@ -172,18 +177,35 @@ class GameServer:
         if now - self._sending.get(ws, now) > STALL_SECONDS:
             ws.abort()
             return
-        outbox.put_nowait((now, text, skippable))
+        if not inbox:
+            self._urgent[ws] = now
+        outbox.put_nowait((now, text, inbox))
 
     async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
-        """Send one client's pushes in order, so a slow client only ever holds up itself."""
+        """Send one client's pushes in order, so a slow client only ever holds up itself.
+
+        A text the client is falling behind on is skipped: one that has waited half of
+        STALL_SECONDS, or AHEAD_SECONDS with a push that matters (a fork) waiting behind it.
+        The client is told how many it missed for each character, so it can query the inbox.
+        """
         loop = asyncio.get_running_loop()
+        skipped: dict[str, int] = {}  # texts skipped for each character, not yet reported
         try:
             while True:
-                queued, text, skippable = await outbox.get()
-                if skippable and loop.time() - queued > STALL_SECONDS / 2:
-                    continue  # it is falling behind
+                queued, text, inbox = await outbox.get()
+                waited = loop.time() - queued
+                if inbox and (waited > STALL_SECONDS / 2
+                              or waited > AHEAD_SECONDS and queued < self._urgent.get(ws, -math.inf)):
+                    skipped[inbox] = skipped.get(inbox, 0) + 1
+                    if not outbox.empty():
+                        continue
+                    text = None  # the queue is empty, so report the skipped texts now
                 self._sending[ws] = queued  # everything still queued is newer, so this is the lag
-                await ws.send(text)
+                for aid, n in skipped.items():
+                    await ws.send(json.dumps({"type": "messages_skipped", "agent_id": aid, "count": n}))
+                skipped.clear()
+                if text is not None:
+                    await ws.send(text)
                 del self._sending[ws]
         except ConnectionClosed:
             pass  # the connection is gone: the session's recv() sees that too and ends
@@ -245,6 +267,7 @@ class GameServer:
             sender.cancel()
             del self._outboxes[ws]
             self._sending.pop(ws, None)
+            self._urgent.pop(ws, None)
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
                 self.sim.release(name)

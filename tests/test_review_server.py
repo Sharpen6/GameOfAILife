@@ -117,22 +117,47 @@ async def wait_until(cond, timeout: float = TIMEOUT) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
-async def read_slowly(reader: asyncio.StreamReader, rate: int, seconds: float) -> bool:
+def take_frames(buf: bytearray) -> list[dict]:
+    """Remove the whole server frames at the start of buf; returns the messages of the text ones."""
+    out = []
+    while len(buf) >= 2:
+        n, at = buf[1] & 0x7F, 2
+        if n >= 126:
+            at = 4 if n == 126 else 10
+            if len(buf) < at:
+                break
+            n = int.from_bytes(buf[2:at], "big")
+        if len(buf) < at + n:
+            break
+        if buf[0] & 0x0F == ws.OP_TEXT:
+            out.append(json.loads(buf[at:at + n]))
+        del buf[:at + n]
+    return out
+
+
+async def read_slowly(reader: asyncio.StreamReader, rate: int, seconds: float,
+                      got: list | None = None, until=lambda: False) -> bool:
     """Read about rate bytes a second for that long, like a client on a slow link.
 
+    If got is given, the messages read are added to it, and reading stops as soon as until() is true.
     Returns False as soon as the server closes the connection.
     """
     loop = asyncio.get_running_loop()
     end = loop.time() + seconds
-    while loop.time() < end:
+    buf = bytearray()
+    while loop.time() < end and not until():
         await asyncio.sleep(0.1)
         try:
-            if not await asyncio.wait_for(reader.read(rate // 10), 0.1):
-                return False
+            data = await asyncio.wait_for(reader.read(rate // 10), 0.1)
         except asyncio.TimeoutError:
-            pass
+            continue
         except ConnectionError:
             return False
+        if not data:
+            return False
+        if got is not None:
+            buf += data
+            got += take_frames(buf)
     return True
 
 
@@ -352,6 +377,52 @@ class TestFloods(ServerCase):
             self.assertEqual(self.sim.agents["tom"].inbox[-1]["text"], "é" * 500)
             await wait_until(lambda: victim.closed, 5)
         await wait_until(lambda: self.sim.agents["tom"].controller is None)
+
+    async def test_fork_does_not_wait_behind_texts(self):
+        # Round 5: a fork queued behind a flood of texts waited until they were old enough to skip,
+        # about STALL_SECONDS / 2 of the ANSWER_SECONDS (5) the controller has to answer it.
+        reader, victim = await self.slow_client({"type": "hello", "role": "controller", "name": "victim",
+                                                 "characters": ["tom", "ari"]})
+        await wait_until(lambda: self.sim.agents["tom"].controller == "victim")
+        for i, aid in enumerate([a.id for a in self.sim.living() if not a.controller][:5]):
+            self.flood((await self.controller(f"flooder{i}", [aid]))[0], aid, "tom")
+        loop = asyncio.get_running_loop()
+        asked: list[float] = []
+
+        def ask() -> None:  # what Simulation.director does for a character with a controller
+            self.sim.outbox.append(("victim", {"type": "fork", "fork_id": "f1", "agent_id": "tom"}))
+            asked.append(loop.time())
+
+        loop.call_later(1.0, ask)  # once the victim is well behind
+        got: list[dict] = []
+        kept = await read_slowly(reader, 500_000, 6, got, until=lambda: any(m["type"] == "fork" for m in got))
+        self.assertTrue(kept and not victim.closed, "a controller that keeps reading must not be dropped")
+        self.assertTrue(any(m["type"] == "fork" for m in got), "the fork must arrive")
+        # The texts already in the socket buffers on both ends take about half a second to read.
+        self.assertLess(loop.time() - asked[0], 1.5, "a fork must not wait behind texts")
+        before = [m["type"] for m in got[:[m["type"] for m in got].index("fork")]]
+        self.assertIn("messages_skipped", before, "it skips texts to get ahead, and says so")
+
+    async def test_skipped_texts_are_reported(self):
+        # Round 5: texts skipped for a lagging controller vanished without a word, and `query inbox`
+        # shows only the last 20, so a controller could not tell what it had missed.
+        reader, victim = await self.slow_client({"type": "hello", "role": "controller", "name": "victim",
+                                                 "characters": ["tom", "ari"]})
+        await wait_until(lambda: self.sim.agents["tom"].controller == "victim")
+        other, _ = await self.controller("other", ["dana"])
+        n = 300
+        text = json.dumps({"type": "send_message", "agent_id": "dana", "to": "tom", "text": "é" * 500})
+        got: list[dict] = []
+        skips = lambda: [m for m in got if m["type"] == "messages_skipped"]  # noqa: E731
+        accounted = lambda: sum(m["type"] == "message" for m in got) + sum(m["count"] for m in skips())  # noqa: E731
+        with mock.patch.object(server_module, "PACE_BURST", n), mock.patch.object(server_module, "STALL_SECONDS", 1.0):
+            for _ in range(n):
+                await other.send(text)
+            kept = await read_slowly(reader, 200_000, 5, got, until=lambda: accounted() >= n)
+        self.assertTrue(kept and not victim.closed, "a controller that keeps reading must not be dropped")
+        self.assertTrue(skips(), "a slow reader misses some of these texts")
+        self.assertEqual({m["agent_id"] for m in skips()}, {"tom"}, "it is told whose inbox to query")
+        self.assertEqual(accounted(), n, "every text is pushed or counted as skipped")
 
 
 class TestWsLayer(unittest.IsolatedAsyncioTestCase):
