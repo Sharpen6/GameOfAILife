@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Character page · GameOfAILife</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="character.css">
+</head>
+<body class="charpage">
+  <header>
+    <h1><a href="/" class="home" title="Back to the city">GameOfAILife</a></h1>
+    <span class="crumb">Character page</span>
+    <label class="pick">
+      <span class="small">Character</span>
+      <select id="who" aria-label="Character" disabled><option>Loading…</option></select>
+    </label>
+    <div id="clock"></div>
+    <div id="role">Not connected</div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <section id="gate" class="gate" hidden>
+    <h2>This page takes over God</h2>
+    <p>The city has one God at a time. Editing a play style is a God power, so this page has to connect
+       as God. While it is open, the city map in your other tabs switches to <b>watching</b>: you can
+       still see everything there, but luck and speed are locked.</p>
+    <p>When you are done, press <b>Give God back</b> here (or close this tab) and reload the city tab.</p>
+    <div class="row">
+      <button class="btn primary" id="takeover">Take over God and open</button>
+      <a class="btn" href="/">Back to the city</a>
+    </div>
+    <label class="small"><input type="checkbox" id="remember"> Don't ask again in this tab</label>
+  </section>
+
+  <main id="page" hidden>
+   <div class="col">
+    <section class="card who">
+      <div class="namerow">
+        <canvas id="face" width="16" height="16" aria-hidden="true"></canvas>
+        <div>
+          <h2 id="name">…</h2>
+          <div id="subtitle" class="small"></div>
+        </div>
+      </div>
+      <div id="facts" class="facts"></div>
+      <h3>Household</h3>
+      <ul id="household" class="list"></ul>
+      <h3>Relationships</h3>
+      <ul id="rels" class="list rels"></ul>
+    </section>
+
+    <section class="card decisions">
+      <h3>Recent decisions</h3>
+      <ul id="forks" class="feed"></ul>
+    </section>
+   </div>
+   <div class="col">
+    <section class="card style">
+      <h3>Play-style prompt</h3>
+      <p class="small">How this character plays when nobody is steering them. Controllers read it, and the Decision Director
+        uses the sliders to pick their default answers.</p>
+      <textarea id="prompt" rows="5" aria-label="Play-style prompt"></textarea>
+      <div id="promptnote" class="small"></div>
+      <h3>Traits</h3>
+      <div id="traits" class="traitgrid"></div>
+      <div class="saverow">
+        <button class="btn primary" id="save">Save play style</button>
+        <button class="btn" id="revert" title="Throw away unsaved edits">Undo edits</button>
+        <span id="savestatus" class="small" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="card learned">
+      <h3>What the profile learned</h3>
+      <p class="small">Each choice a controller makes nudges the sliders. The latest lessons, newest first:</p>
+      <ul id="learned" class="list"></ul>
+    </section>
+
+   </div>
+
+    <div class="footer">
+      <button class="btn" id="release">Give God back</button>
+      <span class="small">Closes this page's God connection. Reload the city tab to be God there again.</span>
+    </div>
+  </main>
+
+  <script src="character.js"></script>
+</body>
+</html>
