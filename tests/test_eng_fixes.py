@@ -196,9 +196,14 @@ class TestOriginCheck(ServerCase):
         await self.assert_refused(f"127.0.0.1.nip.io:{p}", f"http://127.0.0.1.nip.io:{p}")
 
     async def test_no_origin_gets_101(self):
-        # Controllers and tools are not browsers: they send no Origin.
+        # Controllers and tools are not browsers: they send no Origin. Their Host is not checked, on purpose:
+        # every browser context sends an Origin on a WebSocket upgrade (so no web page is behind them), and a
+        # program could write Host: 127.0.0.1 as easily. ws.connect sends the URL's name, so a friend's
+        # controller pointed at ws://mypc.local:8000/ws connects.
         await self.assert_god(f"127.0.0.1:{self.port}", None)
         await self.assert_god("x", None)
+        await self.assert_god(f"evil.example:{self.port}", None)
+        await self.assert_god(f"mypc.local:{self.port}", None)
         sock = await self.connect()  # gameofailife.ws.connect, as the example controllers use it
         welcome = await self.hello(sock, role="controller", name="bot", characters=["tom"])
         self.assertEqual(welcome["characters"], ["tom"])

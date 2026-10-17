@@ -48,7 +48,8 @@ address. So the God page served from this port connects, and so does a friend's
 browser that opens it by IP. A page from another site cannot connect, and
 neither can a page reached through a DNS name pointed at this machine (DNS
 rebinding). Clients that send no `Origin`, such as the Python and Node
-controllers, are not checked.
+controllers, are not checked, whatever `Host` they send: no web page is behind
+them, and a program can write any `Host` it likes.
 
 The request line and headers must arrive within 10 seconds, with at most 100
 header lines and 16 KiB of them. A slower request is closed. A longer one gets
@@ -873,9 +874,9 @@ Some refusals are not `error` messages but come in the normal reply, with
 `claimed` (from `claim`), `invited` (from `invite`) and `luck_set` (from
 `set_luck`, for an unknown id) report a refusal with `ok: false` only, and no
 `error` field. The frame-level failures in [Message basics](#message-basics) (a
-frame over 4 MiB, a bad control frame, a push left waiting more than 5 seconds
-once the network buffers are full) close the connection instead of sending an
-error.
+frame or message over 64 KiB, a bad control frame, a push left waiting more
+than 5 seconds once the network buffers are full) close the connection instead
+of sending an error.
 
 ## Answer windows: 5 seconds and 10 seconds
 
