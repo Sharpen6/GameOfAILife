@@ -85,6 +85,31 @@
 <script src="../view/minimap.js"></script>
 <script src="../view/view.js"></script>
 <script src="fixture_town.js"></script>
+<script>
+"use strict";
+// fake_state.js reads window.CityViewFixture = {town, cast, homes, conditions}; it is built here from the
+// fixture's window.CITY_FIXTURE = {town, state, cast} (PLAN decision 81). People come from state.agents
+// (name, age, home, car), households and listings from state.homes, conditions from state.lots, and
+// workplaces and hours from cast; a fixture regenerated without cast (P6) gets jobs picked here: school for
+// children, a workplace by hash for adults, none from 65.
+(function (X) {
+  const hash = s => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
+  const town = X.town, st = X.state || {}, extra = new Map((X.cast || []).map(c => [c.id, c]));
+  const work = town.places.filter(p => p.kind !== "home" && p.kind !== "park" && p.kind !== "school");
+  const school = town.places.find(p => p.kind === "school");
+  const cast = (st.agents || []).filter(a => a.alive !== false).map(a => {
+    const e = extra.get(a.id);
+    const job = e ? e.job : a.age < 18 ? (school ? school.id : null) : a.age >= 65 || !work.length ? null : work[hash(a.id + ":job") % work.length].id;
+    let hours = e ? e.hours : null;
+    if (job && !hours) { const h = (town.places.find(p => p.id === job) || {}).hours || [9, 17]; hours = [Math.max(7, h[0]), Math.min(h[0] + 8, h[1])]; }
+    return { id: a.id, name: a.name, age: a.age, home: a.home, car: !!a.car, job, hours };
+  });
+  const homes = {}, conditions = {};
+  for (const h of town.homes || []) { const s = (st.homes || {})[h.id] || {}; homes[h.id] = { hh: s.hh || null, owner: s.owner || "landlord", listing: s.listing || null }; }
+  for (const [id, l] of Object.entries(st.lots || {})) conditions[id] = l.condition;
+  window.CityViewFixture = { town, cast, homes, conditions };
+})(window.CITY_FIXTURE);
+</script>
 <script src="fake_state.js"></script>
 <script>
 "use strict";
@@ -108,7 +133,7 @@
   let tick = (+(q.get("day") || 2)) * 1440 + (q.has("minute") ? +q.get("minute") : 8 * 60 + 15), acc = 0, last = null;
   // the page keeps the last lots and homes it was sent, as every client does (PLAN 3.3)
   let lots = {}, homes = {}, frames = 0, sentKey = "";
-  const calls = window.__calls = { pick: [], hover: [], select: [], camera: 0 };
+  const calls = window.__calls = { pick: [], hover: [], select: [], camera: 0, cameraLast: null };
   const hit2text = hit => {
     if (!hit || !last) return "";
     if (hit.kind === "agent") {
@@ -155,7 +180,7 @@
       tip.style.left = Math.min(r.width - tip.offsetWidth - 8, ev.cssX + 14) + "px"; tip.style.top = Math.max(50, ev.cssY + 14) + "px";
     },
     onSelect(id) { calls.select.push(id); $("info").style.display = id ? "block" : "none"; placeInfo(); },
-    onCamera() { calls.camera++; },
+    onCamera(c) { calls.camera++; calls.cameraLast = c; },
   }, { persist: q.get("persist") !== "0" && !q.has("zoom") && !q.has("fit"), dynamicResolution: q.get("dyn") !== "0", minimap: q.get("minimap") !== "0", eager: q.has("eager") });
   const hudH = () => document.body.classList.contains("nohud") ? 0 : $("hud").offsetHeight;
   // The info card sits bottom-left; when it would run into the minimap or the follow chip (narrow
