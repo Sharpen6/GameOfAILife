@@ -185,19 +185,43 @@ class TestSlowClients(ServerCase):
 
     async def test_stalled_viewer_does_not_freeze_the_city(self):
         # Finding 11: one view that stops reading froze ticks, frames, forks and new hellos for everyone.
-        with mock.patch.object(server_module, "SEND_QUEUE", 40):
-            watcher, _ = await self.god()
-            stalled = await self.stalled_god()
-            await watcher.expect("demoted")
-            tick, frames = self.sim.clock.tick, self.frames(watcher)
-            await asyncio.sleep(1.0)
-            self.assertGreater(self.sim.clock.tick, tick + 10, "the game clock must keep running")
-            self.assertGreater(self.frames(watcher), frames + 5, "other views must keep getting state frames")
-            # A new God is welcomed although the old one cannot take its 'demoted' message.
-            _, welcome = await self.god()
-            self.assertEqual(welcome["role"], "god")
-            # The view that fell too far behind is dropped.
+        watcher, _ = await self.god()
+        stalled = await self.stalled_god()
+        await watcher.expect("demoted")
+        tick, frames = self.sim.clock.tick, self.frames(watcher)
+        await asyncio.sleep(1.0)
+        self.assertGreater(self.sim.clock.tick, tick + 10, "the game clock must keep running")
+        self.assertGreater(self.frames(watcher), frames + 5, "other views must keep getting state frames")
+        # A new God is welcomed although the old one cannot take its 'demoted' message.
+        _, welcome = await self.god()
+        self.assertEqual(welcome["role"], "god")
+        self.assertFalse(stalled.closed, "under STALL_SECONDS behind, the stalled view is still kept")
+        # The view that falls too far behind is dropped.
+        with mock.patch.object(server_module, "STALL_SECONDS", 0.5):
             await wait_until(lambda: stalled.closed and stalled not in self.server.observers, 10)
+
+    async def test_message_burst_does_not_drop_a_reading_controller(self):
+        # Finding 11, follow-up: a cap on queued pushes let another controller knock this one
+        # off with 101 pipelined send_message requests (one frame's worth) and take its characters.
+        victim, _ = await self.controller("victim", ["tom", "ari"])
+        other, _ = await self.controller("other", ["dana"])
+        n = 300
+        for i in range(n):
+            await other.send({"type": "send_message", "agent_id": "dana", "to": "tom", "text": f"hi {i}"})
+        await wait_until(lambda: victim.closed or sum(m.get("type") == "message" for m in victim.inbox) == n)
+        self.assertFalse(victim.closed, "a controller that keeps reading must not be dropped")
+        self.assertEqual([self.sim.agents[a].controller for a in ("tom", "ari")], ["victim", "victim"])
+        r = await other.reply_to('{"type": "claim", "agent_id": "tom", "req_id": "c"}', "c")
+        self.assertFalse(r["ok"])
+
+    async def test_message_burst_to_own_characters_does_not_drop_the_sender(self):
+        c, _ = await self.controller("chatty", ["tom", "ari"])
+        n = 150
+        for i in range(n):
+            await c.send({"type": "send_message", "agent_id": "tom", "to": "ari", "text": f"hi {i}"})
+        await wait_until(lambda: c.closed or sum(m.get("type") == "message" for m in c.inbox) == n)
+        self.assertFalse(c.closed, "a controller that keeps reading must not be dropped")
+        self.assertEqual(self.sim.agents["ari"].controller, "chatty")
 
     async def test_connection_timeout_does_not_kill_the_tick_loop(self):
         # Finding 12: TCP giving up on a vanished peer (ETIMEDOUT) is an OSError but not a

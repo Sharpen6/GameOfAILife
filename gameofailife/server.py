@@ -27,7 +27,7 @@ CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
-SEND_QUEUE = 100  # pushes (about 5 s of state frames) a client may fall behind before it is dropped
+STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
 
 
 class GameServer:
@@ -38,6 +38,7 @@ class GameServer:
         self.observers: set[WebSocket] = set()
         self.controllers: dict[str, WebSocket] = {}
         self._outboxes: dict[WebSocket, asyncio.Queue] = {}  # every session's pushes waiting to be sent
+        self._sending: dict[WebSocket, float] = {}  # when the push each sender is on was queued
         self._connections: set[asyncio.StreamWriter] = set()
         self._server: asyncio.base_events.Server | None = None
         self._loop_task: asyncio.Task | None = None
@@ -152,28 +153,33 @@ class GameServer:
     def _push(self, ws: WebSocket, text: str) -> None:
         """Queue a message the client did not ask for, without waiting on the client.
 
-        A client too far behind to take it (it stopped reading, or reads too slowly)
-        is dropped, so it can never hold up the city.
+        A client still on a push queued more than STALL_SECONDS ago (it stopped reading,
+        or reads too slowly to keep up) is dropped, so it can never hold up the city or
+        pile up more than that many seconds of pushes. A burst of pushes is not lag.
         """
         outbox = self._outboxes.get(ws)
         if outbox is None or ws.closed:
             return
-        try:
-            outbox.put_nowait(text)
-        except asyncio.QueueFull:
+        now = asyncio.get_running_loop().time()
+        if now - self._sending.get(ws, now) > STALL_SECONDS:
             ws.abort()
+            return
+        outbox.put_nowait((now, text))
 
     async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
         """Send one client's pushes in order, so a slow client only ever holds up itself."""
         try:
             while True:
-                await ws.send(await outbox.get())
+                queued, text = await outbox.get()
+                self._sending[ws] = queued  # everything still queued is newer, so this is the lag
+                await ws.send(text)
+                del self._sending[ws]
         except ConnectionClosed:
             pass  # the connection is gone: the session's recv() sees that too and ends
 
     async def _session(self, ws: WebSocket) -> None:
         role, name = None, None
-        self._outboxes[ws] = outbox = asyncio.Queue(SEND_QUEUE)
+        self._outboxes[ws] = outbox = asyncio.Queue()
         sender = asyncio.create_task(self._sender(ws, outbox))
         try:
             while True:
@@ -211,6 +217,7 @@ class GameServer:
         finally:
             sender.cancel()
             del self._outboxes[ws]
+            self._sending.pop(ws, None)
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
                 self.sim.release(name)
