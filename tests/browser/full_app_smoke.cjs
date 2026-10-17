@@ -341,10 +341,14 @@ async function run(browser, name, size, touch) {
     // God speeds the city up, and the HUD counts the controller's characters.
     await page.click('#speed button[data-speed="16"]');
     await waitFor(page, () => document.querySelector('#speed button[data-speed="16"]').classList.contains("on"), null, 3000, "speed 16x");
-    await waitFor(page, () => { const b = document.querySelector('#hud [data-k="ai"]'); return b && /\d+ thinking/.test(b.innerText); },
-      null, 10000, "the AI chip");
-    const ai = await page.evaluate(() => document.querySelector('#hud [data-k="ai"]').innerText.trim());
-    check(touch ? /^AI \d+ thinking$/.test(ai) : /^AI: 60 playing, \d+ thinking$/.test(ai), "the AI chip counts the controller's characters", ai);
+    // The chip shows a thinking count only while someone thinks: "AI: 60 playing, 2 thinking", on a phone "AI 60 2".
+    // The check reads the text the wait matched, so a fork closing between two reads cannot fail it.
+    const chipRe = touch ? /^AI (\d+) [1-9]\d*$/ : /^AI: (\d+) playing, [1-9]\d* thinking$/;
+    const ai = await page.waitForFunction(re => {
+      const b = document.querySelector('#hud [data-k="ai"]'), t = b ? b.innerText.trim().replace(/\s+/g, " ") : "";
+      return new RegExp(re).test(t) ? t : false;
+    }, chipRe.source, { timeout: 10000 }).then(h => h.jsonValue()).catch(() => null);
+    check(!!ai && chipRe.exec(ai)[1] === "60", "the AI chip counts the controller's characters", ai || "timed out");
     await page.waitForTimeout(1500);
     const cam0 = await page.evaluate(() => window.__view.camera());
     if (!touch) await shot(page, "city-iso");

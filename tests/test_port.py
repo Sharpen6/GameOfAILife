@@ -75,7 +75,7 @@ STATS_SCHEMA = {
     "households": [{"id": "", "name": "", "members": [""], "home": "", "home_name": "", "place": "",
                     "tier_label": "", "tenure": "", "weekly_cost": 0}],
     "people": [{"id": "", "household": "", "worth": 0, "worth_24h": 0, "cash": 0, "savings": 0, "home_equity": 0,
-                "job": "", "health": 0}],
+                "job": "", "health": 0, "llm": 0}],
     "samples": [{"tick": 0, "day": 0, "pop": 0, "mood": 0, "health": 0, "wealth": 0, "median": 0, "top10": 0,
                  "in_debt": 0, "working": 0, "owned": 0, "shabby_plus": 0, "asked": 0, "in_time": 0}],
 }
