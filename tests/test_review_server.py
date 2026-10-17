@@ -113,6 +113,25 @@ async def wait_until(cond, timeout: float = TIMEOUT) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
+async def read_slowly(reader: asyncio.StreamReader, rate: int, seconds: float) -> bool:
+    """Read about rate bytes a second for that long, like a client on a slow link.
+
+    Returns False as soon as the server closes the connection.
+    """
+    loop = asyncio.get_running_loop()
+    end = loop.time() + seconds
+    while loop.time() < end:
+        await asyncio.sleep(0.1)
+        try:
+            if not await asyncio.wait_for(reader.read(rate // 10), 0.1):
+                return False
+        except asyncio.TimeoutError:
+            pass
+        except ConnectionError:
+            return False
+    return True
+
+
 class ServerCase(unittest.IsolatedAsyncioTestCase):
     speed = 0
 
@@ -206,9 +225,10 @@ class TestSlowClients(ServerCase):
         victim, _ = await self.controller("victim", ["tom", "ari"])
         other, _ = await self.controller("other", ["dana"])
         n = 300
-        for i in range(n):
-            await other.send({"type": "send_message", "agent_id": "dana", "to": "tom", "text": f"hi {i}"})
-        await wait_until(lambda: victim.closed or sum(m.get("type") == "message" for m in victim.inbox) == n)
+        with mock.patch.object(server_module, "PACE_BURST", n):  # this is about queued pushes, not pacing
+            for i in range(n):
+                await other.send({"type": "send_message", "agent_id": "dana", "to": "tom", "text": f"hi {i}"})
+            await wait_until(lambda: victim.closed or sum(m.get("type") == "message" for m in victim.inbox) == n)
         self.assertFalse(victim.closed, "a controller that keeps reading must not be dropped")
         self.assertEqual([self.sim.agents[a].controller for a in ("tom", "ari")], ["victim", "victim"])
         r = await other.reply_to('{"type": "claim", "agent_id": "tom", "req_id": "c"}', "c")
@@ -217,9 +237,10 @@ class TestSlowClients(ServerCase):
     async def test_message_burst_to_own_characters_does_not_drop_the_sender(self):
         c, _ = await self.controller("chatty", ["tom", "ari"])
         n = 150
-        for i in range(n):
-            await c.send({"type": "send_message", "agent_id": "tom", "to": "ari", "text": f"hi {i}"})
-        await wait_until(lambda: c.closed or sum(m.get("type") == "message" for m in c.inbox) == n)
+        with mock.patch.object(server_module, "PACE_BURST", n):
+            for i in range(n):
+                await c.send({"type": "send_message", "agent_id": "tom", "to": "ari", "text": f"hi {i}"})
+            await wait_until(lambda: c.closed or sum(m.get("type") == "message" for m in c.inbox) == n)
         self.assertFalse(c.closed, "a controller that keeps reading must not be dropped")
         self.assertEqual(self.sim.agents["ari"].controller, "chatty")
 
@@ -236,6 +257,77 @@ class TestSlowClients(ServerCase):
         self.assertGreater(self.sim.clock.tick, tick)
         god, _ = await self.god()
         await god.expect("state")
+
+
+class TestFloods(ServerCase):
+    """Finding 11, round 3: one controller pipelining send_message got any client on a link
+    slower than the server makes pushes dropped for lagging (and could then claim its characters)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.floods: list[tuple[asyncio.Task, Client]] = []
+
+    async def asyncTearDown(self):
+        for task, c in self.floods:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, ws.ConnectionClosed):
+                pass
+            c.ws.abort()  # the server is not reading it, so no close handshake
+        await super().asyncTearDown()
+
+    async def slow_client(self, hello: dict) -> tuple[asyncio.StreamReader, ws.WebSocket]:
+        """A raw connection that says hello; returns its reader and the server's side of it.
+
+        Both ends get small socket buffers, as on a slow link, where the kernel cannot soak up
+        seconds of frames the way it does on localhost.
+        """
+        before = set(self.server._outboxes)
+        reader, _ = await self.raw_ws(masked_frame(True, ws.OP_TEXT, json.dumps(hello).encode()), 16384)
+        await wait_until(lambda: set(self.server._outboxes) - before)
+        (theirs,) = set(self.server._outboxes) - before
+        theirs.writer.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16384)
+        return reader, theirs
+
+    def flood(self, c: Client, agent_id: str, to: str) -> None:
+        """Pipeline 500-character texts from c for the rest of the test."""
+        msg = json.dumps({"type": "send_message", "agent_id": agent_id, "to": to, "text": "é" * 500})
+
+        async def pipeline():
+            while True:
+                await c.send(msg)
+                await asyncio.sleep(0)  # as fast as it can, but let the rest of this loop run too
+
+        self.floods.append((asyncio.create_task(pipeline()), c))
+
+    async def test_message_flood_does_not_drop_a_slow_controller(self):
+        # The victim reads 1 MB/s; once dropped, 'other' could claim its characters.
+        reader, victim = await self.slow_client({"type": "hello", "role": "controller", "name": "victim",
+                                                 "characters": ["tom", "ari"]})
+        await wait_until(lambda: self.sim.agents["tom"].controller == "victim")
+        other, _ = await self.controller("other", ["dana"])
+        start = asyncio.get_running_loop().time()
+        self.flood(other, "dana", "tom")
+        with mock.patch.object(server_module, "STALL_SECONDS", 1.0):  # drop sooner, so the test is quick
+            kept = await read_slowly(reader, 1_000_000, 2.5)
+        self.assertTrue(kept and not victim.closed, "a controller that keeps reading must not be dropped")
+        self.assertEqual([self.sim.agents[a].controller for a in ("tom", "ari")], ["victim", "victim"])
+        handled = sum(m.get("type") == "sent" for m in other.inbox)
+        elapsed = asyncio.get_running_loop().time() - start
+        self.assertLessEqual(handled, server_module.PACE_BURST + server_module.PACE_RATE * elapsed + 2,
+                             "the sender is held back instead")
+
+    async def test_message_flood_does_not_drop_a_slow_god_view(self):
+        # Every text is also an event in every view's state frames. This view reads 250 KB/s.
+        reader, god = await self.slow_client({"type": "hello", "role": "god"})
+        await wait_until(lambda: self.server.god is god)
+        other, _ = await self.controller("other", ["dana"])
+        self.flood(other, "dana", "tom")  # tom has no controller, so the texts reach only the views
+        with mock.patch.object(server_module, "STALL_SECONDS", 1.0):
+            kept = await read_slowly(reader, 250_000, 2.5)
+        self.assertTrue(kept and not god.closed, "a God view that keeps reading must not be dropped")
+        self.assertIs(self.server.god, god)
 
 
 class TestWsLayer(unittest.IsolatedAsyncioTestCase):

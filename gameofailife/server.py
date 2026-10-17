@@ -28,6 +28,8 @@ FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
+PACED = ("send_message", "invite")  # what lands on other controllers and in every view's frames
+PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
 
 
 class GameServer:
@@ -177,8 +179,22 @@ class GameServer:
         except ConnectionClosed:
             pass  # the connection is gone: the session's recv() sees that too and ends
 
+    async def _pace(self, due: float) -> float:
+        """Wait until a controller may send its next PACED message; takes and returns when the last was due.
+
+        After a burst of PACE_BURST, one controller gets PACE_RATE a second, so it cannot push
+        messages at someone faster than an ordinary link carries them and get that client
+        dropped for lagging. Meanwhile nothing more is read from it, which holds the sender back.
+        """
+        now = asyncio.get_running_loop().time()
+        due = max(due, now - PACE_BURST / PACE_RATE) + 1 / PACE_RATE
+        if due > now:
+            await asyncio.sleep(due - now)
+        return due
+
     async def _session(self, ws: WebSocket) -> None:
         role, name = None, None
+        paced = 0.0  # when this controller's last PACED message was due
         self._outboxes[ws] = outbox = asyncio.Queue()
         sender = asyncio.create_task(self._sender(ws, outbox))
         try:
@@ -207,6 +223,8 @@ class GameServer:
                     elif role == "god":
                         reply = self._god(msg)
                     else:
+                        if msg.get("type") in PACED:
+                            paced = await self._pace(paced)
                         reply = self._controller(name, msg)
                 except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
                     reply = {"type": "error", "error": f"bad message: {exc}"}
