@@ -1,8 +1,10 @@
 """Homes: the 37 dwellings of Millbrook, who owns and lives in them, their condition, and household money.
 
-Group A (data, helpers and serializers) is complete. Group B (the mechanics hooks the simulation calls:
-weekly charges, nightly decay, emergencies, effects) holds today's behaviour as stubs; the housing package
-fills them in without changing a signature or a call site.
+Group A is the data, the read-side helpers and the serializers. Group B is the mechanics behind the hooks the
+simulation calls: the Sunday charges (rent or property tax, bills, arrears, hardship rent, tax deferral and
+forced moves), nightly decay with the landlord's repairs and the neglect stages, emergencies (rolled at night,
+hidden until they go live), moves, deaths, the housing extras and effects of fork options, home comfort and the
+money term of the Director's default scores. The four housing forks are built in `housing_forks.py`.
 
 Vocabulary: a Home is one dwelling (a house, or one flat of an apartment block); a Lot is the building a home
 stands on (one per residential place) and holds its condition. Owners are "landlord" (Millbrook Homes),
@@ -16,8 +18,10 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from . import travel
 from .clock import Clock
 from .rng import r2
+from .town import DISTRICT_NAMES
 
 if TYPE_CHECKING:
     from .agent import Agent, Household
@@ -68,6 +72,28 @@ STUFF_PRICE = 300
 EMERGENCY_KINDS = ("leak", "boiler", "roof", "electrics")
 EMERGENCY_TEXT = {"leak": "A pipe has burst in the kitchen.", "boiler": "The boiler has broken down.",
                   "roof": "The roof is letting the rain in.", "electrics": "The electrics keep tripping."}
+
+DAY = 24 * 60  # minutes
+MOVE_VAN_MINUTES = 180  # the moving van stays at the curb this long after a move
+LANDLORD_WORKS_MINUTES = 8 * 60  # builders on site while the landlord repaints
+UNDER_OFFER_DAYS = 3  # a listing another buyer snapped up is off the market this long
+OFFER_HOLD_MINUTES = 6 * 60  # a listing is held for a household's offer until the answer lands, at most this long
+SETTLE_DAMAGE = 10  # condition lost when an emergency is never properly fixed, or left behind in a move
+EMERGENCY_STAGE_P = {2: 0.015, 3: 0.045, 4: 0.045}  # extra nightly emergency odds of a shabby or worse home
+WINTER_EMERGENCY = 1.5
+DAMP_HEALTH = {3: 0.3, 4: 1.0}  # health lost a night by residents of a neglected or derelict home
+DAMP_CHILL = {3: 0.02, 4: 0.06}  # nightly odds of catching a chill there (doubled in winter, like the health loss)
+CHILL = {"health": -8, "fun": -6}
+STAGE_REPUTATION = [0, 0, -1, -2, -3]  # each resident, every Sunday
+KEPT_BIG_HOUSE_PRIDE = 1  # owners of a kept big house: people talk
+# Stage news, owner-occupied homes only: stage -> (tag, text).
+STAGE_NEWS = {2: ("shabby", "{home} is looking shabby."), 3: ("neglect", "{home} is falling into neglect."),
+              4: ("falling_apart", "{home} is close to falling apart.")}
+EMERGENCY_NEWS = {"leak": "A pipe bursts in the kitchen at {home}.", "boiler": "The boiler at {home} breaks down.",
+                  "roof": "Rain is coming in through the roof at {home}.",
+                  "electrics": "The electrics at {home} keep tripping out."}
+EMERGENCY_NAME = {"leak": "leak", "boiler": "broken boiler", "roof": "leaking roof", "electrics": "electrical fault"}
+ORDINALS = ["first", "second", "third", "fourth", "fifth"]
 
 # The 37 homes, in town.homes order. start: "let" (a tenant household, landlord owner), "owned"
 # (owner-occupied), "for_rent" (vacant, landlord) or "for_sale" (vacant, market). rent is the weekly rent
@@ -147,6 +173,7 @@ class Home:
     household: str | None = None  # who lives there
     listing: str | None = None  # None, "for_sale" or "for_rent"
     under_offer_until: int = 0  # tick a listing shows again after another buyer's offer
+    held_for: str | None = None  # the household whose offer holds it while under offer (None: another buyer)
     pending_emergency: dict | None = None  # hidden {"kind", "due"}: never serialised
     emergency: dict | None = None  # live {"kind", "since"}: public
     history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "household", "price"}
@@ -158,7 +185,8 @@ class Lot:
     condition: float  # 0-100
     works_until: int = 0  # builders on site until this tick
     moving_until: int = 0  # a moving van at the curb until this tick
-    reported: int = 0  # worst stage already announced; starts at the current stage
+    reported: int = 0  # worst stage already announced; starts at the current stage, back to it at stage 0-1
+    worst: int = 0  # worst stage since the lot was last kept (stage 0), for "looks as good as new"
 
 
 def build_homes(town: TownMap) -> dict[str, Home]:
@@ -184,7 +212,7 @@ def build_lots(town: TownMap, homes: dict[str, Home]) -> dict[str, Lot]:
     for place in town.places.values():
         if place.id in used:
             c = float(start[place.id])
-            lots[place.id] = Lot(place.id, c, reported=stage_of(c))
+            lots[place.id] = Lot(place.id, c, reported=stage_of(c), worst=stage_of(c))
     return lots
 
 
@@ -248,9 +276,23 @@ def property_tax(home: Home) -> int:
     return _int(home.base_value * PROPERTY_TAX)
 
 
-def listed(sim, home: Home) -> str | None:
-    """The home's listing as buyers see it: None while it is under offer."""
-    return home.listing if home.under_offer_until <= sim.clock.tick else None
+def listed(sim, home: Home, hh: Household | None = None) -> str | None:
+    """The home's listing as buyers see it (as household `hh` sees it, when given): None while it is under
+    offer, except to the household the listing is held for."""
+    free = home.under_offer_until <= sim.clock.tick or (hh is not None and home.held_for == hh.id)
+    return home.listing if free else None
+
+
+def hold(sim, home: Home, hh: Household | None, minutes: int) -> None:
+    """Take a listing off the market for `minutes`: for household `hh`'s offer, or for another buyer (None)."""
+    home.under_offer_until = sim.clock.tick + minutes
+    home.held_for = hh.id if hh is not None else None
+
+
+def release(home: Home) -> None:
+    """Back on the market (if it is still listed): no offer holds it."""
+    home.under_offer_until = 0
+    home.held_for = None
 
 
 def adults(sim, hh: Household) -> list[Agent]:
@@ -354,6 +396,181 @@ def pay_household(sim, hh: Household, amount: float) -> None:
         take = min(max(a.savings, 0.0), due)
         a.savings -= take
         a.money -= due - take
+
+
+# --- money, affordability and the market -------------------------------------------------
+
+def round10(x: float) -> int:
+    return math.floor(x / 10 + 0.5) * 10
+
+
+def retired(agent: Agent) -> bool:
+    """65 or over with no job: lives on the pension."""
+    return agent.job is None and agent.age >= 65
+
+
+def weekly_income(sim, hh: Household) -> float:
+    """The adults' take-home pay for a full week of shifts, plus pensions."""
+    from .sim import PENSION, income_tax  # sim imports this module, so not at the top
+
+    total = 0.0
+    for a in adults(sim, hh):
+        job = a.job
+        if job and job.hourly_wage > 0:
+            hours = (job.end_hour - job.start_hour) * len(job.workdays)
+            total += job.hourly_wage * hours * (1 - income_tax(job.hourly_wage))
+        elif retired(a):
+            total += PENSION
+    return total
+
+
+def bills(sim, hh: Household) -> float:
+    """The adults' weekly bills: BILLS_PER_ADULT each, and CAR_BILL for each car."""
+    from .sim import BILLS_PER_ADULT, CAR_BILL
+
+    return sum(BILLS_PER_ADULT + (CAR_BILL if a.owns_car else 0.0) for a in adults(sim, hh))
+
+
+def living(sim, hh: Household) -> float:
+    """The weekly living estimate: LIVING_PER_PERSON a resident, LIVING_PER_RETIREE for a retiree."""
+    return sum(LIVING_PER_RETIREE if retired(a) else LIVING_PER_PERSON
+               for a in (sim.agents[m] for m in hh.member_ids) if a.alive)
+
+
+def commute(sim, hh: Household) -> float:
+    """The adults' weekly commuting costs by their usual way to work."""
+    return sum(travel.weekly_commute_cost(sim, a) for a in adults(sim, hh))
+
+
+def buys(home: Home) -> bool:
+    """Moving into this vacant home means buying it (the market holds it), not renting it."""
+    return home.owner == "market"
+
+
+def housing_cost(sim, hh: Household, home: Home, factor: float = 1.0) -> float:
+    """A week of living in `home`: property tax plus the tier's upkeep estimate when owning, else the rent."""
+    if home.owner == hh.id or buys(home):
+        return home.base_value * PROPERTY_TAX + TIERS[home.tier].get("upkeep_est", 0)
+    if home.id == hh.home_id:
+        return hh.weekly_rent
+    return home.rent * factor
+
+
+def weekly_outgo(sim, hh: Household, home_id: str | None = None, factor: float = 1.0) -> float:
+    """What a week costs the household in `home_id` (default: where it lives): housing, bills, living, commute."""
+    home = sim.homes[home_id or hh.home_id]
+    return housing_cost(sim, hh, home, factor) + bills(sim, hh) + living(sim, hh) + commute(sim, hh)
+
+
+def fits(sim, hh: Household, home: Home, per_bedroom: int = 2) -> bool:
+    return residents(sim, hh) <= per_bedroom * home.bedrooms
+
+
+def reno_cost(sim, home_id: str) -> int:
+    """A full renovation of a run-down house (condition under 50); 0 for anything better, and for flats."""
+    home = sim.homes[home_id]
+    c = condition_of(sim, home_id)
+    if c >= 50 or home.tier == "flat":
+        return 0
+    return round10((100 - c) * TIERS[home.tier]["pro_rate"] * RENO_FACTOR) + CALLOUT
+
+
+def net_cost(sim, hh: Household, home_id: str) -> int:
+    """The cash a move costs: the price (when buying) and the van, less the sale of the home they own now."""
+    home, cur = sim.homes[home_id], sim.homes[hh.home_id]
+    price = value(sim, home_id) if buys(home) else 0
+    back = sale_proceeds(sim, cur.id) if cur.owner == hh.id else 0
+    return price + MOVING_COST - back
+
+
+def affordable(sim, hh: Household, home_id: str, factor: float = 1.0) -> bool:
+    """The affordability gate of every offered move.
+
+    After the move (a purchase also pays for the renovation it needs) the household keeps RESERVE_WEEKS of the
+    new weekly outgo and can carry the new home for a year. A rental also needs the week's income to cover the
+    new outgo.
+    """
+    home = sim.homes[home_id]
+    left = funds(sim, hh) - net_cost(sim, hh, home_id)
+    if buys(home):
+        left += (1 - factor) * value(sim, home_id) - reno_cost(sim, home_id)
+    outgo = weekly_outgo(sim, hh, home_id, factor)
+    income = weekly_income(sim, hh)
+    if left < RESERVE_WEEKS * outgo or (income - outgo) * 52 + left < 0:
+        return False
+    return buys(home) or income >= outgo
+
+
+def is_upgrade(sim, hh: Household, home_id: str) -> bool:
+    """Not a lower tier, and: more room for a crowded household; owning instead of renting a home worth at
+    least 90% of today's; or a home worth at least 15% more.
+
+    Owners look only at homes for sale unless they are crowded: selling up to rent a pricier place gives away
+    the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4)."""
+    cur, new = sim.homes[hh.home_id], sim.homes[home_id]
+    if TIERS[new.tier]["rank"] < TIERS[cur.tier]["rank"]:
+        return False
+    if crowded(sim, hh) and new.bedrooms > cur.bedrooms:
+        return True
+    owner = cur.owner == hh.id
+    if owner and not buys(new):
+        return False
+    if not owner and buys(new):
+        return value(sim, home_id) >= 0.9 * value(sim, cur.id)
+    return value(sim, home_id) >= 1.15 * value(sim, cur.id)
+
+
+def vacancies(sim, listing: str | None = None) -> list[Home]:
+    """Vacant homes buyers and renters can see now (not under offer), in town.homes order."""
+    return [h for h in sim.homes.values()
+            if h.household is None and listed(sim, h) and (listing is None or listed(sim, h) == listing)]
+
+
+def hunt_candidates(sim, hh: Household) -> list[Home]:
+    """The homes `house_hunt` offers: listed, vacant, fitting, an upgrade and affordable."""
+    return [h for h in vacancies(sim) if fits(sim, hh, h) and is_upgrade(sim, hh, h.id) and affordable(sim, hh, h.id)]
+
+
+def cheapest_rental(sim, hh: Household, below: float | None = None, per_bedroom: int = 2) -> Home | None:
+    """The cheapest fitting home to let, with rent under `below` when given (ties: better condition, then id)."""
+    pool = [h for h in vacancies(sim, "for_rent") if fits(sim, hh, h, per_bedroom) and (below is None or h.rent < below)]
+    return min(pool, key=lambda h: (h.rent, -condition_of(sim, h.id), h.id)) if pool else None
+
+
+def owner_occupied(home: Home) -> bool:
+    return home.household is not None and home.owner == home.household
+
+
+def lot_homes(sim, place_id: str) -> list[Home]:
+    return [h for h in sim.homes.values() if h.place == place_id]
+
+
+def hardship_rent(sim, hh: Household) -> int:
+    """The rent a renter at the bottom of the market pays until back on their feet: what is left of the week's
+    income after bills, living and HARDSHIP_REPAY, to the nearest $10, never above the rent."""
+    spare = weekly_income(sim, hh) - bills(sim, hh) - living(sim, hh) - HARDSHIP_REPAY
+    return min(_int(hh.weekly_rent), max(0, round10(spare)))
+
+
+def _one(sim, hh: Household) -> bool:
+    """The household is one adult (so the verb is singular)."""
+    return len(adults(sim, hh)) <= 1
+
+
+def _hh_lower(sim, hh: Household) -> str:
+    """The household's name in the middle of a sentence: "the Cohens"."""
+    name = household_name(sim, hh)
+    return "t" + name[1:] if name.startswith("The ") else name
+
+
+def _hh_possessive(sim, hh: Household) -> str:
+    name = _hh_lower(sim, hh)
+    return name + "'" if name.endswith("s") and name.startswith("the ") else name + "'s"
+
+
+def district_name(sim, home: Home) -> str:
+    district = sim.town.places[home.place].district
+    return DISTRICT_NAMES.get(district, district.replace("_", " ").title())
 
 
 # --- serializers (only the live `emergency` is ever sent; pending_emergency stays hidden) --------------
@@ -495,58 +712,581 @@ def home_page(sim, home_id: str) -> dict | None:
     }
 
 
-# --- group B: mechanics hooks (stubs with today's behaviour) ----------------------------------
+# --- group B: moves --------------------------------------------------------------------------
+
+def _history(rows: list[dict], row: dict) -> None:
+    rows.append(row)
+    del rows[:-20]
+
+
+def _event(sim, text: str, tag: str, place: str, agent: Agent | None = None, agents: list[str] | None = None) -> None:
+    sim.event(text, agent, tag=tag, agents=agents or [], place=place)
+
+
+def _members(sim, hh: Household) -> list[Agent]:
+    return [a for a in (sim.agents[m] for m in hh.member_ids) if a.alive]
+
+
+def available(sim, hh: Household, home: Home) -> bool:
+    """The household can still move into this home: vacant and listed as the household sees it."""
+    return home.household is None and listed(sim, home, hh) is not None
+
+
+def too_late(sim, hh: Household, home: Home, agent: Agent | None) -> None:
+    """The news that a home the household wanted has gone: taken, or held for someone else's offer."""
+    if home.household is None and home.listing and home.held_for not in (None, hh.id):
+        gone = "is under offer"
+    else:
+        gone = "has been " + ("sold" if buys(home) or home.owner not in ("landlord", "market") else "let")
+    _event(sim, f"{household_name(sim, hh)} {'was' if _one(sim, hh) else 'were'} too late: {home.name} {gone}.",
+           "too_late", home.place, agent)
+
+
+def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1.0, decider: Agent | None = None,
+                   forced: str | None = None, plan_decider: bool = True, check: bool = True) -> bool:
+    """Move a household into a vacant listed home: `how` is "buy" or "rent", at `factor` times the asking price
+    or rent. `forced` is None for the household's own choice, else "evicted" or "forced_sale" (no affordability
+    check, no van fee for a rental). Returns False, with a too_late event, when the home has gone or the
+    household can't raise the money after all (`check=False` skips the affordability gate, for a step down to a
+    rental out of housing trouble).
+
+    The old home is freed and listed (an owned one for sale at its value, with the sale credited to the
+    household's savings; a rented one back to let). The van and the price are paid from the household pot.
+    Members free to drop what they are doing set off for the new home; the rest go there the next time they
+    head home. `plan_decider=False` leaves the decider alone, for a fork option whose own steps go there.
+    """
+    new = sim.homes[home_id]
+    now, stamp = sim.clock.tick, sim.clock.stamp()
+    who = household_name(sim, hh)
+    agent = decider or (adults(sim, hh) or _members(sim, hh) or [None])[0]
+    if not available(sim, hh, new):
+        too_late(sim, hh, new, agent)
+        return False
+    if check and not forced and not affordable(sim, hh, home_id, factor):
+        _event(sim, f"{who} can't raise the money for {new.name} after all.", "too_late", new.place, agent)
+        if new.held_for == hh.id:
+            release(new)  # their own offer no longer holds it
+        return False
+    old = sim.homes[hh.home_id]
+    owned = old.owner == hh.id
+    buy = how == "buy"
+    proceeds = sale_proceeds(sim, old.id) if owned else 0
+    # Leave the old home: an owned one goes on the market, a rented one back to the landlord.
+    if owned:
+        pay_household(sim, hh, -proceeds)
+        old.owner, old.listing = "market", "for_sale"
+    else:
+        old.listing = "for_rent"
+    old.household = None
+    release(old)
+    old.pending_emergency = None
+    if old.emergency:  # the problem stays with the house, as lost condition
+        old.emergency = None
+        _change_condition(sim, sim.lots[old.place], -SETTLE_DAMAGE)
+    left = forced or ("sold" if owned else "left")
+    # Pay and take the new home.
+    price = _int(value(sim, home_id) * factor) if buy else 0
+    van = MOVING_COST if buy or not (forced or (hh.arrears > 0 and not owned)) else 0
+    pay_household(sim, hh, price + van)
+    if buy:
+        new.owner = hh.id
+        hh.weekly_rent = 0
+    else:
+        hh.weekly_rent = _int(new.rent * factor)
+    new.listing = None
+    new.household = hh.id
+    release(new)
+    hh.home_id = new.id
+    hh.moved_tick = now
+    hh.trouble_seen = 0
+    hh.hardship_rent = None
+    hh.tax_deferred = False
+    sim.lots[new.place].moving_until = now + MOVE_VAN_MINUTES
+    arrived = "bought" if buy else "rented"
+    paid = price if buy else hh.weekly_rent
+    _history(hh.history, {"tick": now, "time": stamp, "event": left, "home": old.id, "name": old.name,
+                          "price": proceeds or None})
+    _history(hh.history, {"tick": now, "time": stamp, "event": arrived, "home": new.id, "name": new.name, "price": paid})
+    _history(old.history, {"tick": now, "time": stamp, "event": left, "household": hh.id, "price": proceeds or None})
+    _history(new.history, {"tick": now, "time": stamp, "event": arrived, "household": hh.id, "price": paid})
+    # The news.
+    people = _members(sim, hh)
+    ids = [a.id for a in people]
+    tier = TIERS[new.tier]["label"]
+    sold = f", selling {old.name} for ${proceeds:,}" if owned else ""
+    one = _one(sim, hh)
+    if forced == "evicted":
+        _event(sim, f"{LANDLORD} evicts {_hh_lower(sim, hh)} from {old.name}. They move into {new.name} at "
+                    f"${hh.weekly_rent}/week.", "evicted", new.place, agent, ids)
+    elif forced == "forced_sale" and not buy:
+        _event(sim, f"{who} {'is' if one else 'are'} forced to sell {old.name} (${proceeds:,}) and move into "
+                    f"{new.name} at ${hh.weekly_rent}/week.", "forced_sale", new.place, agent, ids)
+    else:
+        if forced == "forced_sale":
+            _event(sim, f"{who} {'is' if one else 'are'} forced to sell {old.name} (${proceeds:,}).", "forced_sale",
+                   old.place, agent, ids)
+            sold = ""
+        if buy:
+            _event(sim, f"{who} {'buys' if one else 'buy'} {new.name} ({tier}, {district_name(sim, new)}) for "
+                        f"${price:,}{sold}.", "home_bought", new.place, agent, ids)
+        else:
+            _event(sim, f"{who} {'moves' if one else 'move'} into {new.name} ({tier}) at ${hh.weekly_rent}/week{sold}.",
+                   "home_rented", new.place, agent, ids)
+    for a in people:
+        if a is not agent:
+            a.remember(stamp, f"Moved to {new.name}.")
+        if (a is not decider or plan_decider) and sim._interruptible(a):
+            sim.start_plan(a, [("move_house", new.place)])
+    return True
+
+
+def forced_move(sim, hh: Household) -> bool:
+    """The floor under a household deep in the red (PLAN 5.5): a cheaper rental (owners: any rental, after a
+    forced sale), else for owners a cheaper home the sale pays for, then both again with crowding relaxed to
+    FORCED_CROWDING a bedroom; else hardship rent for renters, and nowhere_to_go with tax deferral for owners.
+    Returns True when the household moved."""
+    cur = sim.homes[hh.home_id]
+    owner = cur.owner == hh.id
+    how = "forced_sale" if owner else "evicted"
+    for per_bedroom in (2, FORCED_CROWDING):
+        rental = cheapest_rental(sim, hh, below=None if owner else hh.weekly_rent, per_bedroom=per_bedroom)
+        if rental:
+            return move_household(sim, hh, rental.id, "rent", forced=how)
+        if owner:
+            budget = sale_proceeds(sim, cur.id) + max(0.0, funds(sim, hh))
+            pool = [h for h in vacancies(sim, "for_sale")
+                    if fits(sim, hh, h, per_bedroom) and value(sim, h.id) + MOVING_COST <= budget]
+            if pool:
+                home = min(pool, key=lambda h: (value(sim, h.id), -condition_of(sim, h.id), h.id))
+                return move_household(sim, hh, home.id, "buy", forced=how)
+    if owner:
+        _event(sim, f"{household_name(sim, hh)} {'is' if _one(sim, hh) else 'are'} deep in debt and nowhere cheaper "
+                    f"is free.", "nowhere_to_go", cur.place, (adults(sim, hh) or [None])[0],
+               [a.id for a in _members(sim, hh)])
+        _defer_tax(sim, hh)
+    else:
+        _set_hardship_rent(sim, hh)
+    return False
+
+
+def _set_hardship_rent(sim, hh: Household) -> None:
+    rent = hardship_rent(sim, hh)
+    if rent == hh.hardship_rent:
+        return
+    hh.hardship_rent = rent
+    home = sim.homes[hh.home_id]
+    _event(sim, f"{LANDLORD} lowers {_hh_possessive(sim, hh)} rent to ${rent}/week until they are back on their feet.",
+           "hardship", home.place, (adults(sim, hh) or [None])[0], [a.id for a in _members(sim, hh)])
+
+
+def _defer_tax(sim, hh: Household) -> None:
+    if hh.tax_deferred:
+        return
+    hh.tax_deferred = True
+    home = sim.homes[hh.home_id]
+    _event(sim, f"The council defers {_hh_possessive(sim, hh)} property tax.", "hardship", home.place,
+           (adults(sim, hh) or [None])[0], [a.id for a in _members(sim, hh)])
+
+
+# --- group B: the Sunday charges --------------------------------------------------------------
 
 def weekly_charges(sim) -> None:
-    """Sunday 23:00: each household's living adults split the rent (owners pay none) and pay their bills."""
+    """Sunday 23:00, for every household with a living adult (PLAN 5.3):
+
+    1. housing: rent (or hardship rent), or property tax for owners (none while deferred), split equally
+    2. bills, each adult their own   3. adults below zero dip into their savings   4. the bills_paid event
+    5. arrears (decision 58)   6. in_the_red / in_the_red_again   7. hardship rent and tax deferral end after
+    two clean Sundays   8. the floor at arrears >= 3: a forced move, hardship rent or tax deferral, and
+    belt-tightening   9. the home's weekly effect on its residents' reputation.
+    """
     from .sim import BILLS_PER_ADULT, CAR_BILL  # sim imports this module, so not at the top
 
+    now = sim.clock.tick
     for hh in sim.households.values():
         payers = adults(sim, hh)
         if not payers:
             continue
-        rent = 0.0 if tenure(sim, hh) == "owned" else hh.weekly_rent
-        bills = 0.0
+        home = sim.homes[hh.home_id]
+        owned = home.owner == hh.id
+        who = household_name(sim, hh)
+        one = _one(sim, hh)
+        # 1-3. Housing, bills, then savings cover any shortfall.
+        charge = weekly_cost(sim, hh)
+        paid_bills = 0.0
         for a in payers:
             bill = BILLS_PER_ADULT + (CAR_BILL if a.owns_car else 0.0)
-            a.money -= rent / len(payers) + bill
-            bills += bill
-        names = " and ".join(a.name.split()[0] for a in payers)
-        text = f"{names} paid ${rent:.0f} rent and ${bills:.0f} in bills." if rent else f"{names} paid ${bills:.0f} in bills."
-        sim.event(text, tag="bills_paid", place=sim.homes[hh.home_id].place)
+            a.money -= charge / len(payers) + bill
+            paid_bills += bill
         for a in payers:
-            if a.money < 0:
-                sim.event(f"{a.name} is behind on money after the week's bills.", a, tag="in_the_red")
+            if a.money < 0 < a.savings:
+                move = min(a.savings, -a.money)
+                a.savings -= move
+                a.money += move
+        # 4. The receipt.
+        if owned:
+            what = f"${charge} property tax and " if not hh.tax_deferred else ""
+            tail = " (property tax deferred)" if hh.tax_deferred else ""
+        else:
+            what = f"${charge} rent{' (hardship rate)' if hh.hardship_rent is not None else ''} and "
+            tail = ""
+        _event(sim, f"{who} paid {what}${paid_bills:.0f} in bills{tail}.", "bills_paid", home.place,
+               agents=[a.id for a in payers])
+        # 5. Arrears count the weeks in the red that show no recovery.
+        f = funds(sim, hh)
+        went_up = False
+        if f >= 0:
+            hh.arrears = 0
+            hh.clean_sundays += 1
+        else:
+            hh.clean_sundays = 0
+            if hh.grace_until > now:
+                pass
+            elif hh.arrears > 0 and hh.last_funds is not None and f >= hh.last_funds + ARREARS_PROGRESS:
+                pass
+            else:
+                hh.arrears += 1
+                went_up = True
+        hh.last_funds = f
+        # 6. The news: in_the_red at arrears 1, in_the_red_again each time arrears climbs past it. A red week that
+        # holds (grace, or paying it down) at 0 or 2+ is quiet.
+        if f < 0 and (hh.arrears == 1 or (hh.arrears >= 2 and went_up)):
+            worst = min(payers, key=lambda a: a.money)
+            ids = [a.id for a in payers]
+            red = f"{who} {'is' if one else 'are'} ${-f:,.0f} in the red"
+            if hh.arrears >= 2:
+                warning = "The bank warns them: pay up or sell." if owned else f"{LANDLORD} sends a final warning."
+                nth = ORDINALS[hh.arrears - 1] if hh.arrears <= len(ORDINALS) else f"{hh.arrears}th"
+                _event(sim, f"{red} for a {nth} week. {warning}", "in_the_red_again", home.place, worst, ids)
+            else:
+                _event(sim, f"{red} after the week's bills.", "in_the_red", home.place, worst, ids)
+        # 7. Back on their feet.
+        if hh.clean_sundays >= 2:
+            hh.hardship_rent = None
+            hh.tax_deferred = False
+        # 8. The floor.
+        if hh.arrears >= 3:
+            if f < -2 * weekly_outgo(sim, hh):
+                forced_move(sim, hh)
+            elif not owned and cheapest_rental(sim, hh, below=hh.weekly_rent) is None:
+                _set_hardship_rent(sim, hh)
+            elif owned:
+                _defer_tax(sim, hh)
+            hh.tight_until = max(hh.tight_until, now + 8 * DAY)
+    # 9. What the neighbours think of the place.
+    for hh in sim.households.values():
+        home = sim.homes[hh.home_id]
+        if home.household != hh.id:
+            continue
+        st = stage_of(condition_of(sim, home.id))
+        delta = STAGE_REPUTATION[st]
+        if st == 0 and home.tier == "big_house" and home.owner == hh.id:
+            delta = KEPT_BIG_HOUSE_PRIDE
+        if delta:
+            for a in _members(sim, hh):
+                a.reputation = max(0.0, min(100.0, a.reputation + delta))
+
+
+# --- group B: condition, stages and emergencies ----------------------------------------------
+
+def _stage_news(sim, lot: Lot) -> None:
+    """Announce a newly reached shabby, neglected or derelict stage, or a return to kept, for an owner-occupied
+    home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
+    poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
+    when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
+    silent."""
+    st = stage_of(lot.condition)
+    homes = lot_homes(sim, lot.place)
+    home = homes[0] if len(homes) == 1 and owner_occupied(homes[0]) else None
+    lot.worst = max(lot.worst, st)
+    if st <= 1:
+        if st == 0:
+            if home and lot.worst >= 2:
+                _event(sim, f"{home.name} looks as good as new.", "restored", lot.place,
+                       agents=[a.id for a in _members(sim, sim.households[home.household])])
+            lot.worst = 0
+        lot.reported = st
+    elif st > lot.reported:
+        if home and st in STAGE_NEWS:
+            tag, text = STAGE_NEWS[st]
+            _event(sim, text.format(home=home.name), tag, lot.place,
+                   agents=[a.id for a in _members(sim, sim.households[home.household])])
+        lot.reported = st
+
+
+def _change_condition(sim, lot: Lot, delta: float) -> None:
+    lot.condition = max(0.0, min(100.0, lot.condition + delta))
+    _stage_news(sim, lot)
+
+
+def _decay(sim, lot: Lot, homes: list[Home], winter: bool) -> None:
+    """One night of wear on a building, then the landlord's repairs and the market floor."""
+    tier = homes[0].tier
+    season = WINTER_DECAY if winter else 1.0
+    lived_in = [h for h in homes if h.household]
+    if tier == "flat":  # a block wears at the flat rate whether or not its flats are let
+        rate = TIERS["flat"]["decay"] * season
+    elif lived_in:
+        hh = sim.households[lived_in[0].household]
+        rate = TIERS[tier]["decay"] * season * (1 + CROWD_DECAY * max(0, residents(sim, hh) - 2))
+        if lived_in[0].emergency:
+            rate += EMERGENCY_DECAY
+    else:
+        rate = VACANT_DECAY
+    before = lot.condition
+    lot.condition = max(0.0, before - rate)
+    if not lived_in and all(h.owner == "market" for h in homes):
+        lot.condition = max(lot.condition, min(before, MARKET_FLOOR))  # a home for sale never drops below neglected
+    floor = LANDLORD_FLOOR.get(tier)
+    if floor is not None and all(h.owner == "landlord" for h in homes) and lot.condition < floor:
+        lot.condition = float(LANDLORD_RESTORE)
+        lot.works_until = sim.clock.tick + LANDLORD_WORKS_MINUTES
+        if lived_in:
+            _event(sim, f"{LANDLORD} repaints {sim.town.places[lot.place].name}.", "repaint", lot.place)
+    _stage_news(sim, lot)
 
 
 def nightly(sim) -> None:
-    """Midnight: decay, the landlord's repairs, emergencies rolled. Nothing yet."""
+    """Midnight: every building wears; residents of neglected homes lose health and may catch a chill; every
+    owner-occupied home without an emergency rolls for one, which stays hidden until it goes live."""
+    from .forks import luck_odds  # forks reaches housing through default_scores, so not at the top
+
+    winter = sim.clock.season == "winter"
+    for lot in sim.lots.values():
+        _decay(sim, lot, lot_homes(sim, lot.place), winter)
+    for home in sim.homes.values():
+        if not home.household:
+            continue
+        hh = sim.households[home.household]
+        st = stage_of(condition_of(sim, home.id))
+        if st in DAMP_HEALTH:
+            for a in _members(sim, hh):
+                a.health = max(0.0, a.health - DAMP_HEALTH[st] * (2 if winter else 1))
+                p0 = DAMP_CHILL[st] * (2 if winter else 1)
+                p = luck_odds(p0, -1, a.luck)
+                roll = sim.rng.random()
+                sim._log_roll(a, "damp_chill", p, roll, base=p0)
+                if roll < p:
+                    a.health = max(0.0, a.health + CHILL["health"])
+                    a.adjust("fun", CHILL["fun"])
+                    sim.event(f"{a.name} catches a chill in the damp house.", a, tag="damp_chill", place=home.place)
+        payers = adults(sim, hh)
+        if home.owner != hh.id or home.emergency or home.pending_emergency or not payers:
+            continue
+        p0 = (TIERS[home.tier]["emergency_p"] + EMERGENCY_STAGE_P.get(st, 0.0)) * (WINTER_EMERGENCY if winter else 1)
+        p = luck_odds(p0, -1, sum(a.luck for a in payers) / len(payers))
+        roll = sim.rng.random()
+        sim._log_roll(payers[0], "home_emergency", p, roll, base=p0)
+        if roll < p:
+            kinds = ["leak", "electrics", "boiler"] + (["boiler", "boiler"] if winter else []) + \
+                    (["roof"] if sim.weather == "rain" else [])
+            kind = sim.rng.choice(kinds)
+            home.pending_emergency = {"kind": kind, "due": sim.clock.tick + sim.rng.randrange(7 * 60, 21 * 60)}
 
 
 def tick(sim) -> None:
-    """Every tick, before the agents: emergencies going live. Nothing yet."""
+    """Every tick, before the agents: a pending emergency whose time has come goes live, and one left unfixed
+    for EMERGENCY_DAYS settles as lost condition."""
+    now = sim.clock.tick
+    for home in sim.homes.values():
+        pending = home.pending_emergency
+        if pending and pending["due"] <= now:
+            home.pending_emergency = None
+            if owner_occupied(home):
+                home.emergency = {"kind": pending["kind"], "since": now}
+                hh = sim.households[home.household]
+                _event(sim, EMERGENCY_NEWS[pending["kind"]].format(home=home.name), "emergency", home.place,
+                       agents=[a.id for a in _members(sim, hh)])
+        live = home.emergency
+        if live and now - live["since"] >= EMERGENCY_DAYS * DAY:
+            home.emergency = None
+            _event(sim, f"The {EMERGENCY_NAME[live['kind']]} at {home.name} is never properly fixed.",
+                   "emergency_settled", home.place)
+            _change_condition(sim, sim.lots[home.place], -SETTLE_DAMAGE)
+
+
+def fix_emergency(sim, hh: Household, agent: Agent | None = None) -> None:
+    home = sim.homes[hh.home_id]
+    live = home.emergency
+    if not live:
+        return
+    home.emergency = None
+    _event(sim, f"The {EMERGENCY_NAME[live['kind']]} at {home.name} is fixed.", "emergency_settled", home.place, agent)
 
 
 def on_death(sim, agent: Agent) -> None:
-    """After a death and the household update: an emptied home goes back on the market. Nothing yet."""
+    """After a death and the household update: a home with nobody left alive goes back on the market (an estate
+    sale; nobody inherits) or back to the landlord. Children left on their own keep the home."""
+    hh = sim.households[agent.household_id]
+    if _members(sim, hh):
+        return
+    home = sim.homes[hh.home_id]
+    if home.household != hh.id:
+        return
+    now, stamp = sim.clock.tick, sim.clock.stamp()
+    home.household = None
+    home.pending_emergency = None
+    home.emergency = None
+    release(home)
+    _history(home.history, {"tick": now, "time": stamp, "event": "left", "household": hh.id, "price": None})
+    _history(hh.history, {"tick": now, "time": stamp, "event": "left", "home": home.id, "name": home.name,
+                          "price": None})
+    if home.owner == hh.id:
+        home.owner, home.listing = "market", "for_sale"
+        _event(sim, f"{home.name} goes on the market after {agent.name}'s death.", "home_listed", home.place,
+               agents=[agent.id])
+    else:
+        home.listing = "for_rent"
+
+
+# --- group B: fork extras and outcome effects ------------------------------------------------
+
+def _call_off(agent: Agent, opt) -> None:
+    """The home an option was about has gone: the decider goes home instead. _decide starts the option's own
+    steps once the extras are done (PLAN 3.11), so those are what must change; the plan is set too for a caller
+    that doesn't. None of what the option promised happens."""
+    opt.steps = [("idle", "home")]
+    agent.plan = [("idle", "home")]
+    opt.outcomes = []
 
 
 def apply_extra(sim, agent: Agent, fork, opt) -> None:
-    """The housing extras of a chosen option (move, repair, works, ...). Nothing yet."""
+    """The housing extras of a chosen option, at decision time (PLAN 3.11): move, hold, repair, works,
+    fix_emergency, hh_cooldown, belt_tighten, sell_car, sell_stuff, ask_help and odd_jobs."""
+    extra = getattr(opt, "extra", None) or {}
+    if not extra:
+        return
+    hh = sim.households[agent.household_id]
+    now = sim.clock.tick
+    if "hh_cooldown" in extra and fork is not None:
+        hh.cooldowns[fork.kind] = now + extra["hh_cooldown"]
+    if "move" in extra:
+        how = extra.get("how", "buy")
+        down = how == "rent" and fork is not None and fork.kind == "housing_trouble"
+        if not move_household(sim, hh, extra["move"], how, decider=agent, plan_decider=False, check=not down):
+            _call_off(agent, opt)  # nothing to move into
+    if "hold" in extra:  # an offer: nobody else takes the home while the seller thinks it over
+        home = sim.homes[extra["hold"]]
+        if available(sim, hh, home):
+            hold(sim, home, hh, OFFER_HOLD_MINUTES)
+        else:
+            too_late(sim, hh, home, agent)
+            _call_off(agent, opt)
+    lot = sim.lots[sim.homes[hh.home_id].place]
+    if "repair" in extra:
+        _change_condition(sim, lot, extra["repair"])
+    if "works" in extra:
+        lot.works_until = max(lot.works_until, now + extra["works"])
+    if extra.get("fix_emergency"):
+        fix_emergency(sim, hh, agent)
+    if "belt_tighten" in extra:
+        hh.tight_until = max(hh.tight_until, now + extra["belt_tighten"])
+    if extra.get("sell_car"):
+        seller = next((a for a in [agent] + adults(sim, hh) if a.owns_car), None)
+        if seller:
+            seller.owns_car = False
+            seller.savings += CAR_SALE
+            sim.event(f"{seller.name} sells the car for ${CAR_SALE:,}.", seller, tag="car_sold")
+    if "sell_stuff" in extra:
+        agent.money += extra["sell_stuff"]
+        hh.cooldowns["sell_stuff"] = now + STUFF_DAYS * DAY
+        _event(sim, f"{household_name(sim, hh)} {'sells' if _one(sim, hh) else 'sell'} some furniture for "
+                    f"${extra['sell_stuff']:,}.", "stuff_sold", sim.homes[hh.home_id].place, agent)
+    if "ask_help" in extra:
+        friend = sim.agents.get(extra["ask_help"])
+        if friend and friend.alive and sim._interruptible(friend):
+            sim.start_plan(friend, [("help_out", sim.homes[hh.home_id].place)])
+    if extra.get("odd_jobs"):
+        hh.cooldowns["odd_jobs"] = now + ODD_JOBS_DAYS * DAY
+
+
+# An effect's companion value (a deal's "factor", a gift's "amount") comes before its main key ("buy",
+# "gift_from") in the effects dict; the main key takes it from here. Kept on the agent, between keys only.
+COMPANIONS = ("factor", "amount")
+
+
+def _take(agent: Agent, key: str, default):
+    held = getattr(agent, "effect_args", None) or {}
+    out = held.pop(key, default)
+    agent.effect_args = held
+    return out
 
 
 def apply_effect(sim, agent: Agent, key, value) -> bool:
-    """Apply a housing outcome effect; True when the key was a housing one. None yet."""
-    return False
+    """Apply a housing outcome effect for the agent's household; True when `key` was a housing one."""
+    hh = sim.households[agent.household_id]
+    now = sim.clock.tick
+    if key in COMPANIONS:
+        held = getattr(agent, "effect_args", None) or {}
+        held[key] = value
+        agent.effect_args = held
+    elif key == "home_condition":
+        _change_condition(sim, sim.lots[sim.homes[hh.home_id].place], value)
+    elif key == "hh_money":
+        pay_household(sim, hh, -value)
+    elif key == "buy":
+        home = sim.homes[value]
+        move_household(sim, hh, value, "buy" if buys(home) else "rent", _take(agent, "factor", 1.0), decider=agent)
+    elif key == "withdraw":
+        hold(sim, sim.homes[value], None, UNDER_OFFER_DAYS * DAY)
+    elif key == "release":
+        if sim.homes[value].held_for == hh.id:
+            release(sim.homes[value])
+    elif key == "gift_from":
+        giver = sim.agents[value]
+        amount = min(_take(agent, "amount", 0), max(0.0, giver.money + giver.savings))
+        if amount > 0:
+            take = min(max(giver.savings, 0.0), amount)
+            giver.savings -= take
+            giver.money -= amount - take
+            agent.money += amount
+            sim.event(f"{giver.name} gives {agent.name} ${amount:,.0f} to help with the bills.", agent,
+                      tag="help_given", agents=[agent.id, giver.id])
+    elif key == "meet_neighbour":
+        district = sim.town.places[sim.homes[hh.home_id].place].district
+        pool = [a for a in sim.agents.values() if a.alive and a.id != agent.id and a.id not in agent.relationships
+                and a.is_adult == agent.is_adult
+                and sim.town.places[sim.homes[sim.households[a.household_id].home_id].place].district == district]
+        if pool:
+            sim._meet_someone(agent, pool)
+        else:
+            sim._meet_someone(agent)
+    elif key == "fix_emergency":
+        if value:
+            fix_emergency(sim, hh, agent)
+    elif key == "grace":
+        hh.grace_until = max(hh.grace_until, now + value * DAY)
+        hh.cooldowns["grace"] = now + GRACE_DAYS * DAY
+    else:
+        return False
+    return True
 
+
+# --- group B: comfort and the money term of default scores ------------------------------------
 
 def activity_gain_scale(sim, agent: Agent) -> float:
-    """Multiplier on the positive gains of activities at the agent's own home (comfort). 1.0 for now."""
-    return 1.0
+    """Multiplier on the positive gains of activities at the agent's own home: the home's comfort."""
+    hh = sim.households[agent.household_id]
+    if agent.activity_place != sim.homes[hh.home_id].place:
+        return 1.0
+    return comfort(sim, hh)
 
 
 def afford_score(sim, agent: Agent, opt) -> float:
-    """The money term of default_scores: what an option's cost does to its appeal."""
-    if opt.cost > agent.money:
+    """The money term of default_scores (housing.md 10.3).
+
+    Free options score 0. A household-paid cost is weighed against the household's spare funds (funds less two
+    weeks of outgo): -1.5 above spare, else -thrift x (cost / spare)^2. Any other cost: -2 above the
+    character's money, else -thrift x cost / max(money, 50). Thrift counts triple while the household is
+    belt-tightening.
+    """
+    cost = opt.cost
+    if cost <= 0:
+        return 0.0
+    hh = sim.households[agent.household_id]
+    thrift = agent.profile.traits["thrift"] * (3 if hh.tight_until > sim.clock.tick else 1)
+    if getattr(opt, "household_pays", False):
+        spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh)
+        return -1.5 if cost > spare else -thrift * (cost / spare) ** 2
+    if cost > agent.money:
         return -2.0
-    return -opt.cost / max(agent.money, 50) * agent.profile.traits["thrift"]
+    return -cost / max(agent.money, 50) * thrift

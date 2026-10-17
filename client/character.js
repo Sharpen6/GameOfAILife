@@ -1,4 +1,4 @@
-// GameOfAILife character page: who a character is, and their editable play-style profile.
+// GameOfAILife character page: who a character is, their home, and their editable play-style profile.
 //
 // This is a standalone page (character.html?id=<agent id>) with its own WebSocket. Reading a
 // character (get_agent) and saving a profile (set_profile) are God messages, and the server keeps
@@ -15,6 +15,10 @@ const TRAITS = {
   health: ["looks after their health", "ignores their health"],
   adventure: ["tries new things", "sticks to routine"],
 };
+const STAGES = ["kept", "worn", "shabby", "neglected", "derelict"];
+const STAGE_COLORS = ["#6fcf7c", "#b8d46a", "#f6c445", "#ef9b4b", "#ef6b6b"]; // kept .. derelict
+const HISTORY_WORDS = { bought: "Bought", rented: "Moved into", sold: "Sold", left: "Left", evicted: "Evicted from",
+                        forced_sale: "Forced to sell" };
 const CONSENT_KEY = "goal.character.god-ok";
 const FROM_CITY_KEY = "goal.character.from-city"; // left by a plain click on the city view's link
 const REFRESH_MS = 2000;
@@ -32,6 +36,7 @@ let reqSeq = 0;
 let pendingSave = null;  // req_id of the save we are waiting on
 let lastAsk = 0;
 let released = false;
+let districtNames = {};  // district id -> name, from welcome.town.districts
 
 // --- helpers ------------------------------------------------------------------
 
@@ -39,6 +44,11 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 function pretty(s) { return String(s || "").replace(/_/g, " "); }
+function title(s) { return pretty(s).replace(/\b\w/g, c => c.toUpperCase()); }
+function cap(s) { s = String(s || ""); return s.charAt(0).toUpperCase() + s.slice(1); }
+function dollars(n) { return `$${Math.round(Number(n) || 0).toLocaleString("en-US")}`; }
+function districtName(id) { return districtNames[id] || title(id); }
+function dayOf(stamp) { return String(stamp || "").split(" ").slice(0, 2).join(" "); } // "Day 12 Fri 18:20" -> "Day 12"
 function hash(s) {
   let h = 2166136261;
   for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
@@ -98,6 +108,7 @@ function onMessage(msg) {
     $("gate").hidden = true;
     $("page").hidden = false;
     banner("This page is God of the city now. Other God tabs are only watching until you give God back and reload them.", "info");
+    for (const d of (msg.town && msg.town.districts) || []) districtNames[d.id] = d.name;
     setClock(msg.state);
     roster(msg.state.agents);
     ask();
@@ -187,9 +198,9 @@ function render(mode) {
   const goal = a.possessions.savings_goal;
   $("facts").innerHTML = [
     ["Job", a.job ? `${esc(a.job.title)} <span class="small">${esc(hours)}</span>` : esc(job)],
-    ["Home", `${esc(a.possessions.home.name)} <span class="small">rented, $${a.possessions.home.weekly_rent}/week</span>`],
+    ["Home", homeLine(a.possessions.home)],
     ["Now", a.alive ? `${esc(pretty(a.activity))}` : "—"],
-    ["Money", `$${Number(a.money).toFixed(0)}`],
+    ["Money", `$${Number(a.money).toFixed(0)}${a.savings != null ? ` <span class="small">+ ${dollars(a.savings)} saved</span>` : ""}`],
     ["Health · mood", `${Math.round(a.health)} · ${a.mood}`],
     ["Luck", `${Math.round(a.luck)}`],
     ["Played by", a.controller ? esc(a.controller) : '<span class="small">their profile (no controller)</span>'],
@@ -208,6 +219,8 @@ function render(mode) {
       <span class="small">${r.affinity > 0 ? "+" : ""}${r.affinity}</span></li>`;
   }).join("") || '<li class="small">Nobody yet.</li>';
 
+  renderHome(a);
+
   if (mode !== "keep-form") renderForm(a, mode === "live");
   $("promptnote").textContent = a.profile.edited
     ? "Written by you. The sliders still learn from choices, but these words stay until you change them."
@@ -222,11 +235,101 @@ function render(mode) {
     // The same badge classes as the city view, with friendlier words.
     const label = { default: "profile", timeout: "timed out", model: "controller" }[f.decided_by] || f.decided_by;
     const by = `<span class="tag ${esc(f.decided_by)}">${esc(label)}</span>`;
-    const opts = (f.options || []).map((o, i) => `<li class="${i === f.choice ? "chosen" : ""}">${i === f.choice ? "▶ " : ""}${esc(o)}</li>`).join("");
-    return `<li><span class="time">${esc(f.time)} ${by}</span><span class="q">${esc(f.question)}</span>
-      <ul class="opts">${opts}</ul>${f.reason ? `<span class="small">${esc(f.reason)}</span>` : ""}
-      ${f.happened ? `<div class="small">${esc(f.happened)}</div>` : ""}</li>`;
+    const major = f.major ? ' <span class="tag major" title="A big decision: habit settles it only when the choice is very clear">major</span>' : "";
+    const pick = Number.isInteger(f.profile_choice) ? f.profile_choice : null;
+    // Only a controller's answer can differ from the profile: a profile play (habit, default or timeout) is the
+    // profile's own pick, with the Director's noise, even when that isn't the noiseless top score.
+    const asked = f.decided_by === "model";
+    const opts = (f.options || []).map((o, i) => {
+      const mark = asked && i === pick && i !== f.choice ? ' <span class="small" title="What the play-style profile would have picked">(profile)</span>' : "";
+      return `<li class="${i === f.choice ? "chosen" : ""}">${i === f.choice ? "▶ " : ""}${esc(o)}${mark}</li>`;
+    }).join("");
+    const happened = Array.isArray(f.happened) ? f.happened.join(" · ") : f.happened;
+    return `<li><span class="time">${esc(f.time)} ${by}${major}</span><span class="q">${esc(f.question)}</span>
+      <ul class="opts">${opts}</ul>${forkMeta(f, pick)}${f.reason ? `<span class="small">${esc(f.reason)}</span>` : ""}
+      ${happened ? `<div class="small">${esc(happened)}</div>` : ""}</li>`;
   }).join("") || '<li class="small">No decisions yet.</li>';
+}
+
+// Who was asked, how fast they answered, a late answer, and whether the profile agreed (section 3.6).
+function forkMeta(f, pick) {
+  const bits = [];
+  if (f.controller) {
+    bits.push(`asked ${esc(f.controller)}${f.model ? ` <span class="tag">${esc(f.model)}</span>` : ""}`);
+  }
+  if (f.decided_by === "model" && f.answer_seconds != null) bits.push(`answered in ${Number(f.answer_seconds).toFixed(1)} s`);
+  if (f.late && Number.isInteger(f.late.choice)) {
+    const opt = (f.options || [])[f.late.choice];
+    bits.push(`answered late${f.late.seconds != null ? ` (${Number(f.late.seconds).toFixed(1)} s)` : ""}: “${esc(opt)}”, saved to the profile`);
+  }
+  if (pick != null && f.decided_by === "model") {
+    bits.push(pick === f.choice ? "the profile agreed" : "the profile would have picked another option");
+  }
+  return bits.length ? `<div class="small meta">${bits.join(" · ")}</div>` : "";
+}
+
+// --- the home --------------------------------------------------------------------
+
+// The facts line: "28 Main Street · owned" or "Birch Court, flat 2B · rented, $220/week".
+function homeLine(h) {
+  if (!h) return "—";
+  const rented = h.tenure !== "owned";
+  const cost = rented ? `rented, $${h.weekly_cost ?? h.weekly_rent}/week` : "owned";
+  return `${esc(h.name)} <span class="small">${esc(cost)}</span>`;
+}
+
+function renderHome(a) {
+  const h = a.possessions && a.possessions.home;
+  if (!h) { $("home").innerHTML = '<span class="small">No home.</span>'; $("homehist").innerHTML = ""; return; }
+  const history = a.home_history || [];
+  const rows = [];
+  const beds = h.bedrooms ? `, ${h.bedrooms} bedroom${h.bedrooms === 1 ? "" : "s"}` : "";
+  const where = h.district ? ` in ${esc(districtName(h.district))}` : "";
+  rows.push(`<div class="hname">${esc(h.name)}</div>
+    <div class="small">${h.tier_label ? `a ${esc(h.tier_label)}${where}${beds}` : ""}</div>`);
+  const facts = [];
+  if (h.tenure === "owned") {
+    const bought = history.slice().reverse().find(r => r.event === "bought" && r.home === h.id);
+    const how = bought ? ` <span class="small">(bought ${esc(dayOf(bought.time))} for ${dollars(bought.price)})</span>` : "";
+    facts.push(["Tenure", `Owned, worth about ${dollars(h.value)}${how}`]);
+  } else {
+    const rate = h.weekly_cost != null && h.weekly_cost < h.weekly_rent
+      ? ` <span class="small">(hardship rate $${h.weekly_cost} instead of $${h.weekly_rent})</span>` : "";
+    facts.push(["Tenure", `Rented from ${esc(h.landlord || "the landlord")}, $${h.weekly_rent}/week${rate}`]);
+    if (h.value != null) facts.push(["Value", `${dollars(h.value)} <span class="small">on the market</span>`]);
+  }
+  if (h.condition != null) {
+    const st = Number.isInteger(h.stage) ? h.stage : Math.max(0, STAGES.length - 1 - Math.floor(h.condition / 20));
+    const bar = STAGES.map((_, i) => `<span style="background:${i <= STAGES.length - 1 - st ? STAGE_COLORS[st] : "#151a24"}"></span>`).join("");
+    facts.push(["Condition", `${esc(cap(h.stage_name || STAGES[st]))}, ${Math.round(h.condition)}/100
+      <span class="stagebar" title="${esc(h.stage_name || STAGES[st])}">${bar}</span>`]);
+  }
+  if (h.comfort != null) {
+    const pct = Math.round((h.comfort - 1) * 100);
+    facts.push(["Comfort", pct ? `Home comfort ${pct > 0 ? "+" : "−"}${Math.abs(pct)}%` : "Home comfort as usual"]);
+  }
+  if (h.weekly_cost != null) {
+    const what = h.tenure === "owned" ? (h.property_tax && !h.weekly_cost ? "property tax deferred" : "property tax") : "rent";
+    facts.push(["Weekly cost", `$${h.weekly_cost} <span class="small">(${what})</span>`]);
+  }
+  if (h.moved_in) facts.push(["Moved in", esc(h.moved_in)]);
+  if (a.household_funds != null) {
+    facts.push(["Household money", `${dollars(a.household_funds)} <span class="small">(savings and cash of the adults)</span>`]);
+  }
+  if (a.net_worth != null) {
+    const p = a.worth_parts || {};
+    facts.push(["Net worth", `${dollars(a.net_worth)} <span class="small">cash ${dollars(p.cash)}, savings ${dollars(p.savings)}, home ${dollars(p.home)}</span>`]);
+  }
+  rows.push(`<div class="facts">${facts.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join("")}</div>`);
+  if (h.emergency) {
+    rows.push(`<div class="emergency" role="status">${esc(h.emergency.text || "Something has broken.")}
+      <span class="small">since ${esc(h.emergency.since)}</span></div>`);
+  }
+  $("home").innerHTML = rows.join("");
+  $("homehist").innerHTML = history.slice().reverse().map(r =>
+    `<li><span class="time">${esc(r.time)}</span> ${esc(HISTORY_WORDS[r.event] || cap(pretty(r.event)))} ${esc(r.name || r.home)}${
+      r.price ? ` <span class="small">${r.event === "rented" ? `$${r.price}/week` : dollars(r.price)}</span>` : ""}</li>`).join("")
+    || '<li class="small">Has lived here since the start.</li>';
 }
 
 // The sliders are built once and then updated in place: replacing them on every refresh would cancel
