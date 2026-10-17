@@ -18,6 +18,7 @@ import json
 import math
 import mimetypes
 import socket
+import time
 from collections import deque
 from pathlib import Path
 
@@ -37,6 +38,138 @@ AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in
 UNSENT_BYTES = 16384  # how much the kernel may hold that is not on its way to the client yet
 PACED = ("send_message", "invite")  # what lands on other controllers and in every view's frames
 PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
+STATS_SECONDS = 3.0  # a stats push this often while the city runs ...
+STATS_MAJOR_SECONDS = 0.5  # ... and this soon after the last one when a major event happened
+
+
+class Encoded(str):
+    """An encoded push that keeps its message and kind ("state" or "stats"), so a client's queue can merge it
+    into the push of that kind still waiting there. It is the text itself, so it is sent like any other."""
+
+    kind: str
+    msg: dict
+
+
+def encoded(kind: str, msg: dict) -> Encoded:
+    text = Encoded(json.dumps(msg))
+    text.kind, text.msg = kind, msg
+    return text
+
+
+def merge_state(old: dict, new: dict) -> dict:
+    """One state frame for two (PLAN 3.14): the newer frame, with the older one's events before its own, the
+    older one's fork summaries upserted by id (the newer copy wins, in the older one's place), and the older one's
+    `lots` and `homes` when the newer frame lacks them. Neither frame is changed."""
+    state = new["state"]
+    kept = {k: old["state"][k] for k in ("lots", "homes") if k in old["state"] and k not in state}
+    if kept:
+        state = {**state, **kept}
+    forks = list(old["forks"])
+    at = {f["id"]: i for i, f in enumerate(forks)}
+    for f in new["forks"]:
+        if f["id"] in at:
+            forks[at[f["id"]]] = f
+        else:
+            at[f["id"]] = len(forks)
+            forks.append(f)
+    return {**new, "state": state, "events": old["events"] + new["events"], "forks": forks}
+
+
+def merge_stats(old: dict, new: dict) -> dict:
+    """One stats push for two: the newer one, with both pushes' samples (deduped by tick, oldest first) and
+    `full` if either was full."""
+    samples = {s["tick"]: s for s in old["samples"]}
+    samples.update((s["tick"], s) for s in new["samples"])
+    return {**new, "full": bool(old.get("full") or new.get("full")), "samples": [samples[t] for t in sorted(samples)]}
+
+
+MERGE = {"state": merge_state, "stats": merge_stats}
+
+
+class _Entry:
+    """One push waiting in a client's outbox. `text` is None for a merged push (encoded when it is sent) and for
+    the note that makes the sender report skipped texts. `inbox` names the character of a controller's text."""
+
+    __slots__ = ("queued", "text", "inbox", "kind", "msg", "matters")
+
+    def __init__(self, queued: float, text: str | None, inbox: str | None = None):
+        self.queued = queued  # when it was queued, or merged into
+        self.text = text
+        self.inbox = inbox
+        self.kind = getattr(text, "kind", None) if text is not None and not inbox else None
+        self.msg = getattr(text, "msg", None) if self.kind else None
+        self.matters = text is not None and not inbox  # a push that is never skipped
+
+
+class Outbox:
+    """One client's pushes waiting to be sent, oldest first (PLAN 3.14).
+
+    A new state frame merges into the state frame still waiting here, and a new stats push into the stats push,
+    each stamped with the time of the merge; so a slow view gets fewer, fresher frames and holds at most one of
+    each. Everything else is first in, first out.
+    """
+
+    def __init__(self) -> None:
+        self._items: deque[_Entry] = deque()
+        self._ready = asyncio.Event()
+        self._fifo: deque[float] = deque()  # when each unsent first-in-first-out push that matters was queued
+        self._merging: dict[str, _Entry] = {}  # the waiting state frame and stats push, by kind
+        self.sending: _Entry | None = None  # the push the sender is on ...
+        self.started = 0.0  # ... and when it started sending it
+
+    def qsize(self) -> int:
+        return len(self._items)
+
+    def empty(self) -> bool:
+        return not self._items
+
+    def put(self, entry: _Entry) -> None:
+        old = self._merging.get(entry.kind) if entry.kind else None
+        if old is not None:
+            old.msg = MERGE[entry.kind](old.msg, entry.msg)
+            old.text, old.queued = None, entry.queued  # re-encoded for this client when it is sent
+            return
+        if entry.kind:
+            self._merging[entry.kind] = entry
+        elif entry.matters:
+            self._fifo.append(entry.queued)
+        self._items.append(entry)
+        self._ready.set()
+
+    async def get(self) -> _Entry:
+        while not self._items:
+            self._ready.clear()
+            await self._ready.wait()
+        entry = self._items.popleft()
+        if entry.kind:
+            del self._merging[entry.kind]  # taken to be sent: a newer push of its kind is queued afresh
+        return entry
+
+    def begin(self, entry: _Entry, now: float) -> None:
+        """The sender starts sending an entry it got."""
+        self.sending, self.started = entry, now
+
+    def done(self, entry: _Entry) -> None:
+        """The sender is through with an entry it got: sent, or skipped."""
+        if entry.matters and not entry.kind:
+            self._fifo.popleft()  # first in, first out: it is the oldest
+        if self.sending is entry:
+            self.sending = None
+
+    def waiting(self) -> bool:
+        """True when a push that matters is queued behind the one being sent."""
+        return bool(self._merging) or len(self._fifo) > (self.sending is not None and self.sending.matters
+                                                         and not self.sending.kind)
+
+    def stalled(self, now: float) -> bool:
+        """True when the client is too far behind to keep: a first-in-first-out push that matters was queued
+        more than STALL_SECONDS ago and is still unsent, or one send has taken that long while it or another
+        push that matters waits. A merged frame counts from its last merge, so a slow view is not dropped for
+        merely reading slowly."""
+        if self._fifo and now - self._fifo[0] > STALL_SECONDS:
+            return True
+        return (self.sending is not None and now - self.started > STALL_SECONDS
+                and (self.sending.matters or self.waiting()))
 
 
 class GameServer:
@@ -46,9 +179,8 @@ class GameServer:
         self.god: WebSocket | None = None
         self.observers: set[WebSocket] = set()
         self.controllers: dict[str, WebSocket] = {}
-        self._outboxes: dict[WebSocket, asyncio.Queue] = {}  # every session's pushes waiting to be sent
+        self._outboxes: dict[WebSocket, Outbox] = {}  # every session's pushes waiting to be sent
         self._sending: dict[WebSocket, float] = {}  # when the push each sender is on was queued
-        self._urgent: dict[WebSocket, deque[float]] = {}  # when each session's unsent never-skipped pushes were queued
         self._skipped: dict[WebSocket, dict[str, int]] = {}  # texts skipped for each character, not yet reported
         self._connections: set[asyncio.StreamWriter] = set()
         self._server: asyncio.base_events.Server | None = None
@@ -56,6 +188,9 @@ class GameServer:
         self._pending_ticks = 0.0
         self._frames = 0  # state frames encoded so far
         self._housing_sent: dict[str, str] = {}  # the encoded `lots` and `homes` the views last got
+        self._stats_at = time.monotonic()  # when the last stats push went out
+        self._stats_stepped = False  # a tick ran since then
+        self._stats_major = False  # an importance-2 event was drained since then
 
     # --- lifecycle ------------------------------------------------------------
 
@@ -99,13 +234,32 @@ class GameServer:
             if ws:
                 self._push(ws, json.dumps(msg), inbox=msg["agent_id"] if msg["type"] == "message" else None)
         viewers = [ws for ws in [self.god, *self.observers] if ws]
-        if not viewers or not (stepped or events or forks):
+        self._stats_stepped = self._stats_stepped or stepped
+        self._stats_major = self._stats_major or any(ev["importance"] >= 2 for ev in events)
+        if viewers and (stepped or events or forks):
+            state = self.sim.state_json(housing=False)
+            state.update(self._housing_changes())
+            frame = encoded("state", {"type": "state", "speed": self.speed, "state": state, "events": events,
+                                      "forks": forks})
+            for ws in viewers:
+                self._push(ws, frame)
+        self._push_stats(viewers)
+
+    def _push_stats(self, viewers: list[WebSocket]) -> None:
+        """The stats cadence (PLAN 3.8): a push when STATS_SECONDS have passed since the last one and a tick ran,
+        or STATS_MAJOR_SECONDS when a major event happened; nothing while paused and quiet. Encoded once for all
+        viewers."""
+        since = time.monotonic() - self._stats_at
+        if not (self._stats_stepped and since >= STATS_SECONDS or self._stats_major and since >= STATS_MAJOR_SECONDS):
             return
-        state = self.sim.state_json(housing=False)
-        state.update(self._housing_changes())
-        frame = json.dumps({"type": "state", "speed": self.speed, "state": state, "events": events, "forks": forks})
+        self._stats_at += since
+        self._stats_stepped = self._stats_major = False
+        if not viewers:
+            self.sim.stats.take_new_samples()  # nobody to carry them to: a new view's welcome has them all
+            return
+        push = encoded("stats", self.sim.stats_json(full=False))
         for ws in viewers:
-            self._push(ws, frame)
+            self._push(ws, push)
 
     def _housing_changes(self) -> dict:
         """The frame's `lots` and `homes`: each one when its encoded JSON differs from what was last sent, and
@@ -127,7 +281,8 @@ class GameServer:
         return {"type": "welcome", "role": "god", "town": sim.town_json(), "state": state,
                 "history": sim.history[-WELCOME_HISTORY:], "news": sim.news[-WELCOME_NEWS:],
                 "headlines": sim.headlines[-WELCOME_HEADLINES:], "llm_log": sim.llm_log[-WELCOME_LLM_LOG:],
-                "host": {"kind": "server", "controllers": True}, "speed": self.speed}
+                "host": {"kind": "server", "controllers": True}, "stats": sim.stats_json(full=True),
+                "speed": self.speed}
 
     # --- HTTP -----------------------------------------------------------------
 
@@ -199,59 +354,64 @@ class GameServer:
         """Queue a message the client did not ask for, without waiting on the client.
 
         A client with a push that matters still unsent after STALL_SECONDS (it stopped
-        reading, or reads too slowly to keep up) is dropped, so it can never hold up the
+        reading, or one send takes that long) is dropped, so it can never hold up the
         city or pile up more than that many seconds of pushes. A burst of pushes is not lag.
+        A state frame or stats push (an Encoded text) merges into the one of its kind still
+        queued for that client (Outbox), so a view that reads slowly gets fewer, fresher
+        frames and is not dropped for it; the merged push counts as queued when it was merged.
         A controller's `message` push names the character whose inbox has its text, and
         never gets a client dropped: _sender skips it once the client falls behind, and a
         client still on a push queued STALL_SECONDS ago gets no more texts queued, so it
         piles up none. Views see every text as an event in their state frames, which
-        are never skipped, so enough flooding controllers can still get a slow view
-        dropped; anyone may take over as God, so that is a nuisance, not a theft.
+        are never skipped, but merged, so flooding controllers only make those frames longer.
         """
         outbox = self._outboxes.get(ws)
         if outbox is None or ws.closed:
             return
         now = asyncio.get_running_loop().time()
-        urgent, skipped = self._urgent[ws], self._skipped[ws]
-        if urgent and now - urgent[0] > STALL_SECONDS:
+        skipped = self._skipped[ws]
+        if outbox.stalled(now):
             ws.abort()
             return
         if inbox and now - self._sending.get(ws, now) > STALL_SECONDS:
             if not skipped:
-                outbox.put_nowait((now, None, None))  # so _sender reports it even if nothing else comes
+                outbox.put(_Entry(now, None))  # so _sender reports it even if nothing else comes
             skipped[inbox] = skipped.get(inbox, 0) + 1
             return
-        if not inbox:
-            urgent.append(now)
-        outbox.put_nowait((now, text, inbox))
+        outbox.put(_Entry(now, text, inbox))
 
-    async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
+    async def _sender(self, ws: WebSocket, outbox: Outbox) -> None:
         """Send one client's pushes in order, so a slow client only ever holds up itself.
 
         A text the client is falling behind on is skipped: one that has waited half of
         STALL_SECONDS, or AHEAD_SECONDS with a push that matters (a fork) waiting behind it.
         The client is told how many it missed for each character, so it can query the inbox.
+        A merged state frame or stats push is encoded here, once, for this client.
         """
         loop = asyncio.get_running_loop()
-        urgent, skipped = self._urgent[ws], self._skipped[ws]
+        skipped = self._skipped[ws]
         try:
             while True:
-                queued, text, inbox = await outbox.get()
-                waited = loop.time() - queued
-                # Anything still in urgent was queued after this text: earlier pushes are sent.
-                if inbox and (waited > STALL_SECONDS / 2 or waited > AHEAD_SECONDS and urgent):
+                entry = await outbox.get()
+                text, inbox = entry.text, entry.inbox
+                waited = loop.time() - entry.queued
+                # What matters and is still queued was queued after this text: earlier pushes are sent.
+                if inbox and (waited > STALL_SECONDS / 2 or waited > AHEAD_SECONDS and outbox.waiting()):
                     skipped[inbox] = skipped.get(inbox, 0) + 1
                     if not outbox.empty():
+                        outbox.done(entry)
                         continue
                     text = None  # the queue is empty, so report the skipped texts now
-                self._sending[ws] = queued  # everything still queued is newer, so this is the lag
+                self._sending[ws] = entry.queued  # everything still queued is newer, so this is the lag
+                outbox.begin(entry, loop.time())
                 while skipped:  # _push may skip more meanwhile
                     aid, n = skipped.popitem()
                     await ws.send(json.dumps({"type": "messages_skipped", "agent_id": aid, "count": n}))
+                if text is None and entry.msg is not None:
+                    text = json.dumps(entry.msg)
                 if text is not None:
                     await ws.send(text)
-                    if not inbox:
-                        urgent.popleft()
+                outbox.done(entry)
                 del self._sending[ws]
         except ConnectionClosed:
             pass  # the connection is gone: the session's recv() sees that too and ends
@@ -279,8 +439,14 @@ class GameServer:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, UNSENT_BYTES)
         except (AttributeError, OSError):  # not on every system
             pass
-        self._outboxes[ws] = outbox = asyncio.Queue()
-        self._urgent[ws], self._skipped[ws] = deque(), {}
+        try:
+            # Nor may asyncio's own buffer take more than that (64 KB by default): a view's frames wait in the
+            # outbox instead, where a newer frame merges into them, so a slow view's frames stay fresh.
+            ws.writer.transport.set_write_buffer_limits(high=UNSENT_BYTES)
+        except AttributeError:
+            pass
+        self._outboxes[ws] = outbox = Outbox()
+        self._skipped[ws] = {}
         sender = asyncio.create_task(self._sender(ws, outbox))
         try:
             while True:
@@ -321,7 +487,6 @@ class GameServer:
             sender.cancel()
             del self._outboxes[ws]
             self._sending.pop(ws, None)
-            self._urgent.pop(ws, None)
             self._skipped.pop(ws, None)
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
@@ -400,6 +565,11 @@ class GameServer:
         if t == "get_home":
             home = self.sim.home_page(str(msg.get("home_id")))
             return {"type": "home", "home": home} if home else {"type": "error", "error": "unknown home"}
+        if t == "get_stats":
+            return self.sim.stats_json(full=True)
+        if t == "get_decisions":
+            page = self.sim.decisions(msg.get("agent_id"), msg.get("before"), msg.get("limit"))
+            return page if page is not None else {"type": "error", "error": "unknown character"}
         if t == "set_profile":
             ok = self.sim.set_profile(str(msg.get("agent_id")), msg.get("prompt"), msg.get("traits"))
             return {"type": "agent", "agent": self.sim.agent_json(msg["agent_id"])} if ok else {"type": "error", "error": "unknown character"}

@@ -81,9 +81,18 @@ def fake_claude(api_key: str, model: str, system: str, user: str, max_tokens: in
     time.sleep(0.3)
     if "Options:" not in user:
         return "Sounds good, talk soon!"
-    costs = [float(m) for m in re.findall(r"costs \$([0-9.]+)", user)] or [0.0]
+    costs = [option_cost(line) for line in re.findall(r"^\d+\. .*$", user, re.M)] or [0.0]
     choice = costs.index(min(costs))
     return f'Sure. {{"choice": {choice}, "reason": "it is the cheapest, and money is tight"}}'
+
+
+def option_cost(line: str) -> float:
+    """What an option line of fork_prompt costs: "costs $4.00", or minus what it "brings in"."""
+    m = re.search(r"(costs|brings in) \$([0-9,]+(?:\.[0-9]+)?)", line)
+    if not m:
+        return 0.0
+    amount = float(m.group(2).replace(",", ""))
+    return -amount if m.group(1) == "brings in" else amount
 
 
 def parse_choice(text: str, n_options: int) -> tuple[int, str] | None:
@@ -115,6 +124,35 @@ def persona(you: dict) -> str:
             "Stay fully yourself: think and decide the way you would, with your own worries, habits and hopes.")
 
 
+def _dollars(x) -> str:
+    return f"${x:,.0f}" if isinstance(x, (int, float)) else "$?"
+
+
+def home_line(you: dict) -> str:
+    """Where the character lives, what it costs a week and what shape it is in (the fork's `you.home`)."""
+    home = you.get("home")
+    if not isinstance(home, dict):
+        return f"You live at {you.get('home_name')}." if you.get("home_name") else ""
+    tier = str(home.get("tier") or "home").replace("_", " ")
+    owned = home.get("tenure") == "owned"
+    cost = (f"you own it and pay {_dollars(home.get('weekly_cost'))} a week in property tax" if owned
+            else f"you rent it for {_dollars(home.get('weekly_cost'))} a week")
+    line = f"You live at {home.get('name')}, a {tier}; {cost}. It is {home.get('stage_name')} (condition {home.get('condition')}/100)"
+    return line + (f" and worth about {_dollars(home.get('value'))}." if owned else ".")
+
+
+def option_line(opt: dict) -> str:
+    """One option, with its cost: paid by the character, or from the household's pooled money (`household`)."""
+    cost = opt.get("cost") or 0
+    money = f"brings in ${-cost:,.2f}" if cost < 0 else f"costs ${cost:,.2f}"
+    if opt.get("household"):
+        money += " from your household's money and savings"
+    line = f"{opt['index']}. {opt['label']} ({money}"
+    if opt.get("travel_minutes") is not None:
+        line += f", about {opt['travel_minutes']} min away"
+    return line + ")"
+
+
 def fork_prompt(msg: dict) -> str:
     you = msg.get("you", {})
     needs = ", ".join(f"{k} {v}/100" for k, v in (you.get("needs") or {}).items())
@@ -122,15 +160,17 @@ def fork_prompt(msg: dict) -> str:
     goal_line = (f"You are saving for {goal.get('name')}: ${goal.get('saved', 0):.0f} of ${goal.get('target')}."
                  if isinstance(goal, dict) else "No particular savings goal right now.")
     memory = "\n".join(f"- {m}" for m in you.get("recent_memory") or []) or "- nothing much"
-    options = []
-    for opt in msg.get("options", []):
-        line = f"{opt['index']}. {opt['label']} (costs ${opt.get('cost', 0):.2f}"
-        if opt.get("travel_minutes") is not None:
-            line += f", about {opt['travel_minutes']} min away"
-        options.append(line + ")")
+    options = [option_line(opt) for opt in msg.get("options", [])]
+    where = you.get("where_name") or you.get("where")
+    if where and where == you.get("home_name"):
+        where = "home"
+    money = f"You have ${you.get('money', 0):,.2f} on you and ${you.get('savings') or 0:,.2f} in savings"
+    if you.get("household_funds") is not None:
+        money += f"; your household has {_dollars(you['household_funds'])} between you, savings included"
     return (
         f"It is {msg.get('time')}, {msg.get('season')}, weather: {msg.get('weather')}.\n"
-        f"You are at: {you.get('where')}. You have ${you.get('money', 0):.2f}. Health {you.get('health')}/100.\n"
+        f"You are at: {where}. {money}. Health {you.get('health')}/100.\n"
+        f"{home_line(you)}\n"
         f"How you feel (higher means more satisfied): {needs}.\n"
         f"Groceries at home: {you.get('groceries_at_home')}. {goal_line}\n"
         f"Recently:\n{memory}\n\n"
@@ -175,7 +215,8 @@ class ClaudeController:
         self.ws = await connect(self.args.url)
         chars = self.args.characters
         wanted = "all" if chars == "all" else [c.strip() for c in chars.split(",") if c.strip()]
-        await self.send({"type": "hello", "role": "controller", "name": self.args.name, "characters": wanted})
+        await self.send({"type": "hello", "role": "controller", "name": self.args.name, "characters": wanted,
+                         "model": self.args.model})  # shown to God's dashboard, never to the characters
         try:
             while True:
                 msg = json.loads(await self.ws.recv())

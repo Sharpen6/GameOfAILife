@@ -228,8 +228,8 @@ class Simulation:
         """God's `stats` push (PLAN 3.8), built by stats.stats_json."""
         return stats.stats_json(self, full)
 
-    def decisions(self, agent_id: str | None = None, before: str | None = None, limit: int = 30) -> dict:
-        """The `get_decisions` reply body, built by stats.decisions."""
+    def decisions(self, agent_id: str | None = None, before: str | None = None, limit: int = 30) -> dict | None:
+        """The `get_decisions` reply body, built by stats.decisions; None for an unknown character."""
         return stats.decisions(self, agent_id, before, limit)
 
     # --- events ---------------------------------------------------------------

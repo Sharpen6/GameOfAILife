@@ -584,7 +584,7 @@
       const pct = round(100 * T.timeouts / T.asked);
       return ["ai", `AI <b>slow</b><span class="dash-long">: ${pct}% timed out today</span>`, `slow: ${pct}% timed out today (${T.timeouts} of ${T.asked} asks)`, "amber"];
     }
-    if (!S.playing) return ["ai", "AI: <span class=\"dash-long\">nobody </span>playing", "No AI model is playing anyone", "muted"];
+    if (!S.playing) return ["ai", "AI: nobody<span class=\"dash-long\"> playing</span>", "No AI model is playing anyone", "muted"];
     return ["ai", `AI<span class="dash-long">: ${S.playing} playing,</span> <b>${S.thinking}</b> thinking`,
       `${S.playing} characters played by an AI model, ${S.thinking} thinking now`];
   }
