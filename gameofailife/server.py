@@ -147,7 +147,10 @@ class GameServer:
                     if msg.get("type") != "hello":
                         await self._send(ws, {"type": "error", "error": "say hello first"})
                         continue
-                    role, name = await self._hello(ws, msg)
+                    try:
+                        role, name = await self._hello(ws, msg)
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        await self._send(ws, {"type": "error", "error": f"bad hello: {exc}"})
                     continue
                 watching = role == "god" and ws is not self.god
                 try:
@@ -157,7 +160,7 @@ class GameServer:
                         reply = self._god(msg)
                     else:
                         reply = self._controller(name, msg)
-                except (ValueError, TypeError, KeyError) as exc:
+                except (ValueError, TypeError, KeyError, AttributeError) as exc:
                     reply = {"type": "error", "error": f"bad message: {exc}"}
                 if reply:
                     if "req_id" in msg:
@@ -194,6 +197,10 @@ class GameServer:
             wanted = msg.get("characters") or []
             if wanted == "all":
                 wanted = [a.id for a in self.sim.living() if not a.controller]
+            if not isinstance(wanted, list):
+                del self.controllers[name]
+                raise TypeError('characters must be a list of ids or "all"')
+            wanted = [str(w) for w in wanted]
             claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
             await self._send(ws, {
                 "type": "welcome", "role": "controller", "name": name, "characters": claimed,
@@ -205,6 +212,7 @@ class GameServer:
                 self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
             return "controller", name
         await self._send(ws, {"type": "error", "error": "role must be god or controller"})
+        await ws.close()
         raise ConnectionClosed()
 
     def _god(self, msg: dict) -> dict | None:

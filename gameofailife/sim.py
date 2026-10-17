@@ -450,9 +450,11 @@ class Simulation:
         agent = self.agents[fork.agent_id]
         if controller is not None and agent.controller != controller:
             return {"accepted": False, "error": "not your character"}
-        if not isinstance(choice, int) or not 0 <= choice < len(fork.options):
+        if not isinstance(choice, int) or isinstance(choice, bool) or not 0 <= choice < len(fork.options):
             return {"accepted": False, "error": "choice must be 0 to 3"}
         elapsed = self.now() - self.asked_at.get(fork_id, self.now())
+        if fork.status == "asked" and elapsed > ANSWER_SECONDS:
+            self._check_timeouts()  # the deadline passed before the next tick noticed
         if fork.status == "asked" and elapsed <= ANSWER_SECONDS:
             self._learn(agent, fork, choice, reason)
             self._decide(agent, fork, choice, "model", reason)
@@ -690,10 +692,10 @@ class Simulation:
         agent = self.agents.get(agent_id)
         if not agent:
             return False
-        for t, v in (traits or {}).items():
+        for t, v in (traits if isinstance(traits, dict) else {}).items():
             if t in agent.profile.traits:
                 agent.profile.traits[t] = round(max(0.0, min(1.0, float(v))), 3)
-        if prompt is not None and prompt.strip():
+        if isinstance(prompt, str) and prompt.strip():
             agent.profile.prompt = prompt.strip()[:1000]
             agent.profile.prompt_edited = True
         elif traits and not agent.profile.prompt_edited:
