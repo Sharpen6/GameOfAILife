@@ -24,6 +24,15 @@ def labels(fork: Fork | None) -> list[str]:
     return [o.label for o in fork.options] if fork else []
 
 
+def going(fork: Fork | None, activity: str) -> list[str]:
+    """The places the fork's options go to first for `activity` (each builder picks the nearest one open)."""
+    return [o.steps[0][1] for o in fork.options if o.steps and o.steps[0][0] == activity] if fork else []
+
+
+def option_for(fork: Fork, activity: str) -> int:
+    return next(i for i, o in enumerate(fork.options) if o.steps and o.steps[0][0] == activity)
+
+
 def best_routes(town, start) -> dict[tuple[int, int], tuple[int, int]]:
     """Reference answer: (length, off-road tiles) of the best shortest path to every tile, by Dijkstra."""
     best = {start: (0, 0)}
@@ -136,41 +145,58 @@ class OpeningHoursForksTest(unittest.TestCase):
         self.sim.household(agent).groceries = 0
         return agent
 
-    def last_minute(self, agent, place_id: str, activity: str) -> int:
-        """The last minute of the day a trip to the place is offered: the walk there and the whole activity
-        still end before it shuts (walk and hours come from the city)."""
-        closes = self.sim.town.places[place_id].hours[1] * 60
-        return closes - self.sim.walk_minutes(agent, place_id) - sim_module.ACTIVITIES[activity].minutes - 1
+    def last_minute(self, agent, kind: str, activity: str) -> tuple[int, str]:
+        """The last minute of the day a trip to a place of `kind` is offered, and the place: the walk there and the
+        whole activity still end before it shuts, at the place of that kind where that is latest (walks and hours
+        come from the city)."""
+        minutes = sim_module.ACTIVITIES[activity].minutes
+        return max((p.hours[1] * 60 - self.sim.walk_minutes(agent, p.id) - minutes - 1, p.id)
+                   for p in self.sim.town.places.values() if p.kind == kind)
+
+    def assert_fits(self, agent, place_id: str, activity: str) -> None:
+        """The place is open when the character walks in and stays open for the whole activity."""
+        place = self.sim.town.places[place_id]
+        arrive = self.sim.clock.minute_of_day + self.sim.walk_minutes(agent, place_id)
+        self.assertTrue(place.hours[0] * 60 <= arrive and arrive + sim_module.ACTIVITIES[activity].minutes
+                        < place.hours[1] * 60, (place_id, self.sim.clock.stamp()))
 
     def test_no_cafe_meal_when_it_shuts_before_arrival(self):
         ari = self.hungry("ari")
-        last = self.last_minute(ari, "cafe", "eat_out")
-        at(self.sim, 2, 0, last + 1)  # Wed; Corner Cafe would shut before Ari's meal there is over
-        self.assertNotIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
-        at(self.sim, 2, 0, last)  # a minute earlier the meal still fits
-        self.assertIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
-        at(self.sim, 2, 12, 0)
-        self.assertIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
+        last, _ = self.last_minute(ari, "cafe", "eat_out")
+        at(self.sim, 2, 0, last + 1)  # Wed; every cafe would shut before Ari's meal there is over
+        self.assertEqual(going(hunger_fork(self.sim, ari), "eat_out"), [])
+        for minute in (last, 12 * 60, 18 * 60 + 30):  # a minute earlier the meal still fits, and at noon
+            at(self.sim, 2, 0, minute)
+            fork = hunger_fork(self.sim, ari)
+            [cafe] = going(fork, "eat_out")
+            self.assertIn(f"Eat at {self.sim.town.places[cafe].name}", labels(fork))
+            self.assert_fits(ari, cafe, "eat_out")
 
     def test_no_groceries_trip_when_the_market_shuts_before_arrival(self):
         eli = self.hungry("eli")
-        last = self.last_minute(eli, "market", "buy_groceries")
-        at(self.sim, 2, 0, last + 1)  # Wed; Fresh Market would shut before Eli's shopping there is done
+        last, market = self.last_minute(eli, "market", "buy_groceries")
+        at(self.sim, 2, 0, last + 1)  # Wed; every market would shut before Eli's shopping there is done
         fork = hunger_fork(self.sim, eli)
-        self.assertNotIn("Buy groceries, then cook", labels(fork))
+        self.assertEqual(going(fork, "buy_groceries"), [])
         self.assertEqual(len(fork.options), 4)
         self.assertIsNone(groceries_fork(self.sim, eli))
         at(self.sim, 2, 0, last)  # a minute earlier the shop still fits
-        self.assertIn("Buy groceries, then cook", labels(hunger_fork(self.sim, eli)))
-        self.assertIn("Buy groceries now", labels(groceries_fork(self.sim, eli)))
+        name = self.sim.town.places[market].name
+        self.assertEqual(going(hunger_fork(self.sim, eli), "buy_groceries"), [market])
+        self.assertIn(f"Buy groceries at {name}, then cook", labels(hunger_fork(self.sim, eli)))
+        self.assertIn(f"Buy groceries at {name} now", labels(groceries_fork(self.sim, eli)))
 
     def test_no_groceries_trip_that_arrives_before_opening(self):
         eli = self.hungry("eli")
-        walk, opens = self.sim.walk_minutes(eli, "market"), self.sim.town.places["market"].hours[0] * 60
-        at(self.sim, 2, 0, opens - walk - 7)  # would arrive 7 minutes before the market opens
+        self.assertNotIn(3, eli.job.workdays)  # Thursday: no shift to get to
+        first, market = min((p.hours[0] * 60 - self.sim.walk_minutes(eli, p.id), p.id)
+                            for p in self.sim.town.places.values() if p.kind == "market")
+        at(self.sim, 3, 0, first - 7)  # would arrive 7 minutes before any market opens
         self.assertIsNone(groceries_fork(self.sim, eli))
-        at(self.sim, 2, 0, opens - walk + 3)  # arrives 3 minutes after it opens
-        self.assertIn("Buy groceries now", labels(groceries_fork(self.sim, eli)))
+        at(self.sim, 3, 0, first + 3)  # arrives 3 minutes after the first one opens
+        fork = groceries_fork(self.sim, eli)
+        self.assertEqual(going(fork, "buy_groceries"), [market])
+        self.assertIn(f"Buy groceries at {self.sim.town.places[market].name} now", labels(fork))
 
     def test_no_invite_fork_to_a_place_shut_on_arrival(self):
         tom, ari = self.sim.agents["tom"], self.sim.agents["ari"]
@@ -231,23 +257,30 @@ class ShutOnArrivalTest(unittest.TestCase):
                 return
         self.fail(f"{agent.id} never got there")
 
+    def latest(self, agent, kind: str, activity: str) -> str:
+        """The place of `kind` a trip for `activity` can still be offered at latest in the day."""
+        minutes = sim_module.ACTIVITIES[activity].minutes
+        return max((self.closes(p.id) - self.sim.walk_minutes(agent, p.id) - minutes, p.id)
+                   for p in self.sim.town.places.values() if p.kind == kind)[1]
+
     def test_shut_market_sells_nothing_and_refunds(self):
         eli = self.sim.agents["eli"]
         eli.needs["hunger"], eli.money = 20, 300.0
         hh = self.sim.household(eli)
         hh.groceries = 0
-        walk, closes = self.sim.walk_minutes(eli, "market"), self.closes("market")
+        market = self.sim.town.places[self.latest(eli, "market", "buy_groceries")]
+        walk, closes = self.sim.walk_minutes(eli, market.id), self.closes(market.id)
         at(self.sim, 2, 0, closes - walk - 20 - 10)  # the walk and 20 minutes' shopping fit before closing
-        fork = self.decide_late(eli, hunger_fork, "Buy groceries, then cook", (2, 0, closes - walk + 3))
+        fork = self.decide_late(eli, hunger_fork, f"Buy groceries at {market.name}, then cook", (2, 0, closes - walk + 3))
         self.assertEqual(eli.money, 265.0)  # paid on deciding
         with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):  # no next meal spends the refund
-            self.run_until(eli, lambda a: a.activity_place != "market" or a.state != "travelling",
-                           limit=self.trip(eli, "market", 0))
+            self.run_until(eli, lambda a: a.activity_place != market.id or a.state != "travelling",
+                           limit=self.trip(eli, market.id, 0))
         self.assertEqual(hh.groceries, 0)
         self.assertEqual(eli.money, 300.0)
         self.assertNotIn(("eat_home", "home"), eli.plan)  # no cooking from an empty fridge
         self.assertFalse([p for p in eli.pending_outcomes if p["fork"] == fork.id])
-        self.assertTrue(any("finds Fresh Market closed" in m for m in eli.memory))
+        self.assertTrue(any(f"finds {market.name} closed" in m for m in eli.memory))
 
     def test_shut_cafe_charges_nothing_for_the_meal(self):
         omer = self.sim.agents["omer"]
@@ -281,9 +314,11 @@ class ShutOnArrivalTest(unittest.TestCase):
         hh.groceries = 0
         at(self.sim, 2, 12, 0)
         fork = hunger_fork(self.sim, eli)
-        self.sim._decide(eli, fork, labels(fork).index("Buy groceries, then cook"), "model", "")
+        buy = option_for(fork, "buy_groceries")
+        market = fork.options[buy].steps[0][1]  # the nearest open market
+        self.sim._decide(eli, fork, buy, "model", "")
         self.run_until(eli, lambda a: a.activity == "eat_home" and a.state == "busy",
-                       limit=self.trip(eli, "market", 20))
+                       limit=self.trip(eli, market, 20))
         self.assertEqual(eli.money, 265.0)
         self.assertEqual(hh.groceries, 9)  # ten bought, one being cooked
 
@@ -322,7 +357,11 @@ class PaydayAloneTest(unittest.TestCase):
 
     def test_family_still_offered_dinner(self):
         sim = Simulation(seed=SEED)
-        self.assertIn("Treat the family to dinner at Corner Cafe", labels(self.payday(sim, "dana")))
+        fork = self.payday(sim, "dana")
+        treat = fork.options[option_for(fork, "family_dinner")]
+        cafe = sim.town.places[treat.steps[0][1]]  # the cafe nearest home: the whole family goes to that one
+        self.assertEqual(treat.label, f"Treat the family to dinner at {cafe.name}")
+        self.assertEqual(treat.extra, {"family": True, "place": cafe.id})
 
 
 class QuietOptionsHaveOutcomesTest(unittest.TestCase):

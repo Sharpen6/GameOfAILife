@@ -191,7 +191,9 @@ class StateJsonTest(unittest.TestCase):
             self.assertIn(row["vehicle"], ("walk", "run", "car", "taxi", "ambulance", "bus"))
             self.assertIn(row["home"], sim.homes)
             self.assertIsInstance(row["car"], bool)
-            self.assertIsNone(row["riding"])  # no buses run until P1
+            self.assertTrue(row["riding"] is None or row["riding"] in transit.BUS_IDS, row["riding"])
+            if row["riding"] is not None:  # a rider rides on the bus's tile
+                self.assertEqual(row["vehicle"], "bus")
             self.assertTrue(row["inside"] is None or row["inside"] in sim.town.places)
         if housing_maps:
             self.assertEqual(set(state["lots"]), set(sim.lots))
@@ -974,7 +976,29 @@ class ControllerEventsTest(unittest.IsolatedAsyncioTestCase):
 
 
 class PaydayShoppingTest(unittest.TestCase):
-    """The shopping trip is offered only when Fresh Market stays open for it (it was cut off at 21:00)."""
+    """The shopping trip goes to the nearest shop or market that stays open for all of it (it was cut off at 21:00),
+    and is offered there only while it fits before closing: Fresh Market for Dana, then a shop further away."""
+
+    @staticmethod
+    def fits(sim: Simulation, agent, place) -> bool:
+        """Open when the character walks in and still open SHOP_MINUTES later (travel.nearest's stay rule)."""
+        arrive = sim.clock.hour + sim.walk_minutes(agent, place.id) / 60
+        return place.is_open(arrive) and place.is_open(arrive + forks.SHOP_MINUTES / 60)
+
+    def nearest_shop(self, sim: Simulation, agent):
+        fit = [(sim.walk_minutes(agent, p.id), p.id) for p in sim.town.places.values()
+               if p.kind in ("shop", "market") and self.fits(sim, agent, p)]
+        return sim.town.places[min(fit)[1]] if fit else None
+
+    @staticmethod
+    def shopping(fork: Fork) -> int:
+        return next(i for i, o in enumerate(fork.options) if o.steps and o.steps[0][0] == "shopping")
+
+    @staticmethod
+    def last_at_market(sim: Simulation) -> int:
+        """The last minute the trip to Fresh Market is offered to Dana."""
+        return (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(sim.agents["dana"], "market")
+                - forks.SHOP_MINUTES - 1)
 
     def test_shopping_is_offered_only_when_it_fits_before_closing(self):
         sim = Simulation(seed=SEED)
@@ -990,16 +1014,31 @@ class PaydayShoppingTest(unittest.TestCase):
         def labels(fork: Fork | None) -> list[str]:
             return [o.label for o in fork.options] if fork else []
 
-        offered = [m for m in range(17 * 60, 20 * 60) if "Buy something nice for yourself" in labels(offer(m))]
-        last = market.hours[1] * 60 - sim.walk_minutes(dana, "market") - forks.SHOP_MINUTES - 1
-        self.assertEqual(offered, list(range(17 * 60, min(last, 20 * 60 - 1) + 1)))
-        self.assertLess(last, 20 * 60 - 1)  # so the evening's last minutes offer something else
-        late = labels(offer(last + 1))
-        self.assertIn("Order something nice online", late)
-        self.assertEqual(len(set(late)), 4)
+        offered = collections.defaultdict(list)  # place id -> the minutes the trip there is offered
+        for m in range(17 * 60, 20 * 60):
+            fork = offer(m)
+            self.assertEqual(len(set(labels(fork))), 4)
+            shop = self.nearest_shop(sim, dana)
+            if shop is None:
+                self.assertIn("Order something nice online", labels(fork))
+                continue
+            buy = fork.options[self.shopping(fork)]
+            self.assertEqual((buy.label, buy.steps[0]), (f"Buy something nice at {shop.name}", ("shopping", shop.id)))
+            offered[shop.id].append(m)
+        last = self.last_at_market(sim)
+        self.assertEqual(offered["market"], list(range(17 * 60, min(last, 20 * 60 - 1) + 1)))
+        self.assertLess(last, 20 * 60 - 1)  # so the evening's last minutes go somewhere else
+        late = offer(last + 1)
+        self.assertNotEqual(late.options[self.shopping(late)].steps[0][1], "market")
+        self.assertEqual(len(set(labels(late))), 4)
+        with mock.patch.object(Simulation, "nearest", lambda *args, **kwargs: None):  # nothing fits: shop online
+            nowhere = labels(offer(last + 1))
+        self.assertIn("Order something nice online", nowhere)
+        self.assertEqual(len(set(nowhere)), 4)
 
-        fork = offer(last)  # the latest the trip is offered: it must still fit
-        sim._decide(dana, fork, labels(fork).index("Buy something nice for yourself"), "model", "")
+        fork = offer(last)  # the latest the trip to Fresh Market is offered: it must still fit
+        self.assertEqual(fork.options[self.shopping(fork)].steps[0], ("shopping", "market"))
+        sim._decide(dana, fork, self.shopping(fork), "model", "")
         shopped = 0
         for _ in range(2 * sim.walk_minutes(dana, "market") + 120):
             sim.clock.advance()
@@ -1013,15 +1052,16 @@ class PaydayShoppingTest(unittest.TestCase):
         self.assertEqual(sim_module.ACTIVITIES["shopping"].minutes, forks.SHOP_MINUTES)
 
     def ask_and_answer(self, minute: int, delay: float) -> tuple[Simulation, list[dict], int]:
-        """Dana's Friday payday fork at `minute`, asked of her controller, who picks the shopping trip `delay`
-        real seconds later; returns the sim, its events and the minutes she then shops."""
+        """Dana's Friday payday fork at `minute`, asked of her controller, who picks the shopping trip (to Fresh
+        Market) `delay` real seconds later; returns the sim, its events and the minutes she then shops."""
         clock = FakeClock()
         sim = Simulation(seed=SEED, now=clock)
         dana = sim.agents["dana"]
         sim.clock.tick = 4 * MINUTES_PER_DAY + minute
         dana.last_payday, dana.money, dana.state, dana.plan = -1, 900.0, "idle", []
         fork = payday_fork(sim, dana)
-        buy = [o.label for o in fork.options].index("Buy something nice for yourself")
+        buy = self.shopping(fork)
+        self.assertEqual(fork.options[buy].steps[0], ("shopping", "market"))
         sim.claim(dana.id, "bot")
         with mock.patch.object(sim_module, "default_scores", lambda agent, fork, sim: [0.0] * 4):
             sim.director(dana, fork)  # tied: no habit, so the controller is asked
@@ -1053,9 +1093,7 @@ class PaydayShoppingTest(unittest.TestCase):
     def test_a_late_answer_calls_off_a_trip_that_no_longer_fits(self):
         """The controller answers 4 real seconds (9 game minutes) after the last minute the trip is offered:
         Fresh Market would shut before the 45 minutes are up, so the trip is off and the $60 comes back."""
-        sim = Simulation(seed=SEED)
-        last = (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(sim.agents["dana"], "market")
-                - forks.SHOP_MINUTES - 1)
+        last = self.last_at_market(Simulation(seed=SEED))
         sim, events, shopped = self.ask_and_answer(last, 4.0)
         self.assertEqual(shopped, 0)
         closed = [e for e in events if e["tag"] == "closed"]
@@ -1063,9 +1101,7 @@ class PaydayShoppingTest(unittest.TestCase):
         self.assertEqual(closed[0]["place"], "market")
 
     def test_an_answer_that_still_fits_shops_for_the_whole_trip(self):
-        sim = Simulation(seed=SEED)
-        last = (sim.town.places["market"].hours[1] * 60 - sim.walk_minutes(sim.agents["dana"], "market")
-                - forks.SHOP_MINUTES - 1)
+        last = self.last_at_market(Simulation(seed=SEED))
         delay = 4.0
         sim, events, shopped = self.ask_and_answer(last - int(delay * TICKS_PER_REAL_SECOND) + 1, delay)
         self.assertEqual(shopped, forks.SHOP_MINUTES)  # it ends as the doors shut: not cut short
@@ -1091,23 +1127,44 @@ class CafeClosingTest(unittest.TestCase):
         self.far.state, self.far.plan, self.far.cooldowns = "idle", [], {}
 
     def test_free_time_and_lonely_offer_the_cafe_only_while_it_fits(self):
+        """Each builder's hang-out goes to the cafe nearest the character (or nearest both, with a friend) that is
+        open when they walk in and for all 90 minutes; with none, or with the shift still ahead, the fixed fallback."""
         far = self.far
         far.needs["fun"], far.needs["social"], far.money = 20, 20, 500.0
+
+        def fits(place) -> bool:
+            arrive = self.sim.clock.hour + self.sim.walk_minutes(far, place.id) / 60
+            return place.is_open(arrive) and place.is_open(arrive + forks.HANG_OUT_MINUTES / 60)
+
         offered = {"free_time": [], "lonely": []}
+        expected = []
         for minute in range(9 * 60, 21 * 60):
             self.at(minute)
+            cafes = [p for p in self.sim.town.places.values() if p.kind == "cafe" and fits(p)]
+            if cafes and self.sim._shift_start_tick(far) is None:
+                expected.append(minute)
             for kind, builder in (("free_time", forks.free_time_fork), ("lonely", forks.lonely_fork)):
                 fork = builder(self.sim, far)
                 labels = [o.label for o in fork.options]
                 self.assertEqual(len(set(labels)), 4, labels)
-                if any(step[1] == "cafe" for o in fork.options for step in o.steps):
+                going = [step[1] for o in fork.options for step in o.steps if step[0] == "hang_out"]
+                if going:
                     offered[kind].append(minute)
+                    self.assertIn(self.sim.town.places[going[0]], cafes, (kind, minute))
+                    name = self.sim.town.places[going[0]].name
+                    self.assertTrue(any(name in label for label in labels), labels)
                 elif kind == "free_time":
                     self.assertIn("Play a board game at home", labels)
                 else:
                     self.assertIn("Message a few people from home", labels)
+        self.assertTrue(expected)
         for kind, minutes in offered.items():
-            self.assertEqual(minutes, list(range(9 * 60, self.last + 1)), kind)
+            self.assertEqual(minutes, expected, kind)
+        self.assertIn(self.last, expected)  # Corner Cafe's last minute, and later ones too: the Noodle Bar is open
+        with mock.patch.object(Simulation, "nearest", lambda *args, **kwargs: None):  # every cafe shut
+            self.at(self.last + 1)
+            self.assertIn("Play a board game at home", [o.label for o in forks.free_time_fork(self.sim, far).options])
+            self.assertIn("Message a few people from home", [o.label for o in forks.lonely_fork(self.sim, far).options])
 
     def decide_late(self, cost: float, minutes_late: int) -> tuple[int, list[dict]]:
         """A cafe hang-out costing `cost`, offered at the last minute and decided `minutes_late` later; returns the
@@ -1171,9 +1228,9 @@ class ErrandTest(unittest.TestCase):
 
 
 class WorkCoffeeTest(unittest.TestCase):
-    """PLAN decision 55: the work fork's third option is a coffee at Corner Cafe when the cafe is open on the way
-    for the whole cup, otherwise "Make a coffee at home, then go" with the cafe option's tags, lateness by timing
-    and no meet_new."""
+    """PLAN decision 55: the work fork's third option is a coffee at the cafe on the way (at most
+    forks.COFFEE_DETOUR minutes out of it) when it is open for the whole cup, otherwise "Make a coffee at home, then
+    go" with the cafe option's tags, lateness by timing and no meet_new."""
 
     def setUp(self):
         self.sim = Simulation(seed=SEED)
@@ -1197,6 +1254,14 @@ class WorkCoffeeTest(unittest.TestCase):
             self.assertEqual(len({o.label for o in fork.options}), 4, [o.label for o in fork.options])
         return fork
 
+    def on_the_way(self, agent) -> list:
+        """The cafes adding at most forks.COFFEE_DETOUR minutes to the walk from home to work."""
+        town, job = self.sim.town, agent.job.place_id
+        home = town.places[self.sim.home_of(agent)].entry
+        return [c for c in town.places.values() if c.kind == "cafe"
+                and town.walk_minutes(home, c.id) + (0 if c.id == job else town.walk_minutes(c.entry, job))
+                <= town.walk_minutes(home, job) + forks.COFFEE_DETOUR]
+
     def expected_late(self, agent) -> float:
         home = self.sim.home_of(agent)
         trip = (self.sim.walk_minutes(agent, home) + forks.COFFEE_MINUTES
@@ -1215,12 +1280,21 @@ class WorkCoffeeTest(unittest.TestCase):
                 self.assertNotIn("meet_new", [o.id for o in coffee.outcomes])
                 late = {o.id: o.p for o in coffee.outcomes}["late"]
                 self.assertEqual(late, self.expected_late(agent))
-                # Later, once the cafe is open on the way, the same slot is the cafe, with the same tags.
-                minute = self.cafe.hours[0] * 60 - self.sim.walk_minutes(agent, "cafe")
+                # Later, once a cafe on the way is open, the same slot is that cafe, with the same tags. A job far
+                # from every cafe (the hospital, the warehouses) keeps the cup at home all the way to the shift.
+                on_the_way = self.on_the_way(agent)
+                if not on_the_way:
+                    start = agent.job.start_hour * 60
+                    self.assertEqual({self.options(agent, m).options[2].label for m in range(start - forks.WORK_LEAD,
+                                                                                               start + 1)},
+                                     {coffee.label})
+                    continue
+                minute = min(c.hours[0] * 60 - self.sim.walk_minutes(agent, c.id) for c in on_the_way)
                 cafe = self.options(agent, minute).options[2]
-                self.assertEqual(cafe.label, "Grab a coffee at Corner Cafe first")
+                self.assertIn(cafe.label, [f"Grab a coffee at {c.name} first" for c in on_the_way])
                 self.assertEqual(cafe.tags, coffee.tags)
                 self.assertNotEqual(self.options(agent, minute - 1).options[2].label, cafe.label)
+        self.assertTrue([a for a in self.early if self.on_the_way(a)])  # the 06:00 baker, at Maple Bakery
 
     def test_lateness_follows_the_timing(self):
         """The late odds are 0 while the cup at home still gets the character in on time, and rise by a fortieth
@@ -1245,8 +1319,8 @@ class WorkCoffeeTest(unittest.TestCase):
     def test_the_cup_must_fit_before_the_cafe_shuts(self):
         """With a shift starting an hour before Corner Cafe shuts, the cafe is offered up to the last minute the
         15-minute cup still fits on arrival; after that it is the coffee at home, though the cafe is still open
-        when they walk in."""
-        agent = self.early[0]
+        when they walk in. (Someone with only Corner Cafe on the way, so no other cafe takes its place.)"""
+        agent = next(a for a in self.sim.living() if a.job and a.job.hourly_wage and self.on_the_way(a) == [self.cafe])
         agent.job = dataclasses.replace(agent.job, start_hour=self.cafe.hours[1] - 1)
         walk = self.sim.walk_minutes(agent, "cafe")
         last = self.cafe.hours[1] * 60 - walk - forks.COFFEE_MINUTES - 1

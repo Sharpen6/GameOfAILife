@@ -68,8 +68,14 @@ class Case(unittest.TestCase):
         self.fail("condition never came true")
 
     def leave_tick(self, agent_id: str) -> int:
+        """When the character must set off: SHIFT_MARGIN before the commute by the usual way would start the shift."""
         agent = self.sim.agents[agent_id]
-        return self.sim._shift_start_tick(agent) - self.sim.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN
+        return self.sim._shift_start_tick(agent) - self.sim.commute_minutes(agent) - SHIFT_MARGIN
+
+
+def option_index(fork: Fork, activity: str) -> int:
+    """The option whose first step is `activity` (its place, and so its label, comes from the city)."""
+    return next(i for i, o in enumerate(fork.options) if o.steps and o.steps[0][0] == activity)
 
 
 class TestChoiceHappensAtLeaveTime(Case):
@@ -86,25 +92,31 @@ class TestChoiceHappensAtLeaveTime(Case):
         self.at(5, 10, 38)  # the game ran on while the controller thought
         self.assertTrue(self.sim._must_leave_for_work(sami))
         self.clock.advance(4)
-        self.assertEqual(self.sim.answer(fork.id, 2, controller="bot"), {"accepted": True, "applied": True})
+        buy = option_index(fork, "shopping")
+        shop = self.sim.town.places[fork.options[buy].steps[0][1]]  # the nearest shop or market open for it
+        self.assertEqual(self.sim.answer(fork.id, buy, controller="bot"), {"accepted": True, "applied": True})
         sami.controller = None  # the work fork afterwards plays by habit
-        self.assertEqual(fork.options[2].label, "Buy something nice for yourself")
+        self.assertEqual(fork.options[buy].label, f"Buy something nice at {shop.name}")
         self.assertEqual(sami.money, 340)
         self.assertEqual(sami.activity, "shopping")
         self.step_until(lambda: sami.state == "busy" and sami.activity == "shopping")
-        self.assertEqual(sami.inside, "market")
+        self.assertEqual(sami.inside, shop.id)
         self.step_until(lambda: sami.activity != "shopping")
         self.assertNotEqual(sami.activity, "relax_home")  # the rest of the plan gives way to work
         self.assertEqual(sami.forks[-1]["kind"], "work")
 
     def test_meal_chosen_at_leave_time_is_eaten(self):
         avi = self.sim.agents["avi"]
-        self.at(0, 7, 52)  # Monday; school starts at 08:00
-        self.assertTrue(self.sim._must_leave_for_work(avi))
         avi.needs["hunger"] = 16.6
+        self.at(0, 6, 30)  # Monday; school starts at 08:00. A meal out is offered while there is time for it ...
         fork = hunger_fork(self.sim, avi)
-        self.assertEqual(fork.options[1].label, "Eat at Corner Cafe")
-        self.sim._decide(avi, fork, 1, "model", "")
+        eat = option_index(fork, "eat_out")
+        cafe = self.sim.town.places[fork.options[eat].steps[0][1]]
+        self.assertEqual(fork.options[eat].label, f"Eat at {cafe.name}")
+        self.at(0, 7, 52)  # ... and chosen once it's time to leave
+        self.assertTrue(self.sim._must_leave_for_work(avi))
+        self.assertNotIn("eat_out", [o.steps[0][0] for o in hunger_fork(self.sim, avi).options])  # not offered now
+        self.sim._decide(avi, fork, eat, "model", "")
         self.assertEqual(avi.money, 700 - 14)
         self.assertEqual(avi.activity, "eat_out")
         self.step_until(lambda: avi.activity not in ("eat_out", "idle"))
@@ -151,10 +163,12 @@ class TestChoiceHappensAtLeaveTime(Case):
         self.sim.clock.tick = self.leave_tick("ari")  # Monday, when he must set off for the office
         ari.needs["fun"] = 20
         fork = free_time_fork(self.sim, ari)
-        self.assertEqual(fork.options[0].label, "Walk in Riverside Park")
+        park = self.sim.town.places[fork.options[0].steps[0][1]]  # the park nearest him
+        self.assertEqual((park.kind, fork.options[0].label), ("park", f"Walk in {park.name}"))
         self.sim._decide(ari, fork, 0, "timeout", "No answer in time; played the default.")
         self.step_until(lambda: ari.state == "busy" and ari.activity == "walk_park")
-        self.assertGreater(self.sim.clock.minute_of_day, ari.job.start_hour * 60)  # at the park after his shift began
+        self.assertEqual(ari.activity_place, park.id)
+        self.assertGreater(self.sim.clock.tick, self.leave_tick("ari"))  # at the park after he should have set off
         self.assertEqual(ari.busy_until, self.sim.clock.tick + 1)  # still cut short
         self.step_until(lambda: ari.state == "busy" and ari.activity == "work", limit=60)
         self.assertEqual(ari.worked_today, self.sim.clock.day)
