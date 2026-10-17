@@ -22,7 +22,7 @@ import claude_controller as cc  # noqa: E402
 import simple_controller as sc  # noqa: E402
 from gameofailife.cast import NAMED  # noqa: E402
 
-ANSWER = '{"choice": 0, "reason": "fine"}'
+ANSWER = "a - fine"
 
 
 class FakeResponse(io.BytesIO):
@@ -131,7 +131,7 @@ class TestClaudeRequestAndReply(unittest.TestCase):
         with mock.patch.object(cc.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(json.dumps(reply).encode())), \
                 contextlib.redirect_stdout(out):
             asyncio.run(ctl.decide(fork("ari")))
-        self.assertEqual(ctl.ws.sent, [])
+        self.assertEqual(chosen(ctl), [])
         self.assertIn("max_tokens", out.getvalue())
         self.assertNotIn("could not read a choice from ''", out.getvalue())
 

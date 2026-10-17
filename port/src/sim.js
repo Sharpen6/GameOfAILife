@@ -762,6 +762,7 @@
         type: "fork", fork_id: fork.id, agent_id: agent.id, kind: fork.kind,
         question: fork.question, options, time: this.clock.stamp(),
         deadline_seconds: ANSWER_SECONDS, weather: this.weather, season: this.clock.season,
+        profile_scores: fork.scores.slice(),
         you: Object.assign({ name: agent.name, profile: agent.profile.prompt, money: pyRound(agent.money, 2),
           needs, health: pyRound(agent.health),
           where: agent.inside || "outside", groceries_at_home: hh.groceries,

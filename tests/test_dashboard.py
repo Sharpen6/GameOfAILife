@@ -621,18 +621,18 @@ class TestClaudeController(unittest.TestCase):
                 return forks[0]
         self.fail("no fork for dana in three hours")
 
-    def test_the_prompt_shows_places_the_home_and_household_money(self):
+    def test_the_page_shows_places_the_home_and_household_money(self):
         msg = self.fork_message()
         you, home = msg["you"], msg["you"]["home"]
-        prompt = cc.fork_prompt(msg)
+        page = cc.decision_page(msg)
         where = "home" if you["where_name"] == you["home_name"] else you["where_name"]
-        self.assertIn(f"You are at: {where}.", prompt)
-        self.assertNotIn(you["where"], prompt, "a place's name, never its id")
-        self.assertIn(f"${you['savings']:,.2f} in savings", prompt)
-        self.assertIn(f"your household has ${you['household_funds']:,} between you", prompt)
+        self.assertIn(f"You are at: {where}.", page)
+        self.assertNotIn(you["where"], page, "a place's name, never its id")
+        self.assertIn(f"${you['savings']:,.2f} in savings", page)
+        self.assertIn(f"household ${you['household_funds']:,} between you", page)
         self.assertIn(f"You live at {home['name']}, a {home['tier'].replace('_', ' ')}; you rent it for "
                       f"${home['weekly_cost']:,} a week. It is {home['stage_name']} (condition {home['condition']}/100).",
-                      prompt)
+                      page)
         owned = cc.home_line({"home": {**home, "tenure": "owned", "weekly_cost": 60, "value": 15900}})
         self.assertIn("you own it and pay $60 a week in property tax", owned)
         self.assertTrue(owned.endswith("and worth about $15,900."))
@@ -643,13 +643,67 @@ class TestClaudeController(unittest.TestCase):
                           {"index": 1, "label": "Leave it", "cost": 0},
                           {"index": 2, "label": "Sell up and rent", "cost": -12400, "household": True},
                           {"index": 3, "label": "A coffee", "cost": 4, "travel_minutes": 5}]
-        prompt = cc.fork_prompt(msg)
-        self.assertIn("0. Repaint the house (costs $900.00 from your household's money and savings)", prompt)
-        self.assertIn("1. Leave it (costs $0.00)", prompt)
-        self.assertIn("2. Sell up and rent (brings in $12,400.00 from your household's money and savings)", prompt)
-        self.assertIn("3. A coffee (costs $4.00, about 5 min away)", prompt)
+        order = [3, 2, 1, 0]
+        page = cc.decision_page(msg, order=order)
+        self.assertIn("d) Repaint the house (costs $900.00 from your household's money and savings)", page)
+        self.assertIn("c) Leave it (costs $0.00)", page)
+        self.assertIn("b) Sell up and rent (brings in $12,400.00 from your household's money and savings)", page)
+        self.assertIn("a) A coffee (costs $4.00, about 5 min away)", page)
         with mock.patch.object(cc.time, "sleep"):
-            self.assertEqual(cc.parse_choice(cc.fake_claude("", "", "", prompt), 4)[0], 2, "the cheapest")
+            self.assertEqual(cc.parse_letter(cc.fake_claude("", "", "", page), order)[0], 2, "the cheapest")
+
+    def test_the_page_has_the_character_their_past_and_no_hints_unless_asked(self):
+        sim = Simulation(seed=1)
+        sim.claim("dana", "claude")
+        about = {}
+        history = []
+        msg = None
+        for _ in range(2 * 24 * 60):
+            sim.step()
+            _, _, out = sim.drain()
+            for _, m in out:
+                if m["type"] == "fork":
+                    if len(history) >= 4:
+                        msg = msg or m
+                    fork = sim.forks[m["fork_id"]]
+                    choice = sim.default_choice(fork)
+                    history.append({"time": m["time"], "question": m["question"],
+                                    "label": m["options"][choice]["label"]})
+                    sim.answer(m["fork_id"], choice, "", "claude")
+            if msg:
+                break
+        self.assertIsNotNone(msg, "dana met five forks in two days")
+        agent = sim.agents["dana"]
+        about = {"attributes": agent.attributes(), "memory": agent.memory[-30:],
+                 "relationships": {o: {"kind": r.kind.value if hasattr(r.kind, "value") else r.kind,
+                                       "affinity": r.affinity, "name": sim.agents[o].name}
+                                   for o, r in agent.relationships.items()}}
+        page = cc.decision_page(msg, about, history[:-1])
+        self.assertIn(f"Job: {agent.job.title}", page)
+        self.assertIn("Personality: ", page)
+        self.assertIn("Closest people: ", page)
+        self.assertIn(f"-> {history[-2]['label']}. Then: ", page)
+        self.assertNotIn("for you]", page)
+        self.assertEqual(len(msg["profile_scores"]), 4)
+        hinted = cc.decision_page(msg, about, history[:-1], show_hints=True)
+        self.assertEqual(hinted.count(" for you]"), 4)
+        self.assertLess(len(hinted), 3500, "about one short page")
+
+    def test_reading_the_letter(self):
+        order = [2, 0, 3, 1]
+        self.assertEqual(cc.parse_letter("b - I'm hungry", order), (0, "I'm hungry"))
+        self.assertEqual(cc.parse_letter("D) too tired", order), (1, "too tired"))
+        self.assertEqual(cc.parse_letter("Answer: c, it's cheap", order), (3, "it's cheap"))
+        self.assertEqual(cc.parse_letter("a", order), (2, ""))
+        self.assertIsNone(cc.parse_letter("Hard to say.", order))
+
+    def test_what_came_of_each_decision(self):
+        history = [{"time": "Day 2 Tue 15:00", "question": "You're hungry. What do you do?", "label": "Cook at home"},
+                   {"time": "Day 2 Tue 17:00", "question": "Free time?", "label": "Walk in the park"}]
+        memory = ["Day 2 Tue 15:49: Nadia: Makes a really tasty meal.", "Day 2 Tue 18:10: Nadia: Gets caught in the rain."]
+        self.assertEqual(cc.past_decisions(history, memory), [
+            "- 2 Tue 15:00: You're hungry. What do you do -> Cook at home. Then: Makes a really tasty meal.",
+            "- 2 Tue 17:00: Free time -> Walk in the park. Then: Gets caught in the rain."])
 
     def test_hello_names_the_model(self):
         sent = []
