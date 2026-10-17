@@ -611,10 +611,12 @@
     if (S.sheetTicker) setHtml(S.sheetTicker, html);
   }
 
-  // Toasts (dashboard.md 5.4): major cards and the one coalesced "N more major events" card share 3 slots on
-  // desktop and 1 on a phone. A major card pushed out early is never lost: it joins the coalesced count, so
-  // the count is always the burst's majors not on screen. Error and info notices have their own slots
-  // (2, or 1 on a phone) and never push out a major or the coalesced card.
+  // Toasts (dashboard.md 5.4): up to 3 major cards on desktop and 1 on a phone, and below them the one
+  // coalesced "N more major events" card for the rest: the first majors of a burst keep their own cards and
+  // only the ones after them are counted, so a phone still shows a burst's headline. A major card pushed out
+  // early (the window became a phone) is never lost: it joins the coalesced count, so the count is always the
+  // burst's majors not on screen. Error and info notices have their own slots (2, or 1 on a phone) and never
+  // push out a major or the coalesced card.
   const majorKind = t => t.kind === "major" || t.kind === "more";
   function addToast(t) {
     if (!S.toastBox) return t;
@@ -639,7 +641,7 @@
   function moreToast() {
     if (S.coalesced && S.toasts.includes(S.coalesced)) return S.coalesced;
     const c = { kind: "more", count: 0, html: "" };
-    S.coalesced = c;          // set first: adding it trims, and the trim must not push this card out
+    S.coalesced = c;          // set first: adding it trims, and the trim renders the count on it
     addToast(c);
     return c;
   }
@@ -652,11 +654,9 @@
     if (!S) return;
     const maxMajor = S.phone ? 1 : 3, maxNotice = S.phone ? 1 : 2;
     for (let guard = 0; guard < 50; guard++) {
-      const majors = S.toasts.filter(majorKind);
+      const majors = S.toasts.filter(t => t.kind === "major"); // the coalesced card has a slot of its own
       if (majors.length <= maxMajor) break;
-      const victim = majors.find(t => t !== S.coalesced && !t.hold) || majors.find(t => t !== S.coalesced);
-      if (!victim) break;
-      removeToast(victim);
+      removeToast(majors.find(t => !t.hold) || majors[0]);    // the oldest goes first
       moreToast().count += 1;
     }
     for (let guard = 0; guard < 50; guard++) {

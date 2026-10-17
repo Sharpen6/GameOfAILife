@@ -479,9 +479,10 @@
         if (!scene) { syncMenu(); persist(true); return; }
         const rot = kind === "iso" ? prefs.rot | 0 : 0;
         if (scene.proj.kind === kind && scene.proj.rot === rot) { syncMenu(); return; }
-        const t = scene.proj.toTile(cam.x, cam.y);
+        const before = scene.proj;
         scene.setProjection(kind, rot);
-        [cam.x, cam.y] = scene.proj.toWorld(t[0], t[1]);
+        // the centre stays on its tile, and so does the end of a flight under way (a focus just before the switch)
+        cam.remap((wx, wy) => { const t = before.toTile(wx, wy); return scene.proj.toWorld(t[0], t[1]); });
         if (mini) mini.rebuild();
         syncMenu(); persist(true); emitCamera(true); camDirty = true;
         if (!running) frame(performance.now());
