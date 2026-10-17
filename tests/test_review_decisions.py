@@ -9,7 +9,7 @@ import re
 import unittest
 from unittest import mock
 
-from gameofailife import sim as sim_module, travel
+from gameofailife import sim as sim_module
 from gameofailife.__main__ import run_headless
 from gameofailife.clock import MINUTES_PER_DAY
 from gameofailife.forks import (Fork, Option, Outcome, build_fork, free_time_fork, groceries_fork, hunger_fork, invite_fork,
@@ -423,10 +423,9 @@ class TestLeaveTimeCountsTheDetour(Case):
     def test_rina_goes_straight_to_the_hospital(self):
         rina = self.sim.agents["rina"]
         market = self.sim.town.places["market"]
-        home, job, mode = self.sim.home_of(rina), rina.job.place_id, self.sim.usual_mode(rina)
-        # Her usual way (the bus, counting its worst wait, or on foot when no bus saves time from there).
-        direct = travel.leg_minutes(self.sim, "market", job, mode)
-        detour = travel.leg_minutes(self.sim, "market", home, mode) + travel.leg_minutes(self.sim, home, job, mode)
+        town, home, job = self.sim.town, self.sim.home_of(rina), rina.job.place_id
+        direct = town.walk_minutes(market.entry, job)
+        detour = town.walk_minutes(market.entry, home) + town.walk_minutes(town.places[home].entry, job)
         self.assertGreater(detour, direct + 1)  # going home first would make her late
         # Monday; a minute before she must set off from the market for her shift.
         self.at(7, rina.job.start_hour)

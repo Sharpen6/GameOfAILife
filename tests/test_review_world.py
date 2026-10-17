@@ -286,14 +286,11 @@ class ShutOnArrivalTest(unittest.TestCase):
         omer = self.sim.agents["omer"]
         omer.needs["hunger"], omer.money = 20, 1300.0
         self.sim.household(omer).groceries = 0
-        cafe = self.sim.town.places[self.latest(omer, "cafe", "eat_out")]
-        walk, closes = self.sim.walk_minutes(omer, cafe.id), self.closes(cafe.id)
+        walk, closes = self.sim.walk_minutes(omer, "cafe"), self.closes("cafe")
         at(self.sim, 2, 0, closes - walk - 40 - 10)  # the walk and the 40-minute meal fit before closing
-        fork = self.decide_late(omer, hunger_fork, f"Eat at {cafe.name}", (2, 0, closes - walk + 10))
+        fork = self.decide_late(omer, hunger_fork, "Eat at Corner Cafe", (2, 0, closes - walk + 10))
         self.assertEqual(omer.money, 1286.0)
-        with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):  # no next meal spends the refund
-            self.run_until(omer, lambda a: a.activity_place != cafe.id or a.state != "travelling",
-                           limit=self.trip(omer, cafe.id, 0))
+        self.run_until(omer, lambda a: a.state != "travelling", limit=self.trip(omer, "cafe", 0))
         self.assertEqual(omer.money, 1300.0)
         self.assertNotEqual(omer.activity, "eat_out")
         self.assertFalse([p for p in omer.pending_outcomes if p["fork"] == fork.id])  # no food poisoning either
