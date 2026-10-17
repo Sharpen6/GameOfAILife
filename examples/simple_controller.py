@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import json
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -46,8 +47,13 @@ REPLIES = ("Sounds good!", "Thanks for the message, talk soon.", "Ha, same here.
 
 
 def mentions(label: str, words) -> bool:
-    label = label.lower()
-    return any(w in label for w in words)
+    """True if a word of the label starts with one of `words`: 'eat' finds 'Eat out' but not 'Treat'."""
+    return any(re.search(rf"\b{re.escape(w)}", label, re.I) for w in words)
+
+
+def helps(label: str, words) -> bool:
+    """Like mentions(), but an option that neglects the character or the job never counts as helping."""
+    return mentions(label, words) and not mentions(label, BAD_WORDS)
 
 
 def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
@@ -56,7 +62,10 @@ def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
     money = float(you.get("money", 0))
     needs = you.get("needs", {})
     options = fork["options"]
-    affordable = [o for o in options if o.get("cost", 0) <= money] or options
+    affordable = [o for o in options if o.get("cost", 0) <= max(money, 0)]  # free options stay affordable in debt
+    if not affordable:  # nothing fits the budget: stick to the cheapest
+        cheapest = min(o.get("cost", 0) for o in options)
+        affordable = [o for o in options if o.get("cost", 0) == cheapest]
 
     if style == "random":
         pick = rng.choice(affordable)
@@ -69,7 +78,7 @@ def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
     def score(o: dict) -> float:
         label, cost = o["label"], float(o.get("cost", 0))
         s = 0.0
-        if urgent and mentions(label, NEED_WORDS.get(urgent, ())):
+        if urgent and helps(label, NEED_WORDS.get(urgent, ())):
             s += (100 - urgent_level) / 10  # the hungrier, the more food matters
         if mentions(label, BAD_WORDS):
             s -= 6
@@ -77,7 +86,7 @@ def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
             s -= cost / max(money, 1) * 20  # spending a big share of savings hurts
             s -= cost / 10
         elif style == "social":
-            if mentions(label, SOCIAL_WORDS):
+            if helps(label, SOCIAL_WORDS):
                 s += 4
             s -= cost / max(money, 1) * 5
         s -= o.get("travel_minutes", 0) / 60  # mild dislike of long trips
@@ -85,9 +94,9 @@ def choose(fork: dict, style: str, rng: random.Random) -> tuple[int, str]:
 
     best = max(affordable, key=score)
     cost = float(best.get("cost", 0))
-    if style == "social" and mentions(best["label"], SOCIAL_WORDS):
+    if style == "social" and helps(best["label"], SOCIAL_WORDS):
         why = "prefers being around people"
-    elif urgent and mentions(best["label"], NEED_WORDS.get(urgent, ())):
+    elif urgent and helps(best["label"], NEED_WORDS.get(urgent, ())):
         why = f"{urgent} is lowest ({urgent_level})"
     else:
         why = "best value of the options"
