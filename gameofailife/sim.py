@@ -727,6 +727,7 @@ class Simulation:
             "type": "fork", "fork_id": fork.id, "agent_id": agent.id, "kind": fork.kind,
             "question": fork.question, "options": options, "time": self.clock.stamp(),
             "deadline_seconds": ANSWER_SECONDS, "weather": self.weather, "season": self.clock.season,
+            "profile_scores": list(fork.scores),
             "you": {"name": agent.name, "profile": agent.profile.prompt, "money": round(agent.money, 2),
                     "needs": {k: round(v) for k, v in agent.needs.items()}, "health": round(agent.health),
                     "where": agent.inside or "outside", "groceries_at_home": hh.groceries,

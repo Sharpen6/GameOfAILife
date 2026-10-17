@@ -9,6 +9,7 @@ messages in character.
     python3 -m gameofailife &
     python3 examples/claude_controller.py --characters all
     python3 examples/claude_controller.py --characters ari,tom --model claude-sonnet-5 --chat
+    python3 examples/claude_controller.py --characters all --hints
 
 Each fork must be answered within `deadline_seconds` (5s) to be acted on; an
 answer that arrives within 10s still teaches the character's profile. Requests
@@ -17,6 +18,15 @@ in flight at once; a fork whose deadline passes before a thread is free is
 skipped and the profile decides. Claude is asked at low effort so it answers in
 time; pick a model that supports the effort setting (Claude Haiku 4.5 and older
 models don't).
+
+Each fork is put to Claude as one short page (about 600 tokens): who the character
+is (personality, job, home, the people closest to them), how they are right now,
+their last few decisions with what came of them, what is on their mind, and the
+question with its four options as a) to d), in a fresh random order each time so
+a habit of picking "a" never becomes a personality. Claude answers with a letter
+and a few words of why. With --hints each option also says how likely it is for
+this character, from the character's own habits (the city's profile scores);
+without it the model decides alone.
 
 The characters believe they are real people. Nothing sent to Claude mentions a
 game, a simulation, controllers or God.
@@ -27,7 +37,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
+import random
 import re
 import sys
 import time
@@ -45,6 +57,9 @@ API_VERSION = "2023-06-01"
 DEFAULT_MODEL = "claude-haiku-5-5"
 HTTP_TIMEOUT = 9.0
 CHAT_COOLDOWN = 30.0  # real seconds between replies in one conversation, so two Claudes don't chat forever
+LETTERS = "abcd"
+HISTORY = 8  # past decisions on the page
+ABOUT = ("attributes", "relationships", "memory")  # queries the page is built from
 
 
 # --- talking to Claude ---------------------------------------------------------
@@ -79,15 +94,15 @@ def call_claude(api_key: str, model: str, system: str, user: str, max_tokens: in
 def fake_claude(api_key: str, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
     """Offline stand-in for testing without a key: picks the cheapest option."""
     time.sleep(0.3)
-    if "Options:" not in user:
+    lines = re.findall(r"^[a-d]\) .*$", user, re.M)
+    if not lines:
         return "Sounds good, talk soon!"
-    costs = [option_cost(line) for line in re.findall(r"^\d+\. .*$", user, re.M)] or [0.0]
-    choice = costs.index(min(costs))
-    return f'Sure. {{"choice": {choice}, "reason": "it is the cheapest, and money is tight"}}'
+    costs = [option_cost(line) for line in lines]
+    return f"{lines[costs.index(min(costs))][0]} - it is the cheapest, and money is tight"
 
 
 def option_cost(line: str) -> float:
-    """What an option line of fork_prompt costs: "costs $4.00", or minus what it "brings in"."""
+    """What an option line of decision_page costs: "costs $4.00", or minus what it "brings in"."""
     m = re.search(r"(costs|brings in) \$([0-9,]+(?:\.[0-9]+)?)", line)
     if not m:
         return 0.0
@@ -95,23 +110,20 @@ def option_cost(line: str) -> float:
     return -amount if m.group(1) == "brings in" else amount
 
 
-def parse_choice(text: str, n_options: int) -> tuple[int, str] | None:
-    """Pull {"choice": n, "reason": "..."} out of a reply, tolerating chatter around it."""
-    for match in re.finditer(r"\{.*?\}", text, re.S):
-        try:
-            obj = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict) and "choice" in obj:
-            try:
-                choice = int(obj["choice"])
-            except (TypeError, ValueError):
-                continue
-            if 0 <= choice < n_options:
-                return choice, str(obj.get("reason", ""))[:300]
-    m = re.search(r'"?choice"?\s*[:=]\s*"?(\d)', text) or re.search(r"\b(\d)\b", text)
-    if m and 0 <= int(m.group(1)) < n_options:
-        return int(m.group(1)), text.strip()[:300]
+def parse_letter(text: str, order: list[int]) -> tuple[int, str] | None:
+    """Read "b - a few words why" from a reply; return the option index the letter stands for and the reason.
+
+    `order[k]` is the option index shown as the k-th letter."""
+    letters = LETTERS[:len(order)]
+    for line in text.strip().splitlines():
+        m = re.match(rf"\W*(?:answer\W*)?([{letters}])\b\W*(.*)", line.strip(), re.I)
+        if m:
+            return order[letters.index(m.group(1).lower())], m.group(2).strip()[:300]
+        if line.strip():
+            break
+    m = re.search(rf"\b([{letters}])\)", text)  # "I'd go with b) ..."
+    if m:
+        return order[letters.index(m.group(1))], text.strip()[:300]
     return None
 
 
@@ -141,42 +153,135 @@ def home_line(you: dict) -> str:
     return line + (f" and worth about {_dollars(home.get('value'))}." if owned else ".")
 
 
-def option_line(opt: dict) -> str:
+def option_line(opt: dict, letter: str, hint: str = "") -> str:
     """One option, with its cost: paid by the character, or from the household's pooled money (`household`)."""
     cost = opt.get("cost") or 0
     money = f"brings in ${-cost:,.2f}" if cost < 0 else f"costs ${cost:,.2f}"
     if opt.get("household"):
         money += " from your household's money and savings"
-    line = f"{opt['index']}. {opt['label']} ({money}"
+    line = f"{letter}) {opt['label']} ({money}"
     if opt.get("travel_minutes") is not None:
         line += f", about {opt['travel_minutes']} min away"
-    return line + ")"
+    return line + ")" + (f"  [{hint} for you]" if hint else "")
 
 
-def fork_prompt(msg: dict) -> str:
-    you = msg.get("you", {})
-    needs = ", ".join(f"{k} {v}/100" for k, v in (you.get("needs") or {}).items())
+TRAIT_WORDS = {
+    "thrift": ("careful with money", "spends freely"),
+    "family": ("puts family first", "values independence"),
+    "social": ("loves company", "enjoys time alone"),
+    "diligence": ("diligent at work", "takes work lightly"),
+    "health": ("looks after your health", "ignores your health"),
+    "adventure": ("tries new things", "sticks to routine"),
+}
+
+
+def personality(traits: dict) -> str:
+    """Traits (0..1, 0.5 is neutral) in words, strongest first: "very careful with money; enjoys time alone"."""
+    words = []
+    for trait, value in sorted(traits.items(), key=lambda kv: -abs(kv[1] - 0.5)):
+        if trait not in TRAIT_WORDS or abs(value - 0.5) < 0.05:
+            continue
+        lean = abs(value - 0.5)
+        strength = "very " if lean > 0.3 else ("" if lean > 0.12 else "somewhat ")
+        words.append(strength + TRAIT_WORDS[trait][0 if value >= 0.5 else 1])
+    return "; ".join(words)
+
+
+def hints(scores: list | None) -> list[str]:
+    """How likely each option is for this character, from the city's profile scores (softmax)."""
+    if not isinstance(scores, list) or not scores:
+        return []
+    weights = [math.exp(3 * float(s)) for s in scores]
+    total = sum(weights)
+    return ["likely" if w / total >= 0.4 else "plausible" if w / total >= 0.2 else "unlikely" for w in weights]
+
+
+def stamp_key(stamp: str) -> tuple[int, int] | None:
+    """Order of a game time stamp like "Day 2 Tue 15:49" (or a memory line that starts with one)."""
+    m = re.match(r"Day (\d+) \w+ (\d+):(\d+)", stamp or "")
+    return (int(m.group(1)), int(m.group(2)) * 60 + int(m.group(3))) if m else None
+
+
+def past_decisions(history: list[dict], memory: list[str]) -> list[str]:
+    """The character's recent decisions, each with what followed it.
+
+    What followed a decision is what the character remembered between it and the next one (which may have
+    other causes too). Decisions that
+    led to something come first in line for the page, so the eighth quiet night's sleep does not crowd out
+    the dinner that went wrong; the three most recent always stay."""
+    rows = []
+    for i, d in enumerate(history):
+        start = stamp_key(d["time"])
+        end = stamp_key(history[i + 1]["time"]) if i + 1 < len(history) else None
+        results = []
+        for line in memory:
+            at = stamp_key(line)
+            if start and at and start <= at and (end is None or at < end):
+                text = line.split(": ", 1)[-1]
+                results.append((text.split(": ", 1)[-1] if text.count(": ") else text).rstrip("."))
+        rows.append((d, results[-2:]))
+    keep = {id(d) for d, _ in rows[-3:]} | {id(d) for d, r in rows if r}
+    rows = [(d, r) for d, r in rows if id(d) in keep][-HISTORY:]
+    return [f"- {d['time'].removeprefix('Day ')}: {d['question'].rstrip('?. ')} -> {d['label']}. "
+            f"Then: {'; '.join(r) if r else 'nothing notable'}." for d, r in rows]
+
+
+def decision_page(msg: dict, about: dict | None = None, history: list[dict] | None = None,
+                  order: list[int] | None = None, show_hints: bool = False) -> str:
+    """The one page a fork is decided from. `about` holds query answers for the character ("attributes",
+    "relationships", "memory"); `history` is what this controller chose for them before; `order[k]` is the
+    option shown as the k-th letter."""
+    you, about = msg.get("you", {}), about or {}
+    attrs = about.get("attributes") or {}
+    options = msg.get("options", [])
+    order = order if order is not None else list(range(len(options)))
+
+    who = []
+    job = attrs.get("job")
+    if isinstance(job, dict):
+        hours = job.get("hours") or ["?", "?"]
+        who.append(f"Job: {job.get('title')}, ${job.get('hourly_wage')}/hour, {hours[0]}:00 to {hours[1]}:00. "
+                   f"Standing at work {attrs.get('reputation', '?')}/100.")
+    elif attrs:
+        who.append("No job right now.")
+    if attrs.get("traits"):
+        who.append(f"Personality: {personality(attrs['traits'])}.")
+    if home_line(you):
+        who.append(home_line(you))
+    rels = about.get("relationships") or {}
+    close = sorted(rels.values(), key=lambda r: -(r.get("affinity") or 0))[:5]
+    if close:
+        who.append("Closest people: " + "; ".join(
+            f"{str(r.get('name', '?')).split()[0]} ({r.get('kind')}, {round(r.get('affinity') or 0)})" for r in close) + ".")
+
+    needs = ", ".join(f"{k} {v}" for k, v in (you.get("needs") or {}).items())
     goal = you.get("goal")
-    goal_line = (f"You are saving for {goal.get('name')}: ${goal.get('saved', 0):.0f} of ${goal.get('target')}."
-                 if isinstance(goal, dict) else "No particular savings goal right now.")
-    memory = "\n".join(f"- {m}" for m in you.get("recent_memory") or []) or "- nothing much"
-    options = [option_line(opt) for opt in msg.get("options", [])]
+    goal_line = (f"Saving for {goal.get('name')}: ${goal.get('saved', 0):.0f} of ${goal.get('target')}."
+                 if isinstance(goal, dict) else "No particular savings goal.")
     where = you.get("where_name") or you.get("where")
     if where and where == you.get("home_name"):
         where = "home"
-    money = f"You have ${you.get('money', 0):,.2f} on you and ${you.get('savings') or 0:,.2f} in savings"
+    money = f"Money ${you.get('money', 0):,.2f} on you, ${you.get('savings') or 0:,.2f} in savings"
     if you.get("household_funds") is not None:
-        money += f"; your household has {_dollars(you['household_funds'])} between you, savings included"
-    return (
-        f"It is {msg.get('time')}, {msg.get('season')}, weather: {msg.get('weather')}.\n"
-        f"You are at: {where}. {money}. Health {you.get('health')}/100.\n"
-        f"{home_line(you)}\n"
-        f"How you feel (higher means more satisfied): {needs}.\n"
-        f"Groceries at home: {you.get('groceries_at_home')}. {goal_line}\n"
-        f"Recently:\n{memory}\n\n"
-        f"{msg.get('question')}\n\nOptions:\n" + "\n".join(options) + "\n\n"
-        'Decide quickly. Reply with only JSON: {"choice": <option number>, "reason": "<a few words, in your own voice>"}'
-    )
+        money += f", household {_dollars(you['household_funds'])} between you"
+    now = [f"{msg.get('time')}, {msg.get('season')}, {msg.get('weather')}. You are at: {where}.",
+           f"{money}. {goal_line}",
+           f"Health {you.get('health')}; {needs} (100 means fully satisfied). Groceries at home: {you.get('groceries_at_home')}."]
+
+    memory = list(about.get("memory") or [])
+    memory += [m for m in you.get("recent_memory") or [] if m not in memory]  # the fork's lines are the freshest
+    memory.sort(key=lambda m: stamp_key(m) or (0, 0))
+    decisions = past_decisions(history or [], memory)
+    mind = [f"- {m}" for m in memory[-4:]] or ["- nothing much"]
+
+    tags = hints(msg.get("profile_scores")) if show_hints else []
+    lines = [option_line(options[i], LETTERS[k], tags[i] if i < len(tags) else "") for k, i in enumerate(order)]
+    sections = [("WHO YOU ARE", who), ("RIGHT NOW", now), ("YOUR RECENT DECISIONS", decisions or ["- none yet"]),
+                ("ON YOUR MIND", mind)]
+    body = "\n\n".join(f"{title}\n" + "\n".join(rows) for title, rows in sections if rows)
+    return (f"{body}\n\nDECISION: {msg.get('question')}\n" + "\n".join(lines) + "\n\n"
+            f"Decide quickly. Reply on one line: the letter ({', '.join(LETTERS[:len(order)])}), "
+            "then a few words in your own voice saying why. Example: b - I'm saving every dollar this month.")
 
 
 def chat_prompt(msg: dict) -> str:
@@ -197,6 +302,9 @@ class ClaudeController:
         self.names: dict[str, str] = {}
         self.pending: dict[str, dict] = {}  # fork_id -> what we sent, printed when the ack arrives
         self.last_chat: dict[tuple[str, str], float] = {}
+        self.about: dict[str, dict] = {}  # character id -> latest query answers: attributes, relationships, memory
+        self.history: dict[str, list[dict]] = {}  # character id -> the decisions this controller made for them
+        self.rng = random.Random()
         self.tasks: set[asyncio.Task] = set()
         self.decisions = 0
 
@@ -241,10 +349,14 @@ class ClaudeController:
                   f"{' (fake)' if self.args.fake else ''}; playing {len(claimed)} characters: {', '.join(claimed) or 'none'}")
             if claimed:  # learn everyone's full name, for texts that arrive before any fork
                 self.spawn(self.send({"type": "query", "agent_id": claimed[0], "what": "people"}))
+            for agent_id in claimed:
+                self.refresh(agent_id)
             else:
                 print(f"Nobody claimed. Free characters: {', '.join(msg.get('available') or []) or 'none'}")
         elif t == "answer" and msg.get("what") == "people":
             self.names.update(msg.get("data") or {})
+        elif t == "answer" and msg.get("what") in ABOUT:
+            self.about.setdefault(msg.get("agent_id"), {})[msg["what"]] = msg.get("data")
         elif t == "fork":
             self.spawn(self.decide(msg))
         elif t == "message" and self.args.chat:
@@ -264,24 +376,35 @@ class ClaudeController:
         options = msg.get("options", [])
         started = time.monotonic()
         deadline = started + msg.get("deadline_seconds", 5)
+        order = list(range(len(options)))
+        self.rng.shuffle(order)  # a fresh order each time, so a liking for "a" never becomes a personality
+        page = decision_page(msg, self.about.get(msg["agent_id"]), self.history.get(msg["agent_id"]), order,
+                             getattr(self.args, "hints", False))
+        self.refresh(msg["agent_id"])  # fresh answers for the next page; this one uses what is already here
         try:
             text = await asyncio.get_running_loop().run_in_executor(
-                self.pool, self.ask_in_time, deadline, persona(you), fork_prompt(msg))
+                self.pool, self.ask_in_time, deadline, persona(you), page)
         except Exception as exc:  # network trouble, timeouts, bad key: the city falls back to the profile
             print(f"{msg.get('time')}  {you.get('name')}: no answer ({exc}); the profile will decide")
             return
         if text is None:
             print(f"{msg.get('time')}  {you.get('name')}: no free worker before the deadline; the profile will decide")
             return
-        parsed = parse_choice(text, len(options))
+        parsed = parse_letter(text, order)
         if parsed is None:
             print(f"{msg.get('time')}  {you.get('name')}: could not read a choice from {text[:80]!r}")
             return
         choice, reason = parsed
         self.pending[fork_id] = {"time": msg.get("time"), "name": you.get("name"), "label": options[choice]["label"],
+                                 "agent_id": msg["agent_id"], "question": msg.get("question", ""),
                                  "reason": reason, "seconds": time.monotonic() - started,
                                  "deadline": msg.get("deadline_seconds", 5)}
         await self.send({"type": "choose", "fork_id": fork_id, "choice": choice, "reason": reason})
+
+    def refresh(self, agent_id: str) -> None:
+        """Ask the city about a character; the answers land in self.about when they arrive."""
+        for what in ABOUT:
+            self.spawn(self.send({"type": "query", "agent_id": agent_id, "what": what}))
 
     def ask_in_time(self, deadline: float, system: str, user: str) -> str | None:
         """Runs in a worker thread. Returns None, without calling the API, if the deadline passed while queued."""
@@ -296,6 +419,9 @@ class ClaudeController:
         self.decisions += 1
         if ack.get("applied"):
             status = "applied"
+            past = self.history.setdefault(info["agent_id"], [])
+            past.append({"time": info["time"], "question": info["question"], "label": info["label"]})
+            del past[:-3 * HISTORY]
         elif ack.get("accepted"):
             status = "late, learned"
         else:
@@ -329,6 +455,8 @@ def main() -> None:
     ap.add_argument("--characters", default="all", help="'all' or comma-separated character ids")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model id (default {DEFAULT_MODEL})")
     ap.add_argument("--chat", action="store_true", help="also answer incoming text messages in character")
+    ap.add_argument("--hints", action="store_true",
+                    help="tell the model how likely each option is for the character, from their habits")
     ap.add_argument("--fake", action="store_true", help=argparse.SUPPRESS)  # offline testing without a key
     args = ap.parse_args()
 

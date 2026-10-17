@@ -657,6 +657,7 @@ Characters without a controller play their profile default.)
   "deadline_seconds": 5.0,
   "weather": "rain",
   "season": "spring",
+  "profile_scores": [0.62, -0.1, 0.35, -0.4],
   "you": {
     "name": "Tom Levi",
     "profile": "Tom Levi, 29, barista. Values independence, loves company, ignores their health, takes work lightly.",
@@ -688,6 +689,7 @@ Characters without a controller play their profile default.)
 | `deadline_seconds` | Always `5.0`, real seconds. |
 | `weather`          | `"clear"` or `"rain"`. |
 | `season`           | `spring`, `summer`, `autumn` or `winter`. |
+| `profile_scores`   | One number per option, in option order: how well it fits the character's play-style profile, as the Director scored it (higher fits better; the habit default is the highest). These are not outcome odds. A controller can show them to its model as hints or ignore them. |
 | `you.name`, `you.profile` | The character and its profile prompt. |
 | `you.money`        | The character's own money, two decimals; can be negative. |
 | `you.savings`      | Money put aside (not counting a savings goal's pot), two decimals. |
