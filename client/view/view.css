@@ -1,0 +1,70 @@
+/* CityView: styles for the view's own controls only (.cv-*). The page sizes the canvas. */
+.cv-host { position: relative; }
+.cv-canvas { display: block; touch-action: none; cursor: grab; image-rendering: pixelated; user-select: none; -webkit-user-select: none; }
+.cv-canvas.cv-grabbing { cursor: grabbing; }
+
+.cv-ctl {
+  --cv-bg: rgba(18, 22, 32, 0.86); --cv-fg: #eef2f8; --cv-line: rgba(255, 255, 255, 0.16); --cv-on: #ffe27a;
+  position: absolute; top: 10px; right: 10px; z-index: 5;
+  display: flex; flex-direction: column; gap: 6px; align-items: flex-end;
+  font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.cv-btn {
+  width: 36px; height: 36px; padding: 0; border-radius: 9px;
+  border: 1px solid var(--cv-line); background: var(--cv-bg); color: var(--cv-fg);
+  font: inherit; font-size: 18px; cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.cv-btn:hover { background: rgba(40, 46, 62, 0.95); }
+.cv-btn:focus-visible, .cv-menu-item:focus-visible, .cv-follow button:focus-visible, .cv-minimap-toggle:focus-visible { outline: 2px solid var(--cv-on, #ffe27a); outline-offset: 2px; }
+.cv-btn-view { width: auto; padding: 0 10px; font-size: 12px; letter-spacing: 0.02em; }
+.cv-menu {
+  display: none; flex-direction: column; min-width: 130px; padding: 4px;
+  border-radius: 10px; border: 1px solid var(--cv-line); background: var(--cv-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.cv-menu.cv-open { display: flex; }
+.cv-menu-item {
+  text-align: left; padding: 8px 10px; border: 0; border-radius: 7px;
+  background: transparent; color: var(--cv-fg); font: inherit; font-weight: 500; cursor: pointer;
+}
+.cv-menu-item:hover { background: rgba(255, 255, 255, 0.08); }
+.cv-menu-item.cv-on { color: var(--cv-on); }
+.cv-menu-item.cv-on::before { content: "\2022  "; }
+.cv-menu-item:disabled { opacity: 0.4; cursor: default; }
+
+.cv-follow {
+  position: absolute; top: 10px; left: 10px; z-index: 5;
+  display: none; align-items: center; gap: 2px; padding: 3px;
+  border-radius: 999px; background: rgba(18, 22, 32, 0.86); border: 1px solid rgba(255, 226, 122, 0.55);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font: 600 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.cv-follow.cv-show { display: flex; }
+.cv-follow.cv-paused { border-color: rgba(255, 255, 255, 0.2); }
+.cv-follow button { border: 0; background: transparent; color: #ffe27a; font: inherit; cursor: pointer; padding: 6px 10px; border-radius: 999px; }
+.cv-follow.cv-paused .cv-follow-name { color: #dfe6f0; }
+.cv-follow .cv-follow-x { color: #dfe6f0; padding: 6px 9px; }
+.cv-follow button:hover { background: rgba(255, 255, 255, 0.08); }
+
+.cv-minimap {
+  position: absolute; right: 10px; bottom: 10px; z-index: 4;
+  padding: 6px; border-radius: 10px; background: rgba(18, 22, 32, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.16); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+}
+.cv-minimap-canvas { display: block; cursor: crosshair; touch-action: none; image-rendering: auto; }
+.cv-minimap-toggle {
+  border: 0; background: transparent; color: #cfd6e2; cursor: pointer; padding: 2px 4px;
+  font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.04em;
+}
+.cv-minimap.cv-collapsed { padding: 4px; }
+.cv-minimap.cv-collapsed .cv-minimap-canvas { display: none; }
+
+@media (max-width: 640px) {
+  .cv-btn { width: 40px; height: 40px; }
+  .cv-btn-view { width: auto; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cv-btn, .cv-menu-item { transition: none; }
+}

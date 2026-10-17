@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CityView dev</title>
+<link rel="stylesheet" href="../view/view.css">
+<style>
+  :root { color-scheme: dark; --bg: #11151d; --panel: rgba(16, 20, 30, 0.9); --line: rgba(255, 255, 255, 0.12); --fg: #e8edf5; --dim: #9aa6b8; --acc: #ffe27a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #world { position: fixed; inset: 0; }
+  #map { width: 100%; height: 100%; }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 6; min-height: 44px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); backdrop-filter: blur(4px);
+  }
+  #hud h1 { font-size: 14px; margin: 0 6px 0 0; font-weight: 700; letter-spacing: 0.01em; }
+  #hud .time { font-variant-numeric: tabular-nums; color: var(--acc); font-weight: 600; min-width: 128px; }
+  #hud button, #hud select { height: 28px; border-radius: 7px; border: 1px solid var(--line); background: #1e2432; color: var(--fg); font: inherit; padding: 0 8px; cursor: pointer; }
+  #hud button:hover, #hud select:hover { background: #283043; }
+  #hud .stats { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+  #hud .group { display: flex; gap: 4px; align-items: center; }
+  #tooltip {
+    position: absolute; z-index: 7; pointer-events: none; display: none; max-width: 300px;
+    padding: 6px 9px; border-radius: 7px; background: rgba(12, 15, 22, 0.94); border: 1px solid var(--line);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4); white-space: nowrap;
+  }
+  #tooltip b { color: var(--acc); font-weight: 600; }
+  #info { position: absolute; left: 12px; bottom: 12px; z-index: 5; max-width: min(360px, calc(100% - 24px)); padding: 8px 11px; border-radius: 9px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--dim); display: none; }
+  #info b { color: var(--fg); }
+  @media (max-width: 640px) {
+    #hud { gap: 4px 6px; padding: 6px 8px; }
+    #hud h1, #hud .stats, #hud .wide { display: none; }
+    #hud .time { min-width: 0; }
+  }
+  body.nohud #hud { display: none; }
+</style>
+</head>
+<body>
+<div id="world">
+  <canvas id="map"></canvas>
+  <div id="hud">
+    <h1>CityView</h1>
+    <span class="time" id="time">-</span>
+    <div class="group">
+      <button id="play" type="button" title="Pause or play">Pause</button>
+      <select id="speed" title="Speed"><option value="1">1x</option><option value="4">4x</option><option value="16">16x</option></select>
+    </div>
+    <div class="group">
+      <select id="jump" title="Jump to a time of day">
+        <option value="">Time…</option><option value="480">08:00</option><option value="750">12:30</option><option value="1050">17:30</option>
+        <option value="1170">19:30</option><option value="1320">22:00</option><option value="180">03:00</option>
+      </select>
+      <select id="weather" class="wide" title="Weather"><option>clear</option><option>rain</option><option>snow</option></select>
+      <select id="season" class="wide" title="Season"><option>spring</option><option selected>summer</option><option>autumn</option><option>winter</option></select>
+      <select id="overlay" class="wide" title="Overlay"><option value="">No overlay</option><option value="condition">Condition</option><option value="mood">Mood</option></select>
+      <button id="mode" type="button" title="Isometric or top-down">Top-down</button>
+    </div>
+    <span class="stats" id="stats"></span>
+  </div>
+  <div id="tooltip"></div>
+  <div id="info"></div>
+</div>
+<script src="../view/proj.js"></script>
+<script src="../view/art.js"></script>
+<script src="../view/buildings.js"></script>
+<script src="../view/actors.js"></script>
+<script src="../view/scene.js"></script>
+<script src="../view/movers.js"></script>
+<script src="../view/camera.js"></script>
+<script src="../view/minimap.js"></script>
+<script src="../view/view.js"></script>
+<script src="fixture_town.js"></script>
+<script src="fake_state.js"></script>
+<script>
+"use strict";
+(function () {
+  // URL: zoom, at=x,y (tile), fit=1, minute, day, weather, season, flat=1, speed, select=id, follow=0, freeze=1,
+  // conditions=plan, overlay=condition, hud=0, persist=0, dyn=0, minimap=0
+  const q = new URLSearchParams(location.search);
+  const $ = id => document.getElementById(id);
+  if (q.get("hud") === "0") document.body.classList.add("nohud");
+  let F = window.CityViewFixture;
+  const opts = { season: q.get("season") || "summer", weather: q.get("weather") || "clear", conditions: q.get("conditions") || "showcase" };
+  const specimen = q.get("specimen") === "1";
+  let fake = specimen ? CityViewFake.specimen(opts) : CityViewFake(opts);
+  if (specimen) F = { town: fake.town, homes: {}, cast: [] };
+  let speed = +(q.get("speed") || 1), frozen = q.get("freeze") === "1", paused = frozen;
+  let tick = (+(q.get("day") || 2)) * 1440 + (q.has("minute") ? +q.get("minute") : 8 * 60 + 15), acc = 0, last = null;
+  const hit2text = hit => {
+    if (!hit || !last) return "";
+    if (hit.kind === "agent") {
+      const a = last.agents.find(x => x.id === hit.id);
+      return a ? `<b>${a.name}</b> · ${a.activity.replace(/_/g, " ")} · ${a.state === "travelling" ? (a.vehicle === "walk" ? "walking" : a.vehicle) : a.state}` : hit.id;
+    }
+    if (hit.kind === "bus") { const b = last.buses.find(x => x.id === hit.id); return b ? `<b>Bus ${b.id}</b> · No. ${b.line} · ${b.riders} riders${b.at_stop ? " · at " + b.at_stop : ""}` : hit.id; }
+    if (hit.kind === "stop") { const s = F.town.stops.find(x => x.id === hit.id); return `<b>${s ? s.name : hit.id}</b> · stop · No. 1, No. 2`; }
+    if (hit.kind === "place") {
+      const p = F.town.places.find(x => x.id === hit.id);
+      if (!p) return hit.id;
+      const inside = last.agents.filter(a => a.inside === p.id).map(a => a.name.split(" ")[0]);
+      let s = `<b>${p.name}</b>`;
+      if (p.kind === "home" && last.lots && last.lots[p.id]) {
+        const c = last.lots[p.id].condition, st = CityView.STAGE_NAMES[CityView.stageOf(c)];
+        const hs = F.town.homes.filter(h => h.place === p.id);
+        const listed = hs.filter(h => last.homes[h.id] && last.homes[h.id].listing).map(h => (last.homes[h.id].listing === "for_sale" ? "for sale" : "to let") + (hs.length > 1 ? " " + h.unit : ""));
+        s += ` · ${st} (${c})` + (listed.length ? " · " + listed.join(", ") : "");
+      } else if (p.hours) s += ` (${p.hours[0]}:00–${p.hours[1]}:00)`;
+      if (inside.length) s += " · " + inside.slice(0, 5).join(", ") + (inside.length > 5 ? ` +${inside.length - 5}` : "");
+      return s;
+    }
+    if (hit.kind === "tile") return `tile ${hit.x}, ${hit.y}`;
+    return "";
+  };
+  const tip = $("tooltip");
+  const view = CityView.create($("map"), {
+    onPick(hit) {
+      const info = $("info");
+      if (hit && hit.kind === "agent") { view.select(hit.id, { follow: q.get("follow") !== "0" }); view.highlight(null); }
+      else if (hit && hit.kind === "place") { view.highlight({ places: [hit.id] }); }
+      else { view.highlight(null); }
+      info.style.display = hit ? "block" : "none";
+      info.innerHTML = hit ? hit2text(hit) : "";
+    },
+    onHover(hit, ev) {
+      if (!hit || !ev || hit.kind === "tile") { tip.style.display = "none"; return; }
+      tip.innerHTML = hit2text(hit); tip.style.display = "block";
+      const r = $("world").getBoundingClientRect();
+      tip.style.left = Math.min(r.width - tip.offsetWidth - 8, ev.cssX + 14) + "px"; tip.style.top = Math.max(50, ev.cssY + 14) + "px";
+    },
+    onSelect(id) { $("info").style.display = id ? "block" : "none"; },
+  }, { persist: q.get("persist") !== "0" && !q.has("zoom") && !q.has("fit"), dynamicResolution: q.get("dyn") !== "0", minimap: q.get("minimap") !== "0", eager: q.has("eager") });
+  const hudH = () => document.body.classList.contains("nohud") ? 0 : $("hud").offsetHeight;
+  view.setInset({ top: hudH() });
+  if (q.get("flat") === "1") view.setMode({ projection: "flat" });
+  else if (q.has("rot")) view.setMode({ projection: "iso", rot: +q.get("rot") });
+  view.setTown(F.town);
+  const send = () => { last = fake.state(tick); view.setState(last, speed); $("time").textContent = last.time; };
+  send();
+  if (q.has("zoom") || q.has("at")) {
+    const [x, y] = (q.get("at") || "40,25").split(",").map(Number);
+    view.setCamera({ x, y, zoom: +(q.get("zoom") || 1) });
+  }
+  if (q.get("fit") === "1") view.setCamera({ fit: true });
+  if (q.get("overlay")) setOverlay(q.get("overlay"));
+  if (q.get("select")) view.select(q.get("select"), { follow: q.get("follow") !== "0" });
+  view.start();
+  // frames every 50 ms, ticks every 417 ms / speed (like the server)
+  setInterval(() => {
+    if (!paused) { acc += 50 * speed; while (acc >= 417) { tick++; acc -= 417; } }
+    send();
+  }, 50);
+  setInterval(() => { const s = view.scene(); if (s) $("stats").textContent = `draw ${s.stats.draw.toFixed(1)} ms · ${s.stats.items} items · zoom ${view.camera().zoom.toFixed(2)}`; }, 500);
+  window.addEventListener("resize", () => view.setInset({ top: hudH() }));
+  if (window.ResizeObserver) new ResizeObserver(() => view.setInset({ top: hudH() })).observe($("hud"));
+
+  // HUD controls
+  $("play").textContent = paused ? "Play" : "Pause";
+  $("play").addEventListener("click", () => { paused = !paused; $("play").textContent = paused ? "Play" : "Pause"; });
+  $("speed").value = String(speed);
+  $("speed").addEventListener("change", e => { speed = +e.target.value; });
+  $("jump").addEventListener("change", e => { if (e.target.value) { tick = Math.floor(tick / 1440) * 1440 + +e.target.value; send(); } e.target.value = ""; });
+  $("weather").value = opts.weather;
+  $("weather").addEventListener("change", e => { opts.weather = e.target.value; fake = specimen ? CityViewFake.specimen(opts) : CityViewFake(opts); send(); });
+  $("season").value = opts.season;
+  $("season").addEventListener("change", e => { opts.season = e.target.value; fake = specimen ? CityViewFake.specimen(opts) : CityViewFake(opts); send(); });
+  function setOverlay(name) {
+    $("overlay").value = name || "";
+    if (!name) { view.setOverlay(null); return; }
+    const colors = {};
+    if (name === "condition") {
+      for (const [id, l] of Object.entries(last.lots || {})) colors[id] = ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"][CityView.stageOf(l.condition)];
+    } else {
+      for (const a of last.agents) { const h = F.town.homes.find(x => x.id === a.home); const pid = h ? h.place : a.home; colors[pid] = `hsl(${Math.round(a.mood * 1.2)} 70% 50%)`; }
+    }
+    view.setOverlay(name, colors);
+  }
+  $("overlay").addEventListener("change", e => setOverlay(e.target.value));
+  const syncMode = () => { $("mode").textContent = view.camera().projection === "flat" ? "Isometric" : "Top-down"; };
+  $("mode").addEventListener("click", () => { view.setMode({ projection: view.camera().projection === "flat" ? "iso" : "flat" }); syncMode(); });
+  syncMode();
+
+  // hooks for the screenshot and bench scripts
+  window.__view = view; window.__fake = fake;
+  window.__setTick = t => { tick = t; send(); };
+  window.__bench = n => new Promise(res => {
+    const out = [];
+    const step = () => { const s = view.scene(); out.push(s.stats.draw); if (out.length < (n || 120)) requestAnimationFrame(step); else { const v = out.slice(5).sort((a, b) => a - b); res({ median: v[v.length >> 1], p90: v[Math.floor(v.length * 0.9)], n: v.length }); } };
+    requestAnimationFrame(step);
+  });
+})();
+</script>
+</body>
+</html>
