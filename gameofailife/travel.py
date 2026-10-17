@@ -28,6 +28,7 @@ UNREACHABLE = 65535  # what the walk fields give for a tile that cannot reach th
 ROAD_MODES = ("car", "taxi", "ambulance")  # they follow the roads
 LIGHT_WAIT = 1  # minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
 BUS_MIN_WALK = 25  # the bus is someone's usual way to work only when the walk is longer than this
+TAXI_MIN_WALK = 40  # the work fork offers a taxi to an adult without a car only when the walk is longer than this
 
 
 def bus_trip(sim: Simulation, agent: Agent, place_id: str,
@@ -50,7 +51,22 @@ def travel_minutes(sim: Simulation, agent: Agent, place_id: str, mode: str, wors
     """
     if agent.inside == place_id:
         return 0
-    xy = (agent.x, agent.y)
+    return _minutes(sim, (agent.x, agent.y), place_id, mode, worst)
+
+
+def leg_minutes(sim: Simulation, start, place_id: str, mode: str, worst: bool = True) -> int:
+    """Minutes by `mode` from `start` (a place id, whose entry the leg starts at, or an (x, y) tile) to a place,
+    as travel_minutes counts them: 0 when start is that place. It is the later leg of a trip with a stop on the
+    way, such as a coffee before work, so a bus leg counts the worst wait by default: when it starts depends on
+    how long the stop takes."""
+    if isinstance(start, str):
+        if start == place_id:
+            return 0
+        start = sim.town.places[start].entry
+    return _minutes(sim, (start[0], start[1]), place_id, mode, worst)
+
+
+def _minutes(sim: Simulation, xy: tuple[int, int], place_id: str, mode: str, worst: bool) -> int:
     walk = sim.town.walk_minutes(xy, place_id)
     if walk >= UNREACHABLE:
         return UNREACHABLE
@@ -60,7 +76,7 @@ def travel_minutes(sim: Simulation, agent: Agent, place_id: str, mode: str, wors
             return UNREACHABLE
         return -(-tiles // SPEEDS[mode]) + (junctions * LIGHT_WAIT if mode != "ambulance" else 0)
     if mode == "bus":
-        trip = bus_trip(sim, agent, place_id, worst)
+        trip = transit.best_trip(sim.town, xy, place_id, sim.clock.tick, worst)
         return trip[0] if trip else walk
     return -(-walk // SPEEDS.get(mode, 1))
 

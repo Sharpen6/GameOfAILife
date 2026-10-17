@@ -26,7 +26,7 @@ from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LA
 from .rng import r2
 from .town import TownMap, build_map
 from .transit import BUS_FARE, FLIGHTS
-from .travel import SPEEDS, TAXI_FARE
+from .travel import ROAD_MODES, SPEEDS, TAXI_FARE
 
 ANSWER_SECONDS = 5.0  # a controller's answer applies if it arrives within this
 LEARN_SECONDS = 10.0  # a later answer is still saved and teaches the profile
@@ -93,6 +93,9 @@ DECAY_SCALE = {
 }
 
 LIGHT_CYCLE = 6  # minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
+STOP_AT_LIGHTS = ("car", "taxi")  # they wait at a red light on entering a junction; buses and ambulances don't
+ONE_WAY = ("taxi", "ambulance")  # vehicles that take a character to one place: on arrival they are on foot again
+BUS_GIVE_UP = 26  # minutes at a stop (two headways, which the exact timetable never allows) before walking instead
 FLIGHT_MINUTES = 12  # the daily planes (transit.FLIGHTS) take this long to cross the sky
 
 
@@ -221,8 +224,8 @@ class Simulation:
         return housing.home_page(self, home_id)
 
     def buses(self) -> list[dict]:
-        """`state.buses`: a pure function of the tick."""
-        return transit.bus_rows(self.clock.tick)
+        """`state.buses`: positions are a pure function of the tick; riders are counted from `agent.riding`."""
+        return transit.bus_rows(self.clock.tick, self.agents.values())
 
     def stats_json(self, full: bool = False) -> dict:
         """God's `stats` push (PLAN 3.8), built by stats.stats_json."""
@@ -378,9 +381,9 @@ class Simulation:
         if agent.fork_id:
             self._finish_fork(agent)
         if agent.health < 25 and agent.inside != "hospital":
-            self.event(f"{agent.name} feels very unwell and goes to City Hospital.", agent, tag="hospital")
-            agent.plan = [("hospital", "hospital")]
-            self._start_step(agent, *agent.plan.pop(0))
+            self.event(f"{agent.name} feels very unwell, and an ambulance takes them to "
+                       f"{self.town.places['hospital'].name}.", agent, tag="hospital")
+            self.start_plan(agent, [("hospital", "hospital")], "ambulance")  # free; the hospital's fee stays
             return
         fork = build_fork(self, agent)
         if fork:
@@ -394,15 +397,18 @@ class Simulation:
         self._start_step(agent, *agent.plan.pop(0))
 
     def _must_leave_for_work(self, agent: Agent, via: str | None = None) -> bool:
-        """True once it's time to set off for today's shift, counting the walk by way of `via` if given."""
+        """True once it's time to set off for today's shift: SHIFT_MARGIN minutes before the commute by the usual
+        way (car, bus with its worst wait, or on foot) would start it, counting the trip by way of `via` if given."""
         start = self._shift_start_tick(agent)
         if start is None:
             return False
-        route = self.walk_minutes(agent, agent.job.place_id)
         place_id = self._resolve_place(agent, via)
         if place_id and agent.inside != place_id:
-            route = (self.town.walk_minutes((agent.x, agent.y), place_id)
-                     + self.town.walk_minutes(self.town.places[place_id].entry, agent.job.place_id))
+            mode = self.usual_mode(agent)
+            route = (self.travel_minutes(agent, place_id, mode, worst=True)
+                     + travel.leg_minutes(self, place_id, agent.job.place_id, mode))
+        else:
+            route = self.commute_minutes(agent)
         return self.clock.tick >= start - route - SHIFT_MARGIN
 
     def _resolve_place(self, agent: Agent, where: str | None) -> str | None:
@@ -416,10 +422,13 @@ class Simulation:
         place_id = self._resolve_place(agent, where)
         agent.activity = activity
         agent.activity_place = place_id
+        agent.trip = agent.riding = None  # a new step is a new trip (a bus ride in progress ends here too)
         if place_id and agent.inside != place_id:
             place = self.town.places[place_id]
             start = (agent.x, agent.y)
-            if agent.vehicle in ("car", "taxi", "ambulance"):
+            if agent.vehicle == "bus" and self._take_bus(agent, place_id):
+                return
+            if agent.vehicle in ROAD_MODES:
                 agent.path = self.town.drive_path(start, place_id)
             else:
                 agent.path = self.town.path(start, place.entry)
@@ -430,22 +439,87 @@ class Simulation:
             agent.x, agent.y = place.entry
         self._begin_activity(agent)
 
+    def _take_bus(self, agent: Agent, place_id: str) -> bool:
+        """Set off by bus: the trip `travel.bus_trip` finds leaving now, or False (walk) when no bus saves time.
+
+        The rider walks to the board stop (`to_stop`), waits there (`waiting`) until a bus of the line stands at it,
+        boards and pays (`riding`, `agent.riding` = the bus id, riding on the bus's tile), gets off on the first tick
+        that bus stands at the alight stop and walks in (`from_stop`). So they walk in at departure + the trip's
+        minutes, exactly as transit.best_trip counts them.
+        """
+        found = travel.bus_trip(self, agent, place_id)
+        if found is None:
+            return False
+        _, line, board, alight = found
+        agent.inside = None
+        agent.state = "travelling"
+        agent.trip = {"mode": "bus", "line": line, "board": board, "alight": alight, "phase": "to_stop",
+                      "since": self.clock.tick}
+        agent.path = self.town.path((agent.x, agent.y), transit.STOP_XY[board])
+        if not agent.path:  # already at the stop: a bus may be standing there now
+            self._bus_phase(agent, "waiting")
+            self._bus_step(agent, agent.trip)
+        return True
+
+    def _bus_phase(self, agent: Agent, phase: str) -> None:
+        agent.trip["phase"], agent.trip["since"] = phase, self.clock.tick
+
+    def _bus_step(self, agent: Agent, trip: dict) -> None:
+        """One minute at the stop or on board (buses are a pure function of the tick, so they have moved already)."""
+        tick = self.clock.tick
+        if trip["phase"] == "waiting":
+            bus = transit.bus_at_stop(trip["line"], trip["board"], tick)
+            if bus:
+                fare = transit.fare(agent.age)  # paid once, on boarding
+                if fare:
+                    self._payer_for(agent, fare).money -= fare
+                agent.riding = bus
+                self._bus_phase(agent, "riding")
+            elif tick - trip["since"] >= BUS_GIVE_UP:
+                agent.trip = None  # no bus came: walk the rest of the way
+                self._walk_on(agent)
+            return
+        agent.x, agent.y = transit.bus_xy(agent.riding, tick)
+        if transit.bus_at_stop(trip["line"], trip["alight"], tick) == agent.riding:
+            agent.riding = None
+            self._bus_phase(agent, "from_stop")
+            self._walk_on(agent)
+
+    def _walk_on(self, agent: Agent) -> None:
+        """From a bus stop, walk to the step's place (starting next minute)."""
+        agent.path = self.town.path((agent.x, agent.y), self.town.places[agent.activity_place].entry)
+        if not agent.path:
+            agent.trip = None
+            self._begin_activity(agent)
+
     def _travel(self, agent: Agent) -> None:
+        trip = agent.trip
+        if trip and trip["phase"] in ("waiting", "riding"):
+            self._bus_step(agent, trip)
+            return
         light = None
         for _ in range(agent.speed):
             if not agent.path:
                 break
             nxt = agent.path[0]
-            if agent.vehicle == "car" and nxt in self.town.junctions:
+            if agent.vehicle in STOP_AT_LIGHTS and nxt in self.town.junctions:
                 light = light or self.lights()
                 axis = "ns" if nxt[0] == agent.x else "ew"
                 if light[axis] == "red":
                     break  # wait at the junction
             agent.x, agent.y = agent.path.pop(0)
-        if not agent.path:
-            self._begin_activity(agent)
+        if agent.path:
+            return
+        if trip and trip["phase"] == "to_stop":  # at the stop: a bus may be standing there now
+            self._bus_phase(agent, "waiting")
+            self._bus_step(agent, trip)
+            return
+        agent.trip = None
+        self._begin_activity(agent)
 
     def _begin_activity(self, agent: Agent) -> None:
+        if agent.vehicle in ONE_WAY:  # the taxi or ambulance has gone: the next trip is on foot unless chosen
+            agent.vehicle, agent.speed = "walk", SPEEDS["walk"]
         act = ACTIVITIES[agent.activity]
         place_id = agent.activity_place
         paid, agent.paid = getattr(agent, "paid", None), None  # type: ignore[attr-defined]
@@ -472,8 +546,11 @@ class Simulation:
             start = tick - self.clock.minute_of_day + agent.job.start_hour * 60 if agent.job else tick
             agent.work_started = max(tick, min(start, agent.busy_until - 30))  # type: ignore[attr-defined]
         elif agent.activity == "sleep":
-            # Up with time for breakfast before the shift: 7:00 starters at about 5:30.
-            wake = min(7 * 60, agent.job.start_hour * 60 - 90) if agent.job else 7 * 60
+            # Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
+            # commute from home (the usual way, the worst bus wait counted) for the long ones.
+            wake = 7 * 60
+            if agent.job:
+                wake = min(wake, agent.job.start_hour * 60 - max(90, (self.commute_minutes(agent) or 0) + 60))
             wake += self.rng.randrange(0, 25)
             m = self.clock.minute_of_day
             minutes = (wake - m) % MINUTES_PER_DAY
@@ -488,7 +565,7 @@ class Simulation:
         start = self._shift_start_tick(agent)
         if (agent.activity not in ("work", "hospital") and start is not None
                 and not any(s[0] == "work" for s in agent.plan)):
-            leave = start - self.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN
+            leave = start - self.commute_minutes(agent) - SHIFT_MARGIN  # as _must_leave_for_work counts it
             agent.busy_until = max(tick + 1, min(agent.busy_until, leave))
         agent.activity_minutes = max(1, agent.busy_until - tick)  # type: ignore[attr-defined]
         if agent.activity == "eat_home":
@@ -531,8 +608,13 @@ class Simulation:
         agent.state = "idle"
         agent.activity = "idle" if not agent.plan else agent.activity
 
+    def _park_of(self, agent: Agent):
+        """The park of the character's walk: the activity's own, else Riverside Park."""
+        place = self.town.places.get(agent.activity_place or "")
+        return place if place is not None and place.kind == "park" else self.town.places["park"]
+
     def _wander_park(self, agent: Agent) -> None:
-        park = self.town.places["park"]
+        park = self._park_of(agent)
         x, y = agent.x + self.rng.choice((-1, 0, 1)), agent.y + self.rng.choice((-1, 0, 1))
         if park.x <= x < park.x + park.w and park.y <= y < park.y + park.h and self.town.walkable(x, y):
             agent.x, agent.y = x, y
@@ -554,8 +636,7 @@ class Simulation:
             self.event(f"{agent.name} leaves City Hospital feeling better (paid ${HOSPITAL_FEE:.0f}{by}).",
                        agent, tag="discharged")
         elif agent.activity == "walk_park":
-            park = self.town.places["park"]
-            agent.x, agent.y = park.entry
+            agent.x, agent.y = self._park_of(agent).entry
         agent.state = "idle"
         agent.activity = "idle" if not agent.plan else agent.activity
 
@@ -632,9 +713,12 @@ class Simulation:
             minutes = None
             first = opt.steps[0][1] if opt.steps else None
             place_id = self._resolve_place(agent, first)
+            mode = opt.vehicle if opt.vehicle in SPEEDS else "walk"
             if place_id and agent.inside != place_id:
-                mode = opt.vehicle if opt.vehicle in SPEEDS else "walk"
                 minutes = self.travel_minutes(agent, place_id, mode)
+            if place_id and agent.job and place_id != agent.job.place_id and any(s[0] == "work" for s in opt.steps):
+                # A stop on the way to work (a coffee first): the minutes count the leg on to work too.
+                minutes = (minutes or 0) + travel.leg_minutes(self, place_id, agent.job.place_id, mode)
             options.append(opt.public(i, minutes))
         here = self.town.places.get(agent.inside or "")
         return {
@@ -909,16 +993,17 @@ class Simulation:
                        tag="saving")
         if "ask_shop" in extra:
             other = self.agents.get(extra["ask_shop"])
-            market = self.town.places["market"]
-            if (other and other.alive and self._interruptible(other)
-                    and not self._must_leave_for_work(other, "market")
+            # The market nearest the shopper's home that is open when they get there; it must stay open for the shop.
+            market = self.nearest(other, ("market",), origin=self.home_of(other)) if other and other.alive else None
+            if (market and self._interruptible(other)
+                    and not self._must_leave_for_work(other, market.id)
                     and self._fits_before_closing(market, ACTIVITIES["buy_groceries"].minutes,
-                                                  self.walk_minutes(other, "market"))):
+                                                  self.walk_minutes(other, market.id))):
                 payer = other if other.money >= GROCERY_COST else agent  # the asker covers it if the shopper can't
                 payer.money -= GROCERY_COST
                 other.plan = [("relax_home", "home")]
-                self._start_step(other, "buy_groceries", "market")  # started now so the paid shop happens
-                self.event(f"{other.name} heads to Fresh Market for {agent.name.split()[0]}.", other, tag="errand",
+                self._start_step(other, "buy_groceries", market.id)  # started now so the paid shop happens
+                self.event(f"{other.name} heads to {market.name} for {agent.name.split()[0]}.", other, tag="errand",
                            agents=[agent.id])
         if "call" in extra:
             other = self.agents.get(extra["call"])
