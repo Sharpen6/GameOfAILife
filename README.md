@@ -457,14 +457,14 @@ In this build these calls are WebSocket messages: forks arrive as `fork` message
 
 The screen is God's view: a living city map on top, and any mind one click away.
 
-- **City map.** A tile-based world seen from above at a slight angle, in the style of the Pokémon games: pixel-art characters walking the streets, buildings by type, buses and cars on the roads, traffic lights, weather and day/night lighting. A small icon over each head shows mood. Overlays show wealth, crime, faith, health and happiness by neighbourhood.
+- **City map.** An isometric tile city in the style of SimCity, with big tiles, pan and zoom, and a flat top-down view as an option: little people walking the streets, a building model for each type that shows its wear, buses and cars on the roads, traffic lights, weather and day/night lighting. A small icon over each head shows mood. Overlays show wealth, crime, faith, health and happiness by neighbourhood.
 - **Mind panel.** Click an agent to see their needs bars, mood, current thought, today's plan, diary, memories, beliefs, relationships graph, bank ledger and the forks they have decided.
 - **Luck dial.** Raise or lower any agent's Luck, with a history of every change God has made.
 - **Fortune log.** Every chance event that touched an agent and every Luck change God made; the odds stay hidden.
 - **Conversations.** Live and past conversations shown as chat transcripts, filterable by agent, place or topic.
 - **Chronicle and dashboards.** The running story feed, plus city charts: population, employment, average wellbeing, inequality, faith over time.
 - **Time controls.** Pause, 1x, 10x, 100x, skip to next notable event, and save points for rewind. This build has pause and 1x, 2x, 4x, 8x and 16x.
-- **Character creation page.** Create a character's identity, looks, traits, household and play-style profile, and choose the AI model that plays it. The profile updates from the character's choices and stays editable at any time. A new city starts with a generated starter town of about 20 characters, which the player can edit here.
+- **Character creation page.** Create a character's identity, looks, traits, household and play-style profile, and choose the AI model that plays it. The profile updates from the character's choices and stays editable at any time. A new city starts with a generated starter town of about 60 people, which the player can edit here.
 
 ## Roadmap
 
@@ -581,7 +581,7 @@ The default run takes about a minute. The slow tests (the housing economy soak o
 
     GOAL_SLOW=1 python3 -m unittest discover -s tests
 
-The browser tests need Node and Playwright with a Chromium; without them they print SKIP. Each one also runs on its own:
+The browser tests need Node and Playwright with a Chromium, and the full app's test also needs Node 22 or newer for its WebSocket client; without them they print SKIP. Each one also runs on its own:
 
     node tests/browser/full_app_smoke.cjs     # the real server, a fake controller and the God view, desktop and phone
     node tests/browser/view_smoke.cjs         # the city view on the dev fixture

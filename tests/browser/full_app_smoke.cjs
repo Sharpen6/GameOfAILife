@@ -8,7 +8,9 @@
 // (python3 -m gameofailife --seed 1 --port 0 --speed 4) and a fake controller: a small WebSocket client in this
 // file that says hello with a model name, claims every character and answers each fork it is sent within a
 // second, with a reason. One fork it answers late, 6.5 s after it came, so the profile default plays at 5 s and
-// the answer only teaches the profile (the ack says so). Then it opens client/index.html and plays God:
+// the answer only teaches the profile (the ack says so). It takes the best home on offer in every house hunt, so
+// the first evening's house hunting (Day 1 from 18:00) always ends in moves, the major events the News toast check
+// waits for. Then it opens client/index.html and plays God:
 //   - the welcome reaches the view and the dashboard, the scripts load in the PLAN 3.12 order, the map is drawn
 //   - the 16x button reaches the server, and the HUD's AI chip counts the characters the controller plays
 //   - a person is selected from the People ranking (the view selects them too), and their Owns block opens the
@@ -19,13 +21,15 @@
 //     lands on that place
 //   - the LLM log fills with the controller's answers, with its name, model and reasons, and shows the late
 //     answer on the timed-out decision
-//   - a major event of the running city pops a News toast inside the window, and it is in the News tab
+//   - a major event of the running city pops a News toast inside the window, and it is in the News tab (on a
+//     phone a burst of majors may fold straight into the "N more major events" card, which counts as the toast)
 //   - no console errors and no horizontal scroll, checked along the way and at the end
 // The Claude controller (examples/claude_controller.py) is not needed.
 //
-// Playwright is looked for as a local module, then in the global node_modules. Without it, or without a browser
-// it can launch, the test prints SKIP and exits 0. FULL_SHOTS=<folder> saves city-iso.png, people.png,
-// home-card.png, city-flat.png, llm-log.png and news.png (desktop) and phone.png (DPR 2).
+// Playwright is looked for as a local module, then in the global node_modules. Without it, without a browser it
+// can launch, or on a Node older than 22 (no WebSocket client for the fake controller), the test prints SKIP and
+// exits 0. FULL_SHOTS=<folder> saves city-iso.png, people.png, home-card.png, city-flat.png, llm-log.png and
+// news.png (desktop) and phone.png (DPR 2), each once the map has finished drawing.
 "use strict";
 
 const { spawn, execSync } = require("child_process");
@@ -112,7 +116,9 @@ function prng(seed) {
 }
 
 // Plays every character. Each fork gets an answer 150-850 ms after it arrives, except one: the first fork that
-// arrives 2 s or more after the welcome (and is not a move) gets its answer LATE_MS after it arrived.
+// arrives 2 s or more after the welcome (and is not a move) gets its answer LATE_MS after it arrived. Choices are
+// mostly the first, usual option; a house hunt always takes its first option, the best home on offer (bought or
+// rented), so a household that is asked always moves and the city has a major event on its first evening.
 function startController(port) {
   const rand = prng(7);
   const c = { welcome: null, forks: 0, answered: 0, acks: [], late: null, lateAck: null, errors: [], closed: false, ws: null };
@@ -136,7 +142,8 @@ function startController(port) {
       if (msg.type === "error") { c.errors.push(msg.error); return; }
       if (msg.type !== "fork") return; // texts and invite answers: nothing to do
       c.forks += 1;
-      const r = rand(), choice = r < 0.55 ? 0 : r < 0.75 ? 1 : r < 0.9 ? 2 : 3; // mostly the first, usual option
+      const r = rand(), pick = r < 0.55 ? 0 : r < 0.75 ? 1 : r < 0.9 ? 2 : 3; // mostly the first, usual option
+      const choice = msg.kind === "house_hunt" ? 0 : pick;
       const late = !c.late && Date.now() - at >= 2000 && !["house_hunt", "housing_trouble"].includes(msg.kind);
       const delay = late ? LATE_MS : 150 + Math.floor(rand() * 700);
       if (late) c.late = { fork_id: msg.fork_id, agent: msg.agent_id, kind: msg.kind, choice, got: Date.now(), sent: 0 };
@@ -159,6 +166,11 @@ function startController(port) {
 // Runs before any page script: keeps the CityView instance game.js makes (window.__view, used only to find where
 // a house is on screen), the last state.homes and state.agents the page was sent (window.__net), and every major
 // toast that appears, with whether it sat inside the window (window.__toasts).
+//
+// A major card and the coalesced "N more major events" card both count, and each is read from the mutation
+// records, so a card that came and went within one task counts too: on a phone (one slot) two majors in one state
+// frame add the first card and fold it into the coalesced card at once, before an observer could find it in the
+// box. `shown` says whether the card was still on the page when the observer ran; `inside` is measured only then.
 function instrument() {
   const CV = window.CityView = window.CityView || {};
   let create = null;
@@ -167,7 +179,7 @@ function instrument() {
     get() { return create && function () { const v = create.apply(this, arguments); window.__view = v; return v; }; },
     set(fn) { create = fn; },
   });
-  const net = window.__net = { homes: {}, agents: [], frames: 0, lateForks: [], majors: [] };
+  const net = window.__net = { homes: {}, agents: [], frames: 0, welcomes: 0, lateForks: [], majors: [] };
   const Native = window.WebSocket;
   const Wrapped = function (url, protocols) {
     const s = protocols === undefined ? new Native(url) : new Native(url, protocols);
@@ -175,6 +187,7 @@ function instrument() {
       let m;
       try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.type !== "welcome" && m.type !== "state") return;
+      if (m.type === "welcome") net.welcomes += 1;
       if (m.state.homes) net.homes = m.state.homes;
       net.agents = m.state.agents;
       net.frames += 1;
@@ -190,13 +203,15 @@ function instrument() {
   document.addEventListener("DOMContentLoaded", () => {
     const box = document.getElementById("toasts");
     if (!box) return;
-    new MutationObserver(() => {
-      for (const t of box.querySelectorAll(".dash-toast.major")) {
-        if (t.__seen) continue;
-        t.__seen = true;
-        const r = t.getBoundingClientRect();
-        window.__toasts.push({ text: t.textContent.trim().slice(0, 160),
-          inside: r.width > 0 && r.left >= 0 && r.right <= innerWidth + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 });
+    new MutationObserver(records => {
+      for (const rec of records) {
+        for (const t of rec.addedNodes) {
+          if (t.nodeType !== 1 || t.__seen || !t.matches(".dash-toast.major, .dash-toast.more")) continue;
+          t.__seen = true;
+          const shown = t.isConnected, r = shown ? t.getBoundingClientRect() : null;
+          window.__toasts.push({ kind: t.classList.contains("more") ? "more" : "major", text: t.textContent.trim().slice(0, 160), shown,
+            inside: shown ? r.width > 0 && r.left >= 0 && r.right <= innerWidth + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 : null });
+        }
       }
     }).observe(box, { childList: true, subtree: true });
   });
@@ -207,8 +222,26 @@ async function noSideScroll(page, what) {
   check(wide.doc <= wide.view && wide.body <= wide.view, `${what}: no horizontal scroll`, wide);
 }
 
-async function shot(page, name) {
+// Waits until the map has finished drawing: the view builds its cached ground a couple of chunks a frame after a
+// switch of projection or a big zoom, so a frame taken too soon has bare background where ground should be.
+// Finished is no new chunk built in three reads 250 ms apart; false when that has not happened in 8 s.
+async function settled(page) {
+  const built = () => page.evaluate(() => { const s = window.__view && window.__view.scene(); return s ? s.stats.built : -1; });
+  let last = await built(), same = 0;
+  for (const end = Date.now() + 8000; same < 3 && Date.now() < end;) {
+    await page.waitForTimeout(250);
+    const n = await built();
+    same = n === last ? same + 1 : 0;
+    last = n;
+  }
+  return same >= 3;
+}
+
+// Saves a screenshot when FULL_SHOTS is set, once the map has finished drawing; `settle` false takes it at once,
+// for a picture of something that may not wait (a toast), on a map the caller already let settle.
+async function shot(page, name, settle = true) {
   if (!SHOTS) return;
+  if (settle) await settled(page);
   fs.mkdirSync(SHOTS, { recursive: true });
   const file = path.join(SHOTS, `${name}.png`);
   await page.screenshot({ path: file });
@@ -406,6 +439,7 @@ async function run(browser, name, size, touch) {
     await page.click(".cv-btn-view");
     await page.click('.cv-menu-item:text-is("Isometric")');
     await waitFor(page, () => window.__view.camera().projection === "iso", null, 2000, "back to the isometric view");
+    check(await settled(page), "the isometric map finishes drawing after the switch back");
 
     // The LLM log: the controller's answers, then its late answer on a timed-out decision.
     await page.evaluate(() => Dash.openTab("llm"));
@@ -456,17 +490,31 @@ async function run(browser, name, size, touch) {
     // A major event of the running city: a News toast inside the window, and the same headline in News.
     await page.evaluate(c => { window.__view.setCamera({ x: c.x, y: c.y, zoom: c.zoom }); Dash.openTab("city"); }, cam0);
     if (touch) await page.evaluate(() => { const t = document.querySelector('#panel .dash-tab[data-tab="city"]'); if (t) t.click(); });
-    const toasted = await page.waitForFunction(() => window.__toasts.length > 0, null, { timeout: MAJOR_WAIT_MS, polling: 250 })
+    await settled(page); // so the phone's picture of the toast can be taken the moment it is up
+    // For that picture the city runs at 2x until the toast: a phone shows one major card at a time, the next major
+    // turns it into an "N more major events" card, and the first evening's moves come a few game minutes apart.
+    if (touch && SHOTS) await page.click('#speed button[data-speed="2"]');
+    const toasted = await page.waitForFunction(() => window.__toasts.length > 0, null, { timeout: MAJOR_WAIT_MS, polling: 100 })
       .then(() => true, () => false);
-    check(toasted, "a major event pops a News toast", await page.evaluate(() =>
-      ({ majors: window.__net.majors.slice(0, 5), toasts: Dash.inspect().toasts, time: document.getElementById("clock").textContent })));
+    if (touch && toasted && SHOTS) {
+      // the picture shows a headline when one is up within 20 s, else the coalesced card
+      await page.waitForFunction(() => document.querySelector("#toasts .dash-toast.major"), null, { timeout: 20000, polling: 100 }).catch(() => {});
+      await page.waitForTimeout(300); // after the card's 0.2 s fade-in
+      await shot(page, "phone", false);
+    }
+    const seen = await page.evaluate(() => ({ majors: window.__net.majors.slice(0, 5), count: window.__net.majors.length,
+      welcomes: window.__net.welcomes, toasts: Dash.inspect().toasts, time: document.getElementById("clock").textContent }));
+    check(toasted, "a major event pops a News toast", seen);
     const toasts = await page.evaluate(() => window.__toasts.slice());
     if (toasts.length) {
-      check(toasts.every(t => t.inside), "the toasts sit inside the window", toasts);
-      if (touch) await shot(page, "phone");
+      const onScreen = toasts.filter(t => t.shown);
+      check(onScreen.length > 0 && onScreen.every(t => t.inside), "the toasts sit inside the window", toasts);
       await page.evaluate(() => Dash.openTab("news"));
-      const head = toasts[0].text.replace(/(Show|Open News)\s*$/, "").trim().slice(0, 40);
-      await waitFor(page, h => document.getElementById("panel").textContent.includes(h), head, 3000, "the toast's headline in the News tab");
+      // the first major card's headline; when the burst went straight into the coalesced card, the first major's
+      const major = toasts.find(t => t.kind === "major");
+      const head = major ? major.text.replace(/(Show|Open News)\s*$/, "").trim().slice(0, 40)
+        : await page.evaluate(() => (window.__net.majors[0] || "").replace(/^Day \d+ \w+ \d\d:\d\d /, "").slice(0, 40));
+      await waitFor(page, h => !!h && document.getElementById("panel").textContent.includes(h), head, 3000, "the toast's headline in the News tab");
       await page.waitForTimeout(1200);
       if (!touch) await shot(page, "news");
     }
@@ -476,7 +524,9 @@ async function run(browser, name, size, touch) {
     check(!ctl.closed && !ctl.errors.length, "the controller stayed connected with no errors", { closed: ctl.closed, errors: ctl.errors.slice(0, 5) });
     const applied = ctl.acks.filter(a => a.accepted && a.applied).length;
     check(applied >= 5, "the controller's in-time answers were played", { forks: ctl.forks, answered: ctl.answered, applied });
-    console.log(`  ${ctl.forks} forks asked, ${applied} answers played in time, ${toasts.length} major toasts`);
+    const cards = k => toasts.filter(t => t.kind === k).length;
+    console.log(`  ${ctl.forks} forks asked, ${applied} answers played in time, ${cards("major")} major toasts, ${cards("more")} coalesced`);
+    console.log(`  the first major events: ${seen.count ? seen.majors.slice(0, 3).join(" | ") : "none"} (the clock when the check ended: ${seen.time}; welcomes: ${seen.welcomes})`);
   } finally {
     if (ctx) await ctx.close();
     if (ctl && ctl.ws) { try { ctl.ws.close(); } catch (e) { /* closing anyway */ } }
@@ -485,6 +535,7 @@ async function run(browser, name, size, touch) {
 }
 
 (async () => {
+  if (typeof WebSocket !== "function") { console.log("SKIP: this Node has no WebSocket client (Node 22 or newer)"); process.exit(0); }
   const pw = findPlaywright();
   if (!pw || !pw.chromium) { console.log("SKIP: Playwright is not installed"); process.exit(0); }
   let browser;
