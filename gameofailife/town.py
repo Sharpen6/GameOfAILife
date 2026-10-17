@@ -1,34 +1,76 @@
-"""The tile map and the generated starter town of about 20 characters."""
+"""The 80 x 50 tile map of Millbrook: streets, districts, the 39 places, seeded trees and walk distance fields.
+
+`build_map(seed)` is memoized and a TownMap is read-only after it is built: only its lazy walk-field cache
+fills in, so Simulations with the same seed share one map and its fields. The layout and the places are the
+same for every seed; the seed only moves the trees. The homes live in `housing.py` and the cast in `cast.py`;
+this module imports neither.
+"""
 
 from __future__ import annotations
 
-import random
-from collections import deque
+import functools
+from array import array
 from dataclasses import dataclass, field
 
-from .agent import Agent, Household, Job, Profile, RelationKind
+from .rng import Rng
 
-W, H = 40, 25
+W, H = 80, 50
 
-# Tile codes shared with the web client.
-GRASS, ROAD, BUILDING, DOOR, PARK, TREE, ENTRY = ".", "#", "B", "D", "P", "T", "e"
+# Tile codes shared with the web client. Water is new and is not walkable.
+GRASS, ROAD, BUILDING, DOOR, PARK, TREE, ENTRY, WATER = ".", "#", "B", "D", "P", "T", "e", "~"
 WALKABLE = {GRASS, ROAD, PARK, ENTRY}
+UNREACHABLE = 65535  # walk distance of a tile no walk reaches
 
-ROAD_ROWS = (3, 12, 21)
-ROAD_COLS = (3, 14, 25, 36)
+ROAD_ROWS = (3, 14, 25, 36)  # east-west streets, x 0 to 79
+ROAD_COLS = (3, 16, 29, 42, 55, 68)  # north-south streets, y 0 to ROAD_COL_END
+ROAD_COL_END = 44  # the north-south streets stop at the riverbank (y 45)
+RIVER_ROWS = (46, 47, 48, 49)
+STREETS = [  # (name, axis, at): a "row" street runs east-west along y = at, a "col" street north-south along x = at
+    ("Ridge Road", "row", 3), ("Park Avenue", "row", 14), ("Main Street", "row", 25), ("River Road", "row", 36),
+    ("Willow Lane", "col", 3), ("Oak Street", "col", 16), ("Market Street", "col", 29),
+    ("Center Street", "col", 42), ("Eastgate Road", "col", 55), ("Mill Road", "col", 68),
+]
+
+# The 24 blocks between the streets: columns c0-c5 and rows r0-r3.
+BLOCK_X = (4, 17, 30, 43, 56, 69)
+BLOCK_Y = (4, 15, 26, 37)
+BLOCK_W = (12, 12, 12, 12, 12, 11)
+BLOCK_H = (10, 10, 10, 8)
+
+DISTRICTS = [  # (id, name, about, blocks as (column, row))
+    ("maple_grove", "Maple Grove", "ordinary houses, the school, Fresh Market",
+     [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]),
+    ("hilltop", "Hilltop", "big houses with gardens", [(2, 0), (3, 0)]),
+    ("downtown", "Downtown", "offices, hospital, shops, City Hall", [(2, 1), (3, 1), (2, 2), (3, 2)]),
+    ("eastgate", "Eastgate", "cheap flats, corner shops", [(4, 0), (4, 1)]),
+    ("the_works", "The Works", "the factory by the river", [(4, 2), (5, 2), (4, 3), (5, 3)]),
+    ("riverside", "Riverside", "the park along the river", [(0, 3), (1, 3), (2, 3), (3, 3)]),
+    ("east_woods", "East Woods", "woodland at the edge of town", [(5, 0), (5, 1)]),
+]
+DISTRICT_NAMES = {did: name for did, name, _, _ in DISTRICTS}
+
+# Seeded woods, drawn after the park trees from the same stream: (block column, block row, tree density).
+WOODS = [(5, 0, 0.30), (5, 1, 0.30), (0, 0, 0.04), (0, 3, 0.10), (3, 3, 0.08), (5, 3, 0.10)]
+EDGE_TREES = 0.12  # the north strip (y 0-2) and the west strip (x 0-2, y 3-44)
 
 
 @dataclass
 class Place:
     id: str
     name: str
-    kind: str  # home, office, school, hospital, market, cafe, park
+    kind: str  # home, office, bank, townhall, school, hospital, market, shop, cafe, works, park
     x: int
     y: int
     w: int
     h: int
     hours: tuple[int, int] | None = None  # open hour, close hour; None = always
-    entry: tuple[int, int] = (0, 0)  # walkable tile where agents arrive
+    entry: tuple[int, int] = (0, 0)  # walkable tile where agents arrive; it always touches a road
+    face: str | None = None  # wall with the door: "n", "s", "e" or "w"; None for parks
+    district: str = ""
+    style: str = ""  # the renderer's model key: house, big_house, apartments, tower, park, ...
+    floors: int = 0  # building height; 0 for parks
+    tier: str | None = None  # homes: "flat", "house" or "big_house"
+    units: int = 0  # homes inside: 1 for a house, 6 for an apartment block, 0 for everything else
 
     def is_open(self, hour: float) -> bool:
         if self.hours is None:
@@ -39,201 +81,323 @@ class Place:
     def to_json(self) -> dict:
         return {
             "id": self.id, "name": self.name, "kind": self.kind,
-            "x": self.x, "y": self.y, "w": self.w, "h": self.h,
-            "entry": list(self.entry), "hours": list(self.hours) if self.hours else None,
+            "x": self.x, "y": self.y, "w": self.w, "h": self.h, "entry": list(self.entry), "face": self.face,
+            "hours": list(self.hours) if self.hours else None, "district": self.district, "style": self.style,
+            "floors": self.floors, "tier": self.tier, "units": self.units,
         }
 
 
-@dataclass
+@dataclass(eq=False)
 class TownMap:
+    """The tiles and places of the town. Read-only once built; only the walk-field cache fills in.
+
+    Tile index i is (i % w, i // w). Fields are arrays of w * h uint16 values, 65535 = unreachable.
+    """
+
     tiles: list[list[str]]
     places: dict[str, Place] = field(default_factory=dict)
+    w: int = field(init=False)
+    h: int = field(init=False)
+    junctions: set[tuple[int, int]] = field(init=False, repr=False)  # road tiles with 3 or more road neighbours
+    _ok: bytes = field(init=False, repr=False)  # 1 where walkable, by tile index
+    _road: bytes = field(init=False, repr=False)  # 1 where road, by tile index
+    _fields: dict = field(init=False, repr=False)  # goal tile index -> (dist, off)
+
+    def __post_init__(self) -> None:
+        self.h = len(self.tiles)
+        self.w = len(self.tiles[0]) if self.tiles else 0
+        cells = [c for row in self.tiles for c in row]
+        self._ok = bytes(c in WALKABLE for c in cells)
+        self._road = bytes(c == ROAD for c in cells)
+        self._fields = {}
+        self.junctions = {(x, y) for y in range(self.h) for x in range(self.w)
+                          if self.tiles[y][x] == ROAD and sum(self._is_road(x + dx, y + dy) for dx, dy in
+                                                              ((1, 0), (-1, 0), (0, 1), (0, -1))) >= 3}
+
+    def _is_road(self, x: int, y: int) -> bool:
+        return 0 <= x < self.w and 0 <= y < self.h and self.tiles[y][x] == ROAD
 
     def walkable(self, x: int, y: int) -> bool:
-        return 0 <= x < W and 0 <= y < H and self.tiles[y][x] in WALKABLE
-
-    def path(self, start: tuple[int, int], goal: tuple[int, int]) -> list[tuple[int, int]]:
-        """Shortest walkable path from start to goal (excluding start), preferring roads on ties."""
-        if start == goal:
-            return []
-        prev: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-        off_road = {start: 0}  # fewest non-road tiles on a shortest path to each tile
-        layer = [start]
-        while layer and goal not in prev:
-            ahead: dict[tuple[int, int], None] = {}  # one step further out, in the order found
-            for cur in layer:
-                x, y = cur
-                for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                    if nxt in ahead:
-                        if off_road[cur] < off_road[prev[nxt]]:
-                            prev[nxt] = cur  # just as short, and more of it on the road
-                    elif nxt not in prev and self.walkable(*nxt):
-                        prev[nxt] = cur
-                        ahead[nxt] = None
-            for x, y in ahead:
-                off_road[x, y] = off_road[prev[x, y]] + (self.tiles[y][x] != ROAD)
-            layer = list(ahead)
-        if goal not in prev:
-            return []
-        out = []
-        node: tuple[int, int] | None = goal
-        while node is not None and node != start:
-            out.append(node)
-            node = prev[node]
-        return out[::-1]
+        return 0 <= x < self.w and 0 <= y < self.h and self.tiles[y][x] in WALKABLE
 
     def rows(self) -> list[str]:
         return ["".join(r) for r in self.tiles]
 
+    # --- walk distance fields -------------------------------------------------
 
-def _building(tiles: list[list[str]], x: int, y: int, w: int, h: int) -> tuple[int, int]:
-    """Stamp a building with a door in the middle of its bottom wall; return its entry tile."""
+    def walk_field(self, goal: tuple[int, int]) -> tuple[array, array]:
+        """BFS from `goal` over walkable tiles, cached per goal tile: (dist, off) as array('H').
+
+        dist[i] is the number of steps from tile i to the goal; off[i] the fewest off-road tiles (counting tile
+        i and the goal) on any shortest walk from tile i. Both are 65535 where the goal can't be reached.
+        """
+        gx, gy = goal
+        if not (0 <= gx < self.w and 0 <= gy < self.h):
+            return self._blank_field()
+        g = gy * self.w + gx
+        f = self._fields.get(g)
+        if f is None:
+            f = self._fields[g] = self._build_walk_field(g)
+        return f
+
+    def _blank_field(self) -> tuple[array, array]:
+        n = self.w * self.h
+        return array("H", [UNREACHABLE]) * n, array("H", [UNREACHABLE]) * n
+
+    def _build_walk_field(self, g: int) -> tuple[array, array]:
+        w, n = self.w, self.w * self.h
+        ok, road = self._ok, self._road
+        dist, off = self._blank_field()
+        if not ok[g]:
+            return dist, off
+        dist[g] = 0
+        off[g] = 1 - road[g]
+        queue = [g]
+        head = 0
+        while head < len(queue):
+            c = queue[head]
+            head += 1
+            d = dist[c] + 1
+            oc = off[c]
+            x = c % w
+            # Neighbours in the order E, W, S, N.
+            for nb in (c + 1 if x + 1 < w else -1, c - 1 if x else -1, c + w if c + w < n else -1, c - w):
+                if nb < 0 or not ok[nb]:
+                    continue
+                o = oc + 1 - road[nb]
+                if dist[nb] == UNREACHABLE:
+                    dist[nb] = d
+                    off[nb] = o
+                    queue.append(nb)
+                elif dist[nb] == d and o < off[nb]:
+                    off[nb] = o
+        return dist, off
+
+    def path(self, start: tuple[int, int], goal: tuple[int, int]) -> list[tuple[int, int]]:
+        """A shortest walk from start to goal with the fewest off-road tiles, excluding start.
+
+        It descends the goal's walk field, ties broken E, W, S, N; [] when start == goal or the goal is
+        unreachable. The start must be a walkable tile.
+        """
+        if start == goal:
+            return []
+        dist, off = self.walk_field(goal)
+        w, n = self.w, self.w * self.h
+        sx, sy = start
+        if not (0 <= sx < w and 0 <= sy < self.h):
+            return []
+        c = sy * w + sx
+        if dist[c] == UNREACHABLE:
+            return []
+        out = []
+        while dist[c]:
+            want = dist[c] - 1
+            x = c % w
+            best = -1
+            for nb in (c + 1 if x + 1 < w else -1, c - 1 if x else -1, c + w if c + w < n else -1, c - w):
+                if nb >= 0 and dist[nb] == want and (best < 0 or off[nb] < off[best]):
+                    best = nb
+            c = best
+            out.append((c % w, c // w))
+        return out
+
+    def walk_minutes(self, xy: tuple[int, int], place_id: str) -> int:
+        """Minutes on foot from a tile to a place's entry (one tile a minute): O(1) once the field is built."""
+        x, y = xy
+        if not (0 <= x < self.w and 0 <= y < self.h):
+            return UNREACHABLE
+        return self.walk_field(self.places[place_id].entry)[0][y * self.w + x]
+
+    def drive_path(self, start: tuple[int, int], place_id: str) -> list[tuple[int, int]]:
+        """The route a car takes to a place. For now the walk path; road fields replace it later."""
+        return self.path(start, self.places[place_id].entry)
+
+    def warm(self) -> None:
+        """Build the walk field of every place entry now, so no tick pays for one."""
+        for place in self.places.values():
+            self.walk_field(place.entry)
+
+    # --- snapshot -------------------------------------------------------------
+
+    def map_json(self) -> dict:
+        """The map part of the God welcome's `town`; the simulation adds homes, housing, stops and timetable."""
+        return {
+            "w": self.w, "h": self.h, "tiles": self.rows(),
+            "places": [p.to_json() for p in self.places.values()],
+            "districts": districts_json(), "streets": streets_json(),
+            "road_rows": list(ROAD_ROWS), "road_cols": list(ROAD_COLS), "road_col_end": ROAD_COL_END,
+            "junctions": [[x, y] for x, y in sorted(self.junctions, key=lambda t: (t[1], t[0]))],
+        }
+
+
+def districts_json() -> list[dict]:
+    return [{"id": did, "name": name, "about": about,
+             "rects": [[BLOCK_X[c], BLOCK_Y[r], BLOCK_W[c], BLOCK_H[r]] for c, r in blocks]}
+            for did, name, about, blocks in DISTRICTS]
+
+
+def streets_json() -> list[dict]:
+    return [{"name": name, "axis": axis, "at": at} for name, axis, at in STREETS]
+
+
+def district_at(x: int, y: int) -> str:
+    """The district whose block holds the tile, or "" for a street or the riverbank."""
+    for did, _, _, blocks in DISTRICTS:
+        for c, r in blocks:
+            if BLOCK_X[c] <= x < BLOCK_X[c] + BLOCK_W[c] and BLOCK_Y[r] <= y < BLOCK_Y[r] + BLOCK_H[r]:
+                return did
+    return ""
+
+
+def street_of(ex: int, ey: int) -> tuple[str, int] | tuple[None, None]:
+    """Street and house number for an entry tile next to a road.
+
+    On an east-west street the number is x * 2 on its north side and x * 2 + 1 on its south side; on a
+    north-south street it is y * 2 on its east side and y * 2 + 1 on its west side.
+    """
+    rows = {at: name for name, axis, at in STREETS if axis == "row"}
+    cols = {at: name for name, axis, at in STREETS if axis == "col"}
+    for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+        rx, ry = ex + dx, ey + dy
+        if dy and ry in rows:
+            return rows[ry], ex * 2 + (1 if dy < 0 else 0)  # road to the north: the entry is on the south side
+        if dx and rx in cols:
+            return cols[rx], ey * 2 + (1 if dx > 0 else 0)  # road to the east: the entry is on the west side
+    return None, None
+
+
+# --- the places ---------------------------------------------------------------
+
+NON_HOMES = [
+    # id, name, kind, style, x, y, w, h, face, floors, hours
+    # Downtown
+    ("cityhall", "City Hall", "townhall", "city_hall", 32, 16, 6, 4, "n", 3, (8, 17)),
+    ("office", "Brightline Tech", "office", "tower", 31, 20, 8, 4, "s", 8, (7, 20)),
+    ("hospital", "City Hospital", "hospital", "hospital", 44, 17, 10, 7, "s", 4, None),
+    ("cafe", "Corner Cafe", "cafe", "cafe", 31, 27, 4, 3, "n", 2, (6, 23)),
+    ("arcade", "Grand Arcade", "shop", "arcade", 31, 31, 9, 4, "s", 3, (9, 21)),
+    ("bank", "Millbrook Savings Bank", "bank", "bank", 44, 27, 5, 4, "n", 4, (9, 17)),
+    # Maple Grove
+    ("school", "Millbrook School", "school", "school", 18, 19, 10, 5, "e", 2, (7, 17)),
+    ("diner", "Oak Street Diner", "cafe", "diner", 18, 16, 4, 2, "n", 1, (6, 22)),
+    ("market", "Fresh Market", "market", "market", 18, 31, 5, 4, "s", 1, (7, 21)),
+    ("bakery", "Maple Bakery", "cafe", "bakery", 24, 32, 4, 3, "s", 1, (6, 18)),
+    # Eastgate
+    ("grocer", "Eastgate Grocer", "market", "corner_shop", 57, 5, 4, 3, "n", 1, (7, 22)),
+    ("noodles", "Noodle Bar", "cafe", "noodle_bar", 63, 5, 4, 3, "n", 2, (11, 24)),
+    # The Works
+    ("works", "Millbrook Works", "works", "factory", 57, 28, 10, 7, "s", 2, (6, 22)),
+]
+
+PARKS = [  # id, name, x, y, w, h, entry; trees are seeded in this order
+    ("park", "Riverside Park", 17, 37, 25, 8, (23, 37)),
+    ("maple_park", "Maple Park", 17, 4, 12, 10, (22, 13)),
+    ("square", "Fountain Square", 50, 27, 5, 9, (52, 26)),
+    ("green", "Eastgate Green", 63, 16, 5, 8, (65, 24)),
+]
+
+APARTMENTS = [  # id, name, x, y, w, h, face, floors; each block holds six flats
+    ("birch_court", "Birch Court", 57, 10, 5, 3, "s", 3),
+    ("cedar_court", "Cedar Court", 63, 10, 5, 3, "s", 3),
+    ("elm_court", "Elm Court", 57, 21, 5, 3, "s", 3),
+]
+FLAT_UNITS = 6
+
+
+def house_slots() -> list[tuple[int, int, int, int, str]]:
+    """Ordinary houses (x, y, w, h, face): 3 x 3, three to a row; top rows face north, bottom rows south."""
+    out = []
+    for c, r, both_rows in ((0, 1, True), (0, 2, True), (1, 2, False)):
+        x0, y0 = BLOCK_X[c], BLOCK_Y[r]
+        for top in ((True, False) if both_rows else (True,)):
+            for i in range(3):
+                out.append((x0 + 1 + 4 * i, y0 + 1, 3, 3, "n") if top else (x0 + 1 + 4 * i, y0 + 6, 3, 3, "s"))
+    return out
+
+
+def big_house_slots() -> list[tuple[int, int, int, int, str]]:
+    """Big houses on Hilltop (x, y, w, h, face): 5 x 4, two to a block, facing south over Park Avenue."""
+    return [(BLOCK_X[c] + 1 + 6 * i, BLOCK_Y[0] + 5, 5, 4, "s") for c in (2, 3) for i in range(2)]
+
+
+def _building(tiles: list[list[str]], x: int, y: int, w: int, h: int, face: str) -> tuple[int, int]:
+    """Stamp a building with its door in the middle of the `face` wall; return its entry tile."""
     for yy in range(y, y + h):
         for xx in range(x, x + w):
+            assert tiles[yy][xx] == GRASS, (x, y, xx, yy, tiles[yy][xx])
             tiles[yy][xx] = BUILDING
-    door_x = x + w // 2
-    tiles[y + h - 1][door_x] = DOOR
-    tiles[y + h][door_x] = ENTRY
-    return door_x, y + h
+    if face == "s":
+        door, entry = (x + w // 2, y + h - 1), (x + w // 2, y + h)
+    elif face == "n":
+        door, entry = (x + w // 2, y), (x + w // 2, y - 1)
+    elif face == "e":
+        door, entry = (x + w - 1, y + h // 2), (x + w, y + h // 2)
+    else:
+        door, entry = (x, y + h // 2), (x - 1, y + h // 2)
+    tiles[door[1]][door[0]] = DOOR
+    assert tiles[entry[1]][entry[0]] == GRASS, (x, y, face, entry)
+    tiles[entry[1]][entry[0]] = ENTRY
+    return entry
 
 
-PLACE_SPECS = [
-    # id, name, kind, x, y, w, h, hours
-    ("home_cohen", "Cohen house", "home", 5, 4, 3, 3, None),
-    ("home_levi", "Levi house", "home", 9, 4, 3, 3, None),
-    ("home_bendavid", "Ari's flat", "home", 5, 8, 3, 3, None),
-    ("home_mizrahi", "Mizrahi house", "home", 9, 8, 3, 3, None),
-    ("home_peretz", "Peretz house", "home", 5, 13, 3, 3, None),
-    ("home_friedman", "Friedman house", "home", 9, 13, 3, 3, None),
-    ("home_katz", "Katz house", "home", 5, 17, 3, 3, None),
-    ("home_haddad", "Haddad house", "home", 9, 17, 3, 3, None),
-    ("office", "Brightline Tech", "office", 16, 5, 8, 5, (7, 20)),
-    ("school", "Millbrook School", "school", 27, 5, 7, 5, (7, 17)),
-    ("market", "Fresh Market", "market", 16, 14, 4, 3, (7, 21)),
-    ("cafe", "Corner Cafe", "cafe", 21, 14, 3, 3, (6, 23)),
-    ("hospital", "City Hospital", "hospital", 16, 18, 8, 3, None),
-]
-
-
+@functools.lru_cache(maxsize=4)
 def build_map(seed: int) -> TownMap:
-    rng = random.Random(seed)
+    """The town for a seed. Memoized: callers share the returned map and must never change it."""
+    rng = Rng((seed * 0x9E3779B1 + 7) & 0xFFFFFFFF)  # the map stream: park trees, then woods
     tiles = [[GRASS] * W for _ in range(H)]
+    for y in RIVER_ROWS:
+        tiles[y] = [WATER] * W
     for y in ROAD_ROWS:
-        for x in range(W):
-            tiles[y][x] = ROAD
+        tiles[y] = [ROAD] * W
     for x in ROAD_COLS:
-        for y in range(H):
+        for y in range(ROAD_COL_END + 1):
             tiles[y][x] = ROAD
 
-    town = TownMap(tiles)
-    for pid, name, kind, x, y, w, h, hours in PLACE_SPECS:
-        entry = _building(tiles, x, y, w, h)
-        town.places[pid] = Place(pid, name, kind, x, y, w, h, hours, entry)
+    places: dict[str, Place] = {}
+    for pid, name, kind, style, x, y, w, h, face, floors, hours in NON_HOMES:
+        entry = _building(tiles, x, y, w, h, face)
+        places[pid] = Place(pid, name, kind, x, y, w, h, hours, entry, face, district_at(x, y), style, floors)
+    for pid, name, x, y, w, h, entry in PARKS:
+        for yy in range(y, y + h):
+            for xx in range(x, x + w):
+                if tiles[yy][xx] == GRASS:
+                    tiles[yy][xx] = PARK
+        for _ in range(w * h // 8):
+            tx = rng.int(x, x + w - 1)
+            ty = rng.int(y, y + h - 1)
+            if tiles[ty][tx] == PARK and (tx, ty) != entry and abs(tx - entry[0]) + abs(ty - entry[1]) > 1:
+                tiles[ty][tx] = TREE
+        tiles[entry[1]][entry[0]] = ENTRY
+        places[pid] = Place(pid, name, "park", x, y, w, h, None, entry, None, district_at(x, y), "park", 0)
+    for pid, name, x, y, w, h, face, floors in APARTMENTS:
+        entry = _building(tiles, x, y, w, h, face)
+        places[pid] = Place(pid, name, "home", x, y, w, h, None, entry, face, district_at(x, y), "apartments",
+                            floors, "flat", FLAT_UNITS)
+    for tier, floors, slots in (("house", 1, house_slots()), ("big_house", 2, big_house_slots())):
+        for x, y, w, h, face in slots:
+            entry = _building(tiles, x, y, w, h, face)
+            street, number = street_of(*entry)
+            pid = f"{street.split()[0].lower()}_{number}"
+            places[pid] = Place(pid, f"{number} {street}", "home", x, y, w, h, None, entry, face,
+                                district_at(x, y), tier, floors, tier, 1)
 
-    # Riverside Park fills the south-east block, with a scatter of trees.
-    px, py, pw, ph = 26, 13, 10, 8
-    for yy in range(py, py + ph):
-        for xx in range(px, px + pw):
-            tiles[yy][xx] = PARK
-    town.places["park"] = Place("park", "Riverside Park", "park", px, py, pw, ph, None, (30, 16))
-    for _ in range(14):
-        tx, ty = rng.randrange(px, px + pw), rng.randrange(py, py + ph)
-        if (tx, ty) != (30, 16):
-            tiles[ty][tx] = TREE
-            if not all(_reaches_road(town, p.entry) for p in town.places.values()):
-                tiles[ty][tx] = PARK  # never wall in a place's entry
-    return town
-
-
-def _reaches_road(town: TownMap, start: tuple[int, int]) -> bool:
-    """True when a walk from `start` gets to the road, and so to every other place."""
-    seen, queue = {start}, deque([start])
-    while queue:
-        x, y = queue.popleft()
-        if town.tiles[y][x] == ROAD:
-            return True
-        for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if nxt not in seen and town.walkable(*nxt):
-                seen.add(nxt)
-                queue.append(nxt)
-    return False
-
-
-# --- the starter cast ---------------------------------------------------------
-
-def _job(title: str, place: str, wage: float, start: int, end: int, days=(0, 1, 2, 3, 4)) -> Job:
-    return Job(title, place, wage, start, end, tuple(days))
-
-
-CAST = [
-    # id, name, age, household, money, job, owns car
-    ("dana", "Dana Cohen", 38, "cohen", 900, _job("software engineer", "office", 55, 9, 17), True),
-    ("yossi", "Yossi Cohen", 40, "cohen", 600, _job("nurse", "hospital", 38, 7, 15, (0, 1, 2, 3, 6)), False),
-    ("noa", "Noa Cohen", 10, "cohen", 20, _job("student", "school", 0, 8, 14), False),
-    ("miriam", "Miriam Levi", 67, "levi", 1500, None, False),
-    ("tom", "Tom Levi", 29, "levi", 250, _job("barista", "cafe", 18, 7, 14, (1, 2, 3, 4, 5)), False),
-    ("ari", "Ari Ben-David", 24, "bendavid", 412, _job("junior developer", "office", 32, 10, 18), False),
-    ("avi", "Avi Mizrahi", 45, "mizrahi", 700, _job("teacher", "school", 30, 8, 15), True),
-    ("rina", "Rina Mizrahi", 43, "mizrahi", 1100, _job("doctor", "hospital", 70, 8, 16), False),
-    ("lior", "Lior Mizrahi", 16, "mizrahi", 60, _job("student", "school", 0, 8, 15), False),
-    ("maya", "Maya Mizrahi", 8, "mizrahi", 10, _job("student", "school", 0, 8, 13), False),
-    ("eli", "Eli Peretz", 33, "peretz", 300, _job("cashier", "market", 17, 8, 16, (0, 1, 2, 4, 5)), False),
-    ("shira", "Shira Peretz", 31, "peretz", 450, _job("nurse", "hospital", 38, 14, 22), False),
-    ("ruth", "Ruth Friedman", 72, "friedman", 2200, None, False),
-    ("david", "David Friedman", 74, "friedman", 1800, None, True),
-    ("omer", "Omer Katz", 36, "katz", 1300, _job("product manager", "office", 60, 9, 18), True),
-    ("gal", "Gal Katz", 35, "katz", 800, _job("graphic designer", "office", 40, 10, 16), False),
-    ("yael", "Yael Katz", 6, "katz", 5, _job("student", "school", 0, 8, 13), False),
-    ("nadia", "Nadia Haddad", 41, "haddad", 950, _job("store manager", "market", 28, 7, 15, (0, 1, 2, 3, 4, 5)), False),
-    ("sami", "Sami Haddad", 44, "haddad", 400, _job("chef", "cafe", 24, 11, 20, (0, 2, 3, 4, 5)), False),
-    ("leila", "Leila Haddad", 12, "haddad", 25, _job("student", "school", 0, 8, 14), False),
-]
-
-RENT = {"cohen": 420, "levi": 380, "bendavid": 260, "mizrahi": 520,
-        "peretz": 330, "friedman": 300, "katz": 480, "haddad": 410}
-
-FRIENDS = [("tom", "ari", 55), ("dana", "ari", 30), ("yossi", "miriam", 40), ("rina", "shira", 50),
-           ("gal", "dana", 45), ("omer", "avi", 35), ("noa", "leila", 60), ("maya", "yael", 50),
-           ("lior", "tom", 25), ("ruth", "miriam", 65), ("sami", "eli", 40), ("nadia", "rina", 30)]
-
-GOALS = {"ari": ("a new phone", 300), "tom": ("a guitar", 450), "lior": ("a bike", 200),
-         "eli": ("a weekend trip", 600), "gal": ("a drawing tablet", 350)}
+    # Woods and edge trees: grass tiles more than one tile (Chebyshev) from every entry.
+    near_entry = {(p.entry[0] + dx, p.entry[1] + dy) for p in places.values() for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+    cells = []
+    for c, r, density in WOODS:
+        cells += [(x, y, density) for y in range(BLOCK_Y[r], BLOCK_Y[r] + BLOCK_H[r])
+                  for x in range(BLOCK_X[c], BLOCK_X[c] + BLOCK_W[c])]
+    cells += [(x, y, EDGE_TREES) for x in range(W) for y in range(3)]  # north strip, by column
+    cells += [(x, y, EDGE_TREES) for y in range(3, 45) for x in range(3)]  # west strip, by row
+    for x, y, density in cells:
+        if tiles[y][x] == GRASS and (x, y) not in near_entry and rng.random() < density:
+            tiles[y][x] = TREE
+    return TownMap(tiles, places)
 
 
-def build_cast(town: TownMap, seed: int) -> tuple[dict[str, Agent], dict[str, Household]]:
-    rng = random.Random(seed * 7919 + 1)
-    households: dict[str, Household] = {}
-    agents: dict[str, Agent] = {}
-    for hid, rent in RENT.items():
-        households[hid] = Household(hid, f"home_{hid}", rent)
+def build_cast(town: TownMap, seed: int):
+    """Removed: the cast is `gameofailife.cast.build_cast(town, homes, seed)`.
 
-    for aid, name, age, hid, money, job, car in CAST:
-        home = town.places[f"home_{hid}"]
-        traits = {t: round(rng.uniform(0.2, 0.8), 2) for t in Profile.TRAITS}
-        agent = Agent(
-            id=aid, name=name, age=age, household_id=hid, money=float(money), job=job,
-            owns_car=car, x=home.entry[0], y=home.entry[1], inside=home.id,
-            profile=Profile(traits),
-        )
-        agent.needs = {n: rng.uniform(60, 90) for n in agent.needs}
-        if aid in GOALS:
-            agent.goal = {"name": GOALS[aid][0], "target": GOALS[aid][1], "saved": 0.0}
-        agent.profile.prompt = agent.profile.describe(agent)
-        agents[aid] = agent
-        households[hid].member_ids.append(aid)
-
-    for hh in households.values():
-        members = [agents[m] for m in hh.member_ids]
-        for a in members:
-            for b in members:
-                if a is b:
-                    continue
-                if a.age >= 18 and b.age >= 18:
-                    kind = RelationKind.PARTNER if abs(a.age - b.age) < 10 else RelationKind.FAMILY
-                else:
-                    kind = RelationKind.FAMILY
-                a.relate(b.id, kind, 75)
-    for a, b, aff in FRIENDS:
-        agents[a].relate(b, RelationKind.FRIEND, aff)
-        agents[b].relate(a, RelationKind.FRIEND, aff)
-    return agents, households
+    Kept only so the pre-v2 `from .town import build_cast` in sim.py still imports; delete it with that import.
+    """
+    raise NotImplementedError("the cast moved to gameofailife.cast.build_cast(town, homes, seed)")
