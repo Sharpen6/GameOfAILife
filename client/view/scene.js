@@ -9,6 +9,7 @@
   const { hash, shade, rgba } = CV.color;
   const CH = 512;              // ground chunk size in world px
   const BUILDS_PER_FRAME = 2;  // chunk builds allowed per frame once the first frames are up
+  const PING_MS = 3000, PING_ARROW_MS = 8000; // ping rings, and the arrow at the view's edge for an off-screen ping
   const STYLE_OF = { home: "house", office: "tower", school: "school", market: "market", cafe: "cafe", hospital: "hospital",
     shop: "arcade", bank: "bank", townhall: "city_hall", works: "factory", park: "park" };
 
@@ -58,8 +59,8 @@
     const scene = {
       town, proj, cam: { x: 0, y: 0, zoom: 1 }, dpr: 1, season: "summer", minute: 600, weather: "clear", state: null,
       looks: {}, movers: [], selected: null, hover: null, hoverTile: null, highlight: null, overlay: null,
-      pings: [], inset: { top: 0, right: 0, bottom: 0 }, reserved: [], quality: "high", lights: { ns: "green", ew: "red" },
-      stats: { items: 0, chunks: 0, built: 0, draw: 0 },
+      pings: [], pingArrows: [], inset: { top: 0, right: 0, bottom: 0 }, reserved: [], quality: "high", lights: { ns: "green", ew: "red" },
+      stats: { items: 0, chunks: 0, built: 0, draw: 0, frames: 0, cacheMP: 0 },
     };
     const placeById = new Map(places.map((p, i) => [p.id, i]));
     scene.placeById = placeById;
@@ -262,7 +263,7 @@
 
     // --- static items --------------------------------------------------------------------------------------
     // item: { img, sx, sy, sw, sh, wx, wy (world px of the sprite's top-left), depth, kind, ref }
-    let statics = [], buildings = [], lampPts = [], signals = [], dirty = true;
+    let statics = [], buildings = [], lampPts = [], signals = [], shelters = [], dirty = true;
     const bCache = new Map();
     function addSprite(list, spr, tx, ty, depth, kind, ref) {
       const p = proj.toWorld(tx, ty);
@@ -288,19 +289,67 @@
     const inHull = (h, x, y) => { for (let i = 0; i < h.length; i++) { const a = h[i], b = h[(i + 1) % h.length]; if ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) < 0) return false; } return true; };
     scene.inHull = inHull;
 
-    // The lot tile that carries a home's listing board (SALE / RENT beside a house's walk, LET by a block's
-    // door), whether or not it is listed now, so lamps can keep clear of it for good.
-    function boardTile(p, i) {
-      if (!p.entry) return null;
+    // A home's lot tiles that touch a road, nearest the camera (largest depth) first. The moving van and the
+    // SALE / RENT / LET board stand on them (PLAN decision 83), so they read even when the door is on a wall
+    // turned away from the camera. A house's lot is its garden; a block of flats has none, so its paved apron
+    // stands in. road: the side of the tile that meets the road (the camera-nearest one on a corner tile).
+    // Ties go to the tile nearer the door.
+    const SIDES = [["n", 0, -1], ["e", 1, 0], ["s", 0, 1], ["w", -1, 0]];
+    function frontTiles(p, i) {
+      const own = [];
+      if (isHouseLike(p)) own.push(...lotTiles[i]);
+      else for (let y = p.y - 2; y < p.y + p.h + 2; y++) for (let x = p.x - 2; x < p.x + p.w + 2; x++) {
+        if (x >= 0 && y >= 0 && x < W && y < H && zoneOwn[y * W + x] === i && zoneOf[y * W + x] === 1) own.push([x, y]);
+      }
+      const [ex, ey] = p.entry || [p.x, p.y];
+      const out = [];
+      for (const [x, y] of own) {
+        const road = SIDES.filter(([, dx, dy]) => at(x + dx, y + dy) === "#")
+          .sort((a, b) => proj.depth(x + b[1] + 0.5, y + b[2] + 0.5) - proj.depth(x + a[1] + 0.5, y + a[2] + 0.5));
+        if (!road.length) continue;
+        out.push({ x, y, road: road[0][0], depth: proj.depth(x + 0.5, y + 0.5), drive: driveOf[y * W + x] === i, near: Math.abs(x - ex) + Math.abs(y - ey) });
+      }
+      out.sort((a, b) => b.depth - a.depth || a.near - b.near || b.x - a.x || b.y - a.y);
+      return out;
+    }
+    // The van takes the camera-nearest road lot tile; the board takes it too, or the next one while the van
+    // or a car parked on the driveway (carOn) has it.
+    function lotSpots(p, i, moving, carOn) {
+      const front = frontTiles(p, i);
+      const van = moving && front.length ? front[0] : null;
+      const sign = front.find(t => t !== van && !(carOn && t.drive)) || front.find(t => t !== van) || front[0] || null;
+      return { front, van, sign };
+    }
+    scene.lotSpots = id => {
+      const i = placeById.get(id), p = places[i];
+      if (!p || p.kind !== "home") return null;
+      const l = scene.looks[p.id] || {}, car = scene.parked.has(p.id), s = lotSpots(p, i, !!l.moving, car);
+      const xy = t => t ? [t.x, t.y] : null;
+      return { front: s.front.map(t => ({ x: t.x, y: t.y, depth: t.depth, drive: t.drive, road: t.road })), van: l.moving ? xy(s.van) : null,
+        sign: (isHouseLike(p) ? l.listing : l.anyListed) ? xy(s.sign) : null, car };
+    };
+    // The homes with a car parked on the driveway now (the movers set it every frame). A listed home's board
+    // keeps off the driveway only while a car stands there, so a change at a listed home rebuilds the statics.
+    scene.parked = new Set();
+    let parkedKey = "";
+    scene.setParked = set => {
+      scene.parked = set;
+      const key = [...set].filter(id => { const l = scene.looks[id]; return l && (l.listing || l.anyListed); }).sort().join(",");
+      if (key !== parkedKey) { parkedKey = key; dirty = true; }
+    };
+    // The tile beside a home's door walk (a house's garden tile next to it, a block's apron), kept clear of lamps.
+    function besideDoor(p, i) {
+      if (p.kind !== "home" || !p.entry) return null;
       const [ex, ey] = p.entry;
       if (isHouseLike(p)) {
         const alongX = p.face === "n" || p.face === "s";
-        const beside = (alongX ? [[ex - 1, ey], [ex + 1, ey]] : [[ex, ey - 1], [ex, ey + 1]]).filter(([a, b]) => lotOf[b * W + a] === i && driveOf[b * W + a] !== i);
-        return beside[0] || null;
+        return (alongX ? [[ex - 1, ey], [ex + 1, ey]] : [[ex, ey - 1], [ex, ey + 1]]).find(([a, b]) => lotOf[b * W + a] === i && driveOf[b * W + a] !== i) || null;
       }
-      const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => at(a, b) === "." || at(a, b) === "e");
-      return side[0] || null;
+      return [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].find(([a, b]) => at(a, b) === "." || at(a, b) === "e") || null;
     }
+    // A point a quarter tile in from a lot tile's road edge, and the van's heading along that road.
+    const towardRoad = (t, k) => { const [, dx, dy] = SIDES.find(q => q[0] === t.road); return [t.x + 0.5 + dx * k, t.y + 0.5 + dy * k]; };
+
     function buildStatics() {
       const list = [];
       buildings = [];
@@ -342,12 +391,15 @@
         if (pathMask[i] && hash(`b${x},${y}`) % 4 === 0) addSprite(list, art.bench(), x + 0.82, y + 0.3, proj.depth(x + 0.82, y + 0.3), "p");
       }
       // street lamps on the north kerb of east-west roads and the west kerb of north-south roads; a lamp never
-      // stands in front of a door's walk or a lot's board (SALE, RENT, LET): it moves a tile along, or goes
+      // stands in front of a door's walk, the tile beside it or a lot's board (SALE, RENT, LET): it moves a
+      // tile along, or goes
       const boards = new Set();
       places.forEach((p, i) => {
         if (p.entry) boards.add(p.entry[1] * W + p.entry[0]);
-        const t = p.kind === "home" ? boardTile(p, i) : null;
-        if (t) boards.add(t[1] * W + t[0]);
+        const b = besideDoor(p, i);
+        if (b) boards.add(b[1] * W + b[0]);
+        // the board's tile with and without a car on the driveway, so a car coming home never moves a lamp
+        if (p.kind === "home") for (const car of [false, true]) { const t = lotSpots(p, i, false, car).sign; if (t) boards.add(t.y * W + t.x); }
       });
       lampPts = [];
       const nearJ = (x, y) => junctionSet.has(y * W + x) || junctionSet.has(y * W + x + 1) || junctionSet.has(y * W + x - 1) || junctionSet.has((y + 1) * W + x) || junctionSet.has((y - 1) * W + x);
@@ -377,10 +429,11 @@
         signals.push([a, "ns"], [b, "ew"]);
       }
       // bus stop shelters on the kerb
+      shelters = [];
       for (const s of town.stops) {
         const rowRoad = town.road_rows.includes(s.y);
         const tx = rowRoad ? s.x + 0.5 : s.x + 0.06, ty = rowRoad ? s.y + 0.06 : s.y + 0.5;
-        addSprite(list, art.shelter((s.lines || ["1"]).join(",")), tx, ty, proj.depth(tx, ty), "stop", s.id);
+        shelters.push(addSprite(list, art.shelter((s.lines || ["1"]).join(",")), tx, ty, proj.depth(tx, ty), "stop", s.id));
       }
       // home lots: fences or hedges, listing signs, junk, works and moving vans
       const snowy = !!(CV.SEASON[scene.season] && CV.SEASON[scene.season].snow);
@@ -388,6 +441,9 @@
         if (p.kind !== "home") return;
         const look = scene.looks[p.id] || { stage: 0 };
         const stage = look.stage | 0;
+        const spots = lotSpots(p, i, !!look.moving, scene.parked.has(p.id));
+        const listed = isHouseLike(p) ? (look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null) : look.anyListed ? "let" : null;
+        const taken = (x, y) => [spots.van, listed ? spots.sign : null].some(t => t && t.x === x && t.y === y);
         if (isHouseLike(p)) {
           const inLot = (x, y) => x >= 0 && y >= 0 && x < W && y < H && (lotOf[y * W + x] === i || placeIdx[y * W + x] === i || (p.entry && x === p.entry[0] && y === p.entry[1]));
           const hedge = p.style === "big_house";
@@ -399,17 +455,15 @@
             const edges = [["n", x, y - 1, 0.5, 0.06], ["s", x, y + 1, 0.5, 0.94], ["w", x - 1, y, 0.06, 0.5], ["e", x + 1, y, 0.94, 0.5]];
             for (const [side, nx, ny, ex, ey] of edges) {
               if (inLot(nx, ny)) continue;
+              if (spots.van && spots.van.x === x && spots.van.y === y && side === spots.van.road) continue; // the van backed in through here
               const spr = hedge ? art.hedge(stage, side, scene.season, v) : art.fence(stage, side, v);
               addSprite(list, spr, x + 0.5, y + 0.5, proj.depth(x + ex, y + ey) + 0.02, "f", i);
             }
           }
-          const sale = look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null;
-          const bt = boardTile(p, i);
-          if (sale && bt) { const [a, b] = bt; addSprite(list, art.sign(sale), a + 0.5, b + (p.face === "s" ? 0.75 : 0.25), proj.depth(a + 0.5, b + 0.5), "s", i); }
-          // junk on the lot tile nearest the camera
+          // junk on the lot tile nearest the camera that the van and the board leave free
           let best = null, bd = -1e9;
           for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
-            if (x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] !== i || driveOf[y * W + x] === i) continue;
+            if (x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] !== i || driveOf[y * W + x] === i || taken(x, y)) continue;
             const d = proj.depth(x + 0.5, y + 0.5) - Math.abs(x - (p.x + p.w / 2)) * 0.3;
             if (d > bd) { bd = d; best = [x, y]; }
           }
@@ -417,24 +471,22 @@
           if (look.works && best) addSprite(list, art.skip(), best[0] + 0.5, best[1] + 0.6, proj.depth(best[0] + 0.5, best[1] + 0.6), "j", i);
         } else {
           const [ex, ey] = p.entry;
-          const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => at(a, b) === "." || at(a, b) === "e");
-          const t = boardTile(p, i) || [ex + 1, ey];
-          if (look.anyListed) addSprite(list, art.sign("let"), t[0] + 0.5, t[1] + 0.5, proj.depth(t[0] + 0.5, t[1] + 0.5), "s", i);
+          const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => (at(a, b) === "." || at(a, b) === "e") && !taken(a, b));
           // rubbish on the apron by the door of a run-down block: overflowing bins from shabby, then bags, a
           // mattress and scrap
           const o = side[1] || side[0];
           if (stage >= 2 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3, snowy), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
           if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3, snowy), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
         }
-        if (look.moving && p.entry) { // moving van at the kerb in front of the door
-          const [ex, ey] = p.entry;
-          const r = [[ex, ey + 1], [ex, ey - 1], [ex + 1, ey], [ex - 1, ey]].find(([a, b]) => at(a, b) === "#");
-          if (r) {
-            const alongX = r[1] !== ey;
-            const d = alongX ? 0 : 1;
-            const off = alongX ? [0, r[1] > ey ? -0.2 : 0.2] : [r[0] > ex ? -0.2 : 0.2, 0];
-            addSprite(list, art.van(d), r[0] + 0.5 + off[0], r[1] + 0.5 + off[1], proj.depth(r[0] + 0.5 + off[0], r[1] + 0.5 + off[1]) + 0.05, "van", i);
-          }
+        if (listed && spots.sign) { // the board, a quarter tile in from the road edge, leaning toward its own home
+          const t = spots.sign, alongX = t.road === "n" || t.road === "s";
+          let [a, b] = towardRoad(t, t === spots.van ? 0.4 : 0.25);
+          if (alongX) a += Math.max(-0.22, Math.min(0.22, p.x + p.w / 2 - a)); else b += Math.max(-0.22, Math.min(0.22, p.y + p.h / 2 - b));
+          addSprite(list, art.sign(listed), a, b, proj.depth(a, b), "s", i);
+        }
+        if (spots.van) { // the moving van, backed onto the lot along the road
+          const t = spots.van, [a, b] = towardRoad(t, 0.08), d = t.road === "n" || t.road === "s" ? 0 : 1;
+          addSprite(list, art.van(d), a, b, proj.depth(a, b) + 0.05, "van", i);
         }
       });
       // open land: goals and benches on the field, sheds and a wire fence round the allotments, parked cars,
@@ -562,13 +614,16 @@
       }
       return false;
     }
-    // The buildings drawn see-through this frame: those that actually cover the selected person (or the
-    // building they are inside), or the first highlighted place; and the world rect of the target. Only the
-    // part of a covering building over that rect (plus about 24 screen px) turns see-through.
+    // The buildings drawn see-through this frame: those that actually cover the target, and the world rect of
+    // the target. The target is the selected person (or the building they are inside), else the first
+    // highlighted person (or their building), else the first highlighted place. Only the part of a covering
+    // building over that rect (plus about 24 screen px) turns see-through.
     let ghostKey = "", ghostSet = null;
     function ghosts() {
       const pad = 24 / Math.max(0.1, scene.cam.zoom);
-      const m = scene.selected && scene.moverById ? scene.moverById(scene.selected) : null;
+      const hl = scene.highlight;
+      let m = scene.selected && scene.moverById ? scene.moverById(scene.selected) : null;
+      if (!m && hl && hl.agents && scene.moverById) for (const id of hl.agents) { m = scene.moverById(id); if (m) break; }
       if (m && m.item) {
         const it = m.item, h = it.hit || [0, 0, it.sw, it.sh];
         const box = [it.wx + h[0], it.wy + h[1], it.wx + h[2], it.wy + h[3]];
@@ -577,7 +632,7 @@
         return out.size ? { set: out, rect: [box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad] } : null;
       }
       let rec = m && m.insideRec ? m.insideRec : null;
-      const hp = scene.highlight && scene.highlight.places && scene.highlight.places[0];
+      const hp = hl && hl.places && hl.places[0];
       if (!rec && hp != null) rec = buildings.find(r => r.p.id === hp) || null;
       if (!rec) return null;
       const key = rec.p.id + "|" + staticsVersion;
@@ -734,6 +789,7 @@
       for (;;) {
         let total = 0, old = null;
         for (const m of levels.values()) for (const [k, v] of m) { total += v.c.width * v.c.height; if (v.used < frameNo && (!old || v.used < old[2].used)) old = [m, k, v]; }
+        scene.stats.cacheMP = total / 1e6;
         if (total <= budget || !old) return;
         old[0].delete(old[1]);
       }
@@ -893,7 +949,7 @@
 
     scene.draw = function (now) {
       const t0 = performance.now();
-      frameNo++;
+      frameNo++; scene.stats.frames = frameNo;
       if (dirty || !statics.length) buildStatics();
       if (!lampGlow) { lampGlow = makeGlow(54, 27, "#ffd890", 0.5); porchGlow = makeGlow(22, 12, "#ffd890", 0.6); }
       const v = scene.view(), S = v.S;
@@ -957,7 +1013,22 @@
       scene.stats.draw = performance.now() - t0;
     };
 
-    // Ground overlays: lot tints (dashboard overlays), the hover tile, the selection ellipse and pings.
+    // The tiles a place's overlay tint covers: a house's lot (its footprint and garden), or for places without a
+    // lot (blocks of flats, shops) the footprint plus a one-tile apron of open ground.
+    const tintTiles = places.map((p, i) => {
+      const out = [], lot = isHouseLike(p);
+      for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        const k = y * W + x;
+        if (placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && tiles[y][x] !== "#" && tiles[y][x] !== "~"))) out.push([x, y]);
+      }
+      if (lot) for (const [x, y] of lotTiles[i]) if (dist(p, x, y) > 1) out.push([x, y]);
+      return out;
+    });
+    scene.tintTiles = id => placeById.has(id) ? tintTiles[placeById.get(id)].map(t => t.slice()) : [];
+
+    // Ground overlays, drawn every frame over the cached ground and under everything upright (never baked
+    // into a chunk): overlay tints, the hover tile, the selection and highlight rings, and pings.
     function groundOverlays(v, now) {
       const S = v.S;
       const diamond = (x, y, inset) => {
@@ -974,21 +1045,14 @@
         // one path per place, filled once, so neighbouring diamonds leave no seams or darker edges
         g.globalAlpha = 0.5;
         const add = pts => pts.forEach(([a, b], k) => k ? g.lineTo(a, b) : g.moveTo(a, b));
-        for (const p of places) {
+        places.forEach((p, i) => {
           const c = ov.colors && ov.colors[p.id] != null ? ov.colors[p.id] : ov.values && ov.values[p.id] != null ? col(ov.values[p.id]) : null;
-          if (!c) continue;
+          if (!c) return;
           g.fillStyle = c;
           g.beginPath();
-          const i = placeById.get(p.id), lot = isHouseLike(p);
-          for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
-            if (x < 0 || y < 0 || x >= W || y >= H) continue;
-            const k = y * W + x;
-            const on = placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && tiles[y][x] !== "#" && tiles[y][x] !== "~"));
-            if (on) { add(diamond(x, y)); g.closePath(); }
-          }
-          if (lot) for (const [x, y] of lotTiles[i]) if (dist(p, x, y) > 1) { add(diamond(x, y)); g.closePath(); }
+          for (const [x, y] of tintTiles[i]) { add(diamond(x, y)); g.closePath(); }
           g.fill();
-        }
+        });
         g.globalAlpha = 1;
       }
       if (scene.hoverTile) {
@@ -1003,11 +1067,27 @@
         g.strokeStyle = `rgba(255,226,122,${0.6 + 0.4 * pulse})`; g.lineWidth = 2 * scene.dpr;
         g.beginPath(); g.ellipse(fx * S + v.ox, fy * S + v.oy, rx + pulse * 2 * scene.dpr, ry + pulse * scene.dpr, 0, 0, Math.PI * 2); g.stroke();
       }
+      const hl = scene.highlight;
+      if (hl && hl.agents && scene.moverById) for (const id of hl.agents) {
+        if (id === scene.selected) continue;
+        const m = scene.moverById(id);
+        if (!m || !m.item || !m.foot) continue;
+        const pulse = 0.5 + 0.5 * Math.sin(now / 220);
+        const rx = (m.kind === "person" ? 10 : 22) * S, ry = rx / 2, cx = m.foot[0] * S + v.ox, cy = m.foot[1] * S + v.oy;
+        g.save(); g.shadowColor = "#7fd4ff"; g.shadowBlur = 8 * scene.dpr;
+        g.strokeStyle = `rgba(127,212,255,${0.65 + 0.35 * pulse})`; g.lineWidth = 2 * scene.dpr;
+        g.beginPath(); g.ellipse(cx, cy, rx + pulse * 2 * scene.dpr, ry + pulse * scene.dpr, 0, 0, Math.PI * 2); g.stroke();
+        g.restore();
+      }
+      // pings: two expanding rings for 3 s (the off-screen arrow in the label pass lasts longer). The age is
+      // never below 0: a frame's timestamp can be older than a ping stamped late in a long task.
       const keep = [];
       for (const pg of scene.pings) {
-        const t = (now - pg.t0) / 3000;
-        if (t >= 1) continue;
+        const age = Math.max(0, now - pg.t0);
+        if (age >= PING_ARROW_MS) continue;
         keep.push(pg);
+        const t = age / PING_MS;
+        if (t >= 1) continue;
         for (let k = 0; k < 2; k++) {
           const tt = (t * 2 + k * 0.5) % 1;
           const p = proj.toWorld(pg.x, pg.y);
@@ -1082,7 +1162,7 @@
       const k = scene.dpr, area = (cv.width / k) * (cv.height / k);
       const want = Math.round(area / (snow ? 7000 : 4000) * (scene.quality === "low" ? 0.5 : 1));
       while (drops.length < want) drops.push({ x: Math.random() * cv.width, y: Math.random() * cv.height, s: 2 + Math.random() * 3, l: 10 + Math.random() * 4 });
-      const dt = Math.min(0.1, (now - lastRain) / 1000 || 0); lastRain = now;
+      const dt = Math.max(0, Math.min(0.1, (now - lastRain) / 1000 || 0)); lastRain = now;
       const vx = -80, vy = 520, vl = Math.hypot(vx, vy);
       if (snow) g.fillStyle = "rgba(255,255,255,.9)";
       else { g.strokeStyle = "rgba(200,220,255,0.7)"; g.lineWidth = 2 * k; g.lineCap = "butt"; g.beginPath(); }
@@ -1173,11 +1253,18 @@
       const hl = scene.highlight;
       if (hl && hl.places) for (const id of hl.places) {
         const rec = buildings.find(r => r.p.id === id);
-        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v); const an = labelAnchor(rec) || rec.label, [x, y] = toScr(an[0], an[1]); if (!plateOf.get(rec)) plateOf.set(rec, plate(rec.p.name, x, y, "#08202e", "#9fdcff", true, padOf(rec))); }
+        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v, true); const an = labelAnchor(rec) || rec.label, [x, y] = toScr(an[0], an[1]); if (!plateOf.get(rec)) plateOf.set(rec, plate(rec.p.name, x, y, "#08202e", "#9fdcff", true, padOf(rec))); }
       }
       if (hl && hl.agents && scene.moverById) for (const id of hl.agents) {
+        if (id === scene.selected) continue;
         const m = scene.moverById(id);
         if (m && m.item) { const [x, y] = toScr(m.item.wx + m.item.sw / 2, m.item.wy); plate(m.name || id, x, y - 12 * k, "#08202e", "#9fdcff", true); }
+        else if (m && m.insideRec) {
+          const rec = m.insideRec;
+          outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v, true);
+          const an = labelAnchor(rec) || rec.label, [x, y] = toScr(an[0], an[1]);
+          if (!plateOf.get(rec)) plateOf.set(rec, plate(`${String(m.name || id).split(" ")[0]} · inside`, x, y - 4 * k, "#08202e", "#9fdcff", true, padOf(rec)));
+        }
       }
       // speech bubbles, only over people the camera can see (or the selected one, who is drawn see-through)
       if (z >= 0.5) for (const m of scene.movers) {
@@ -1232,6 +1319,7 @@
         }
         g.font = `600 ${11 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`;
       }
+      pingArrows(v, now, k, blocked, placed);
       // occupancy badges: pinned to the top-right corner of the name plate, or over the roof of a home
       if (z >= 0.5 && scene.state) {
         for (const rec of buildings) {
@@ -1249,6 +1337,46 @@
           badge(String(c), bx, by, k);
         }
       }
+    }
+    // A ping whose spot is off screen (or under the page's panels) gets a round arrow at the edge of the free
+    // area, pointing at it, in the ping's colour; clicking it flies there (scene.pingArrows, CSS px).
+    function pingArrows(v, now, k, avoid, placed) {
+      const ins = scene.inset || {}, out = [];
+      const m = 20 * k, R = 12 * k;
+      const L = m, T = (ins.top || 0) * k + m, Rt = cv.width - (ins.right || 0) * k - m, B = cv.height - (ins.bottom || 0) * k - m;
+      if (Rt <= L || B <= T) { scene.pingArrows = out; return; }
+      const cx = (L + Rt) / 2, cy = (T + B) / 2;
+      const seen = new Set();
+      for (let n = scene.pings.length - 1; n >= 0; n--) {
+        const pg = scene.pings[n], age = Math.max(0, now - pg.t0);
+        if (age >= PING_ARROW_MS) continue;
+        const w = proj.toWorld(pg.x, pg.y), px = w[0] * v.S + v.ox, py = w[1] * v.S + v.oy;
+        if (px >= L - m && px <= Rt + m && py >= T - m && py <= B + m) continue;
+        const key = Math.round(pg.x) + "," + Math.round(pg.y);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // where the line from the centre to the spot leaves the free area
+        const dx = px - cx, dy = py - cy, s = Math.min(dx ? (dx > 0 ? Rt - cx : L - cx) / dx : Infinity, dy ? (dy > 0 ? B - cy : T - cy) / dy : Infinity);
+        let ax = cx + dx * s, ay = cy + dy * s;
+        // slide along the edge off the page's controls (the zoom stack, the minimap)
+        for (let tries = 0; tries < 4; tries++) {
+          const q = avoid.find(r => ax + R > r[0] && ax - R < r[2] && ay + R > r[1] && ay - R < r[3]);
+          if (!q) break;
+          if (Math.abs(ax - L) < 1 || Math.abs(ax - Rt) < 1) ay = ay > cy ? q[1] - R - 2 * k : q[3] + R + 2 * k;
+          else ax = ax > cx ? q[0] - R - 2 * k : q[2] + R + 2 * k;
+          ax = Math.max(L, Math.min(Rt, ax)); ay = Math.max(T, Math.min(B, ay));
+        }
+        const a = Math.max(0.35, 1 - Math.max(0, age - PING_MS) / (PING_ARROW_MS - PING_MS)), ang = Math.atan2(dy, dx);
+        g.save(); g.globalAlpha = a; g.translate(ax, ay);
+        g.fillStyle = "rgba(14,18,28,0.9)"; g.beginPath(); g.arc(0, 0, R + 2 * k, 0, Math.PI * 2); g.fill();
+        g.fillStyle = pg.color; g.beginPath(); g.arc(0, 0, R, 0, Math.PI * 2); g.fill();
+        g.rotate(ang); g.fillStyle = "#14181f";
+        g.beginPath(); g.moveTo(7 * k, 0); g.lineTo(-4 * k, -6 * k); g.lineTo(-1 * k, 0); g.lineTo(-4 * k, 6 * k); g.closePath(); g.fill();
+        g.restore();
+        avoid.push([ax - R, ay - R, ax + R, ay + R]); placed.push([ax - R, ay - R, ax + R, ay + R]);
+        out.push({ x0: (ax - R) / k, y0: (ay - R) / k, x1: (ax + R) / k, y1: (ay + R) / k, target: pg.target || { tile: [pg.x, pg.y] } });
+      }
+      scene.pingArrows = out;
     }
     function roundRect(x, y, w, h, r) {
       g.beginPath(); g.moveTo(x + r, y); g.lineTo(x + w - r, y); g.quadraticCurveTo(x + w, y, x + w, y + r);
@@ -1276,32 +1404,49 @@
       g.fillStyle = "#2a1d05"; g.fillText(text, x, y + 0.5 * k);
       g.font = `600 ${11 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`;
     }
-    function outlineHull(rec, color, v) {
+    // The hull's outline; with glow, a soft halo of the same colour round it (dashboard highlights).
+    function outlineHull(rec, color, v, glow) {
+      if (glow) { g.save(); g.shadowColor = color; g.shadowBlur = 10 * scene.dpr; }
       g.strokeStyle = color; g.lineWidth = 2 * scene.dpr;
       g.beginPath(); rec.hull.forEach(([x, y], i) => { const a = x * v.S + v.ox, b = y * v.S + v.oy; if (i) g.lineTo(a, b); else g.moveTo(a, b); }); g.closePath(); g.stroke();
+      if (glow) { g.stroke(); g.restore(); }
     }
 
     // --- hit tests ------------------------------------------------------------------------------------
-    // Every candidate under a CSS point, front to back: movers, then buildings, then the ground.
+    // Everything under a CSS point. upright: movers, building hulls and bus stop shelters in one list by draw
+    // depth, descending (the painter's key; PLAN decision 80), so the first is what the eye sees there. A
+    // building ranks at the depth of its slice in that column where its sprite is solid under the point; on a
+    // see-through pixel of its hull (beside a gable, past a roof's corner) it hides nothing and ranks behind
+    // all that is drawn there. On equal depth a mover is drawn after the static, so it comes first. ground:
+    // a stop's road tile, a park, a home's lot, then the tile itself.
     scene.pickAll = function (cssX, cssY, touch) {
       const [wx, wy] = scene.cssToWorld(cssX, cssY);
       const tol = (touch ? 12 : 4) / scene.cam.zoom;
-      const out = [];
-      const ms = scene.movers.filter(m => m.hit).slice().sort((a, b) => b.depth - a.depth);
-      for (const m of ms) if (wx >= m.wx + m.hit[0] - tol && wx <= m.wx + m.hit[2] + tol && wy >= m.wy + m.hit[1] - tol && wy <= m.wy + m.hit[3] + tol) out.push({ kind: m.kind === "bus" ? "bus" : "agent", id: m.id });
-      const bs = buildings.slice().sort((a, b) => b.depth - a.depth);
-      for (const b of bs) if (inHull(b.hull, wx, wy) || inHull(b.ground, wx, wy)) out.push({ kind: "place", id: b.p.id });
+      const c = [];
+      const inBox = (x0, y0, x1, y1) => wx >= x0 - tol && wx <= x1 + tol && wy >= y0 - tol && wy <= y1 + tol;
+      for (const m of scene.movers) {
+        if (m.hit && inBox(m.wx + m.hit[0], m.wy + m.hit[1], m.wx + m.hit[2], m.wy + m.hit[3])) c.push({ hit: { kind: m.kind === "bus" ? "bus" : "agent", id: m.id }, depth: m.depth, mover: 1 });
+      }
+      if (dirty) buildStatics();
+      for (const r of buildings) {
+        if (!inHull(r.hull, wx, wy) && !inHull(r.ground, wx, wy)) continue;
+        const sl = r.slices.find(q => wx >= q.wx && wx < q.wx + q.sw);
+        c.push({ hit: { kind: "place", id: r.p.id }, depth: sl && opaqueAt(r, wx, wy) ? sl.depth : r.depth - 1e6, mover: 0 });
+      }
+      for (const it of shelters) if (inBox(it.wx + 4, it.wy + 4, it.wx + it.sw - 2, it.wy + it.sh - 2)) c.push({ hit: { kind: "stop", id: it.ref }, depth: it.depth, mover: 0 });
+      c.sort((a, b) => b.depth - a.depth || b.mover - a.mover);
+      const ground = [];
       const [tx, ty] = proj.toTile(wx, wy);
       const x = Math.floor(tx), y = Math.floor(ty);
       if (x >= 0 && y >= 0 && x < W && y < H) {
         const k = y * W + x;
-        if (stopAt.has(k)) out.push({ kind: "stop", id: stopAt.get(k).id });
+        if (stopAt.has(k)) ground.push({ kind: "stop", id: stopAt.get(k).id });
         const pi = placeIdx[k];
-        if (pi >= 0 && places[pi].kind === "park") out.push({ kind: "place", id: places[pi].id });
-        else if (lotOf[k] >= 0 && !out.some(h => h.kind === "place")) out.push({ kind: "place", id: places[lotOf[k]].id });
-        out.push({ kind: "tile", x, y });
+        if (pi >= 0 && places[pi].kind === "park") ground.push({ kind: "place", id: places[pi].id });
+        else if (lotOf[k] >= 0) ground.push({ kind: "place", id: places[lotOf[k]].id });
+        ground.push({ kind: "tile", x, y });
       }
-      return out;
+      return { upright: c.map(q => q.hit), ground };
     };
     scene.tileAt = (cssX, cssY) => {
       const [wx, wy] = scene.cssToWorld(cssX, cssY), [tx, ty] = proj.toTile(wx, wy);

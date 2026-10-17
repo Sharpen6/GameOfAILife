@@ -24,6 +24,11 @@
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
 }
 .cv-menu.cv-open { display: flex; }
+/* a short free area (a phone's sheet): the stack lies in a row, the menu drops below it or opens beside */
+.cv-ctl.cv-row { flex-direction: row; align-items: flex-start; }
+.cv-ctl.cv-row .cv-menu { position: absolute; top: calc(100% + 6px); right: 0; }
+.cv-ctl .cv-menu.cv-side { position: absolute; top: 0; right: calc(100% + 6px); }
+.cv-ctl.cv-off, .cv-minimap.cv-off, .cv-follow.cv-off { visibility: hidden; }
 .cv-menu-item {
   text-align: left; padding: 8px 10px; border: 0; border-radius: 7px;
   background: transparent; color: var(--cv-fg); font: inherit; font-weight: 500; cursor: pointer;
@@ -34,7 +39,7 @@
 .cv-menu-item:disabled { opacity: 0.4; cursor: default; }
 
 .cv-follow {
-  position: absolute; top: 10px; left: 10px; z-index: 5;
+  position: absolute; bottom: 10px; left: 50%; z-index: 5; transform: translateX(-50%); white-space: nowrap;
   display: none; align-items: center; gap: 2px; padding: 3px;
   border-radius: 999px; background: rgba(18, 22, 32, 0.86); border: 1px solid rgba(255, 226, 122, 0.55);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
@@ -58,6 +63,7 @@
   border: 0; background: transparent; color: #cfd6e2; cursor: pointer; padding: 2px 4px;
   font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0.04em;
 }
+.cv-minimap.cv-left { align-items: flex-start; }
 .cv-minimap.cv-collapsed { padding: 4px; }
 .cv-minimap.cv-collapsed .cv-minimap-canvas { display: none; }
 .cv-minimap-legend {

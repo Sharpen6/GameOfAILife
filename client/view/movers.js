@@ -184,7 +184,11 @@
         if (a.inside || a.riding) {
           const r = { id: a.id, kind: "person", name: a.name, item: null, foot: null, insideRec: null };
           if (a.riding && busRec.has(a.riding)) { const b = busRec.get(a.riding); r.item = b.item; r.foot = b.foot; r.riding = a.riding; }
-          else if (a.inside) { const rec = scene.buildingOf(placeOf(a.inside)); if (rec) { r.insideRec = rec; r.foot = rec.center; } else { const p = proj.toWorld(a.x + 0.5, a.y + 0.5); r.foot = p; } }
+          else if (a.inside) {
+            const pid = placeOf(a.inside), rec = scene.buildingOf(pid);
+            r.place = pid;
+            if (rec) { r.insideRec = rec; r.foot = rec.center; } else { const p = proj.toWorld(a.x + 0.5, a.y + 0.5); r.foot = p; }
+          }
           recs.set(a.id, r);
           continue;
         }
@@ -238,14 +242,16 @@
         recs.set(a.id, { id: a.id, kind: it.kind === "car" ? "car" : "person", name: a.name, item: it, foot: p });
         if (veh && a.home) parked.add(placeOf(a.home) + ":" + a.id);
       }
-      // parked cars on the driveways of car owners who are not out driving
+      // a car parked on the home's driveway while its owner is at home (PLAN decision 45): an agent row with
+      // car true whose owner is inside their home; one car per driveway, none while a moving van is there
       const done = new Set();
       for (const [, tr] of tracks) {
         const a = tr.agent;
-        if (!a || !a.car || a.alive === false || VEHICLES[a.vehicle]) continue;
+        if (!a || !a.car || a.alive === false || VEHICLES[a.vehicle] || !a.inside) continue;
         const pid = placeOf(a.home);
-        if (!pid || done.has(pid)) continue;
+        if (!pid || done.has(pid) || placeOf(a.inside) !== pid) continue;
         if ([...parked].some(k => k.startsWith(pid + ":"))) continue;
+        if ((scene.looks[pid] || {}).moving) continue;
         const dv = scene.driveOf(pid);
         if (!dv) continue;
         done.add(pid);
@@ -257,9 +263,12 @@
         items.push({ img: spr.c, sx: 0, sy: 0, sw: spr.c.width, sh: spr.c.height, wx: Math.round(p[0]) - spr.ax, wy: Math.round(p[1]) - spr.ay,
           depth: proj.depth(tx, ty) + 0.02, kind: "parked", id: "parked:" + a.id, lights: null, moving: false, cx: p[0], cy: p[1] });
       }
+      if (scene.setParked) scene.setParked(done);
       items.sort((a, b) => a.depth - b.depth);
       scene.movers = items;
     };
+    // Dev and test hook: finish every move now (shown positions jump to the latest tiles).
+    M.settle = () => { for (const tr of tracks.values()) tr.t0 = -1e9; };
     M.byId = id => recs.get(id) || recs.get("bus:" + id) || null;
     M.agent = id => { const tr = tracks.get(id); return tr && tr.agent || null; };
     M.bus = id => { const tr = tracks.get("bus:" + id); return tr && tr.bus || null; };
