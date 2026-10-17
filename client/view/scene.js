@@ -58,11 +58,12 @@
     const scene = {
       town, proj, cam: { x: 0, y: 0, zoom: 1 }, dpr: 1, season: "summer", minute: 600, weather: "clear", state: null,
       looks: {}, movers: [], selected: null, hover: null, hoverTile: null, highlight: null, overlay: null,
-      pings: [], inset: { top: 0, right: 0, bottom: 0 }, quality: "high", lights: { ns: "green", ew: "red" },
+      pings: [], inset: { top: 0, right: 0, bottom: 0 }, reserved: [], quality: "high", lights: { ns: "green", ew: "red" },
       stats: { items: 0, chunks: 0, built: 0, draw: 0 },
     };
     const placeById = new Map(places.map((p, i) => [p.id, i]));
     scene.placeById = placeById;
+    const homePlace = new Map(town.homes.map(h => [h.id, h.place]));
 
     // --- tile classification (client-derived; no new tile codes) -----------------------------------------
     const N = W * H;
@@ -98,6 +99,27 @@
         else zoneOf[y * W + x] = p.style === "factory" ? 2 : 1;
       } else if (inRects(downtown, x, y)) zoneOf[y * W + x] = 1;
     }
+    // Back gardens run from the house to the next street when the land behind it is free (Hilltop's big
+    // gardens); a neighbour's lot or anything built stops them.
+    places.forEach((p, i) => {
+      if (!isHouseLike(p)) return;
+      const back = { s: [0, -1], n: [0, 1], e: [-1, 0], w: [1, 0] }[p.face];
+      if (!back) return;
+      const [bx, by] = back, along = bx === 0;
+      const lo = along ? p.x - 1 : p.y - 1, hi = along ? p.x + p.w : p.y + p.h;
+      for (let s = lo; s <= hi; s++) {
+        let x = along ? s : bx > 0 ? p.x + p.w + 1 : p.x - 2, y = along ? (by > 0 ? p.y + p.h + 1 : p.y - 2) : s;
+        for (let k = 0; k < 8; k++, x += bx, y += by) {
+          if (x < 0 || y < 0 || x >= W || y >= H) break;
+          const c = tiles[y][x], j = y * W + x;
+          if ((c !== "." && c !== "T") || placeIdx[j] >= 0 || zoneOf[j]) break;
+          if (lotOf[j] >= 0) { if (lotOf[j] === i) continue; break; }
+          lotOf[j] = i;
+        }
+      }
+    });
+    const lotTiles = places.map(() => []);
+    for (let j = 0; j < N; j++) if (lotOf[j] >= 0) lotTiles[lotOf[j]].push([j % W, (j / W) | 0]);
     const parks = places.filter(p => p.kind === "park");
     const parkAt = new Int16Array(N).fill(-1);
     for (const p of parks) {
@@ -126,6 +148,56 @@
       const d = cands.find(([a, c]) => a >= 0 && c >= 0 && a < W && c < H && lotOf[c * W + a] === i);
       if (d) driveOf[d[1] * W + d[0]] = i;
     });
+    // Open land: a block the map leaves empty becomes a playing field (Maple Grove), allotments (Riverside),
+    // the works car park and depot (The Works, nearest first) or a rough meadow with a LAND FOR SALE board,
+    // inside a one-tile grass verge. Woods stay woods. Purely visual: the tiles keep their codes.
+    const USE = { pitch: 1, plot: 2, park: 3, yard: 4, meadow: 5, verge: 6 };
+    const useOf = new Uint8Array(N), useK = new Uint8Array(N);
+    const lands = [];
+    {
+      const free = (x, y) => { const c = tiles[y][x], j = y * W + x; return (c === "." || c === "T") && placeIdx[j] < 0 && lotOf[j] < 0 && !zoneOf[j]; };
+      const cands = [];
+      for (const d of town.districts) for (const r of d.rects || []) {
+        const [rx, ry, rw, rh] = r;
+        if (rw < 6 || rh < 6) continue;
+        let n = 0, f = 0;
+        for (let y = ry; y < ry + rh; y++) for (let x = rx; x < rx + rw; x++) { if (x < 0 || y < 0 || x >= W || y >= H) continue; n++; if (free(x, y)) f++; }
+        if (n && f / n > 0.92) cands.push({ d: d.id, r });
+      }
+      const works = places.find(p => p.style === "factory");
+      const far = c => works && works.entry ? Math.abs(c.r[0] + c.r[2] / 2 - works.entry[0]) + Math.abs(c.r[1] + c.r[3] / 2 - works.entry[1]) : 0;
+      const give = (list, kinds) => list.forEach((c, k) => { c.kind = kinds[Math.min(k, kinds.length - 1)]; });
+      give(cands.filter(c => c.d === "maple_grove").sort((a, b) => a.r[1] - b.r[1] || a.r[0] - b.r[0]), ["field", "meadow"]);
+      give(cands.filter(c => c.d === "riverside").sort((a, b) => a.r[0] - b.r[0]), ["allotments", "meadow"]);
+      give(cands.filter(c => c.d === "the_works").sort((a, b) => far(a) - far(b)), ["carpark", "depot", "meadow"]);
+      for (const c of cands) {
+        if (c.d === "east_woods") continue;
+        const kind = c.kind || "meadow";
+        const [rx, ry, rw, rh] = c.r;
+        const inner = [rx + 1, ry + 1, rx + rw - 1, ry + rh - 1]; // x0, y0, x1, y1 (exclusive)
+        const L = { kind, rect: c.r, inner, alongX: rw >= rh };
+        lands.push(L);
+        for (let y = ry; y < ry + rh; y++) for (let x = rx; x < rx + rw; x++) {
+          if (x < 0 || y < 0 || x >= W || y >= H || !free(x, y)) continue;
+          const j = y * W + x, inIn = x >= inner[0] && x < inner[2] && y >= inner[1] && y < inner[3];
+          const r = y - inner[1];
+          if (kind === "meadow") useOf[j] = USE.meadow;
+          else if (!inIn) useOf[j] = USE.verge;
+          else if (kind === "field") { useOf[j] = USE.pitch; useK[j] = (L.alongX ? x - inner[0] : y - inner[1]) % 2; }
+          else if (kind === "allotments") { useOf[j] = USE.plot; useK[j] = hash(`shed${x},${y}`) % 9 === 0 ? 6 : hash(`plot${x},${y}`) % 6; }
+          else if (kind === "depot") useOf[j] = USE.yard;
+          else { useOf[j] = USE.park; useK[j] = r % 3 === 1 ? 1 : r % 3 === 0 ? 0 : 2; } // 0 bays open south, 1 aisle, 2 bays open north
+        }
+        if (kind === "carpark") // the aisles run out through the verge to the street at each end
+          for (let y = inner[1]; y < inner[3]; y++) if ((y - inner[1]) % 3 === 1) for (const x of [rx, rx + rw - 1]) {
+            const j = y * W + x, nx = x === rx ? x - 1 : x + 1;
+            if (x >= 0 && x < W && useOf[j] === USE.verge && at(nx, y) === "#") { useOf[j] = USE.park; useK[j] = 1; }
+          }
+      }
+    }
+    scene.useAt = (x, y) => x < 0 || y < 0 || x >= W || y >= H ? 0 : useOf[y * W + x];
+    scene.lotAt = (x, y) => x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] < 0 ? null : places[lotOf[y * W + x]].id;
+    scene.lands = lands;
     const isRoad = (x, y) => {
       if (x >= 0 && y >= 0 && x < W && y < H) return tiles[y][x] === "#";
       // roads run off the map's edges
@@ -164,6 +236,16 @@
       if (pathMask[i]) {
         const m = (a, b) => (a >= 0 && b >= 0 && a < W && b < H && (pathMask[b * W + a] || (at(a, b) === "e" && entryOf.has(b * W + a) && places[entryOf.get(b * W + a)].kind === "park"))) ? 1 : 0;
         return art.path(s, m(x, y - 1) | m(x + 1, y) << 1 | m(x, y + 1) << 2 | m(x - 1, y) << 3);
+      }
+      const u = useOf[i];
+      if (u) {
+        if (u === USE.pitch) return art.pitch(s, useK[i]);
+        if (c === "T" || (u === USE.plot && useK[i] === 6)) return u === USE.meadow ? art.meadow(s, v) : art.grass(s, v);
+        if (u === USE.plot) return art.plot(s, useK[i], v % 2);
+        if (u === USE.park) return art.parking(s, ["bayS", "aisle", "bayN"][useK[i]], v % 4);
+        if (u === USE.yard) return art.yard(v % 4);
+        if (u === USE.meadow) return art.meadow(s, v);
+        return art.grass(s, v);
       }
       if (c === "P" || (c === "T" && parkAt[i] >= 0)) return art.park(s, v % 4);
       if (driveOf[i] >= 0) {
@@ -233,6 +315,7 @@
       const woods = (town.districts.find(d => d.id === "east_woods") || { rects: [] }).rects;
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
         const c = tiles[y][x], i = y * W + x;
+        if (c === "T" && useOf[i] === USE.pitch) continue; // the playing field is kept clear
         if (c === "T") {
           const hv = hash(`${x},${y}`);
           const pine = inRects(woods, x, y) ? hv % 3 !== 0 : (parkAt[i] < 0 && hv % 6 === 0);
@@ -278,9 +361,11 @@
         if (isHouseLike(p)) {
           const inLot = (x, y) => x >= 0 && y >= 0 && x < W && y < H && (lotOf[y * W + x] === i || placeIdx[y * W + x] === i || (p.entry && x === p.entry[0] && y === p.entry[1]));
           const hedge = p.style === "big_house";
-          for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
-            if (x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] !== i || driveOf[y * W + x] === i) continue;
+          for (const [x, y] of lotTiles[i]) {
+            if (driveOf[y * W + x] === i) continue;
             const v = hash(`${x}.${y}`) % 4;
+            if (hedge && dist(p, x, y) >= 2 && tiles[y][x] === "." && hash(`gt${x},${y}`) % 7 === 0) // trees in the back garden
+              addSprite(list, art.tree(scene.season, "round", hash(`gv${x}`) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
             const edges = [["n", x, y - 1, 0.5, 0.06], ["s", x, y + 1, 0.5, 0.94], ["w", x - 1, y, 0.06, 0.5], ["e", x + 1, y, 0.94, 0.5]];
             for (const [side, nx, ny, ex, ey] of edges) {
               if (inLot(nx, ny)) continue;
@@ -302,10 +387,15 @@
           }
           if (stage >= 2 && best) addSprite(list, art.junk(stage, hash(p.id) % 3), best[0] + 0.4, best[1] + 0.35, proj.depth(best[0] + 0.4, best[1] + 0.35), "j", i);
           if (look.works && best) addSprite(list, art.skip(), best[0] + 0.5, best[1] + 0.6, proj.depth(best[0] + 0.5, best[1] + 0.6), "j", i);
-        } else if (look.anyListed) {
+        } else {
           const [ex, ey] = p.entry;
-          const t = [[ex + 1, ey], [ex - 1, ey]].find(([a, b]) => at(a, b) === "." || at(a, b) === "e") || [ex + 1, ey];
-          addSprite(list, art.sign("let"), t[0] + 0.5, t[1] + 0.5, proj.depth(t[0] + 0.5, t[1] + 0.5), "s", i);
+          const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => at(a, b) === "." || at(a, b) === "e");
+          const t = side[0] || [ex + 1, ey];
+          if (look.anyListed) addSprite(list, art.sign("let"), t[0] + 0.5, t[1] + 0.5, proj.depth(t[0] + 0.5, t[1] + 0.5), "s", i);
+          // rubbish on the apron by the door of a run-down block: a full bin, then bags, a mattress and scrap
+          const o = side[1] || side[0];
+          if (stage >= 3 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
+          if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
         }
         if (look.moving && p.entry) { // moving van at the kerb in front of the door
           const [ex, ey] = p.entry;
@@ -318,6 +408,62 @@
           }
         }
       });
+      // open land: goals and benches on the field, sheds and a wire fence round the allotments, parked cars,
+      // containers and vans in the depot, bushes, trees and a LAND FOR SALE board on the meadows
+      const deepest = pts => Math.max(...pts.map(([a, b]) => proj.depth(a, b)));
+      for (const L of lands) {
+        const [ix0, iy0, ix1, iy1] = L.inner, [rx, ry, rw, rh] = L.rect;
+        const tilesIn = (u, f) => { for (let y = ry; y < ry + rh; y++) for (let x = rx; x < rx + rw; x++) if (x >= 0 && y >= 0 && x < W && y < H && useOf[y * W + x] === u) f(x, y, y * W + x); };
+        if (L.kind === "field") {
+          const m = 0.3, x0 = ix0 + m, y0 = iy0 + m, x1 = ix1 - m, y1 = iy1 - m, xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+          const ends = L.alongX ? [[x0, ym, -1], [x1, ym, 1]] : [[xm, y0, -1], [xm, y1, 1]];
+          for (const [gx, gy, e] of ends) addSprite(list, art.goal(L.alongX, e), gx, gy, proj.depth(gx, gy) + 0.3, "p");
+          const bench = L.alongX ? [[xm - 1.6, iy1 + 0.35], [xm + 1.6, iy1 + 0.35]] : [[ix1 + 0.35, ym - 1.6], [ix1 + 0.35, ym + 1.6]];
+          for (const [bx, by] of bench) addSprite(list, art.bench(), bx, by, proj.depth(bx, by), "p");
+        } else if (L.kind === "allotments") {
+          tilesIn(USE.plot, (x, y, j) => {
+            if (useK[j] === 6) addSprite(list, art.shed(hash(`sv${x}`) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.75, y + 0.75), "p");
+            for (const [side, nx, ny, ex, ey] of [["n", x, y - 1, 0.5, 0.06], ["s", x, y + 1, 0.5, 0.94], ["w", x - 1, y, 0.06, 0.5], ["e", x + 1, y, 0.94, 0.5]]) {
+              if (nx >= 0 && ny >= 0 && nx < W && ny < H && useOf[ny * W + nx] === USE.plot) continue;
+              if ((side === "s" || side === "n") && x === Math.floor((ix0 + ix1) / 2)) continue; // a gate
+              addSprite(list, art.wire(side), x + 0.5, y + 0.5, proj.depth(x + ex, y + ey) + 0.02, "f");
+            }
+          });
+        } else if (L.kind === "carpark") {
+          tilesIn(USE.park, (x, y, j) => {
+            if (useK[j] === 1 || tiles[y][x] === "T") return;
+            for (const k of [0, 1]) {
+              const h = hash(`car${x},${y},${k}`);
+              if (h % 10 >= 6) continue;
+              const tx = x + 0.26 + k * 0.48, ty = y + 0.5, d = (useK[j] === 0 ? 3 : 1) ^ (h % 7 === 0 ? 2 : 0);
+              addSprite(list, art.car(CV.carColor(`lot${x}:${y}:${k}`), "car", d), tx, ty, proj.depth(tx, ty) + 0.02, "p");
+            }
+          });
+        } else if (L.kind === "depot") {
+          const COL = ["#b8452e", "#2f6aa8", "#3f8a4a", "#d0882a", "#7a7f88", "#a83a6a", "#2a8a8a"];
+          const a0 = L.alongX ? ix0 : iy0, a1 = L.alongX ? ix1 : iy1, b0 = L.alongX ? iy0 : ix0, b1 = L.alongX ? iy1 : ix1;
+          let n = 0;
+          for (let b = b0 + 0.7; b < b1 - 0.4; b += 1.45) for (let a = a0 + 1.05; a + 0.75 <= a1 - 0.2; a += 1.8) {
+            const h = hash(`ct${Math.round(a * 10)},${Math.round(b * 10)}`);
+            if (h % 5 === 0) { if (n++ % 2 === 0) { const [tx, ty] = L.alongX ? [a, b] : [b, a]; addSprite(list, art.van(L.alongX ? 0 : 1), tx, ty, proj.depth(tx, ty) + 0.05, "p"); } continue; }
+            const [cx, cy] = L.alongX ? [a, b] : [b, a];
+            const foot = L.alongX ? [[cx - 0.75, cy - 0.25], [cx + 0.75, cy + 0.25]] : [[cx - 0.25, cy - 0.75], [cx + 0.25, cy + 0.75]];
+            const d = deepest([[foot[0][0], foot[0][1]], [foot[1][0], foot[0][1]], [foot[1][0], foot[1][1]], [foot[0][0], foot[1][1]]]);
+            addSprite(list, art.container(COL[h % COL.length], (h >>> 5) % 5 < 2 ? COL[(h >>> 8) % COL.length] : null, L.alongX), cx, cy, d, "p");
+          }
+        } else { // meadow
+          let sign = null, sd = -1e9;
+          tilesIn(USE.meadow, (x, y) => {
+            if (tiles[y][x] !== ".") return;
+            const h = hash(`md${x},${y}`);
+            if (h % 11 === 0) addSprite(list, art.tree(scene.season, "bush", (h >>> 4) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
+            else if (h % 29 === 1) addSprite(list, art.tree(scene.season, "round", (h >>> 4) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
+            const road = at(x, y + 1) === "#" || at(x + 1, y) === "#" || at(x, y - 1) === "#" || at(x - 1, y) === "#";
+            if (road && proj.depth(x, y) > sd) { sd = proj.depth(x, y); sign = [x, y]; }
+          });
+          if (sign) addSprite(list, art.landSign(), sign[0] + 0.5, sign[1] + 0.5, proj.depth(sign[0] + 0.5, sign[1] + 0.5), "s");
+        }
+      }
       // shop dressing: cafe tables, market crates, the school flag
       for (const p of places) {
         if (p.kind === "home" || p.kind === "park") continue;
@@ -333,6 +479,90 @@
       statics = list;
       dirty = false;
       occlusion = null;
+      staticsVersion++;
+    }
+    let staticsVersion = 0;
+
+    // --- opaque-pixel masks of building sprites: exact x-ray and "is this person hidden" tests -------------
+    function maskOf(rec) {
+      const b = rec.b;
+      if (b.mask) return b.mask;
+      const w = b.c.width, h = b.c.height;
+      const c = CV.canvas(w, h), q = c.getContext("2d", { willReadFrequently: true });
+      q.drawImage(b.c, 0, 0);
+      const d = q.getImageData(0, 0, w, h).data, m = new Uint8Array(w * h);
+      let n = 0;
+      for (let k = 0; k < m.length; k++) { m[k] = d[k * 4 + 3] > 40 ? 1 : 0; n += m[k]; }
+      b.mask = { m, w, h, n };
+      return b.mask;
+    }
+    function opaqueAt(rec, wx, wy) {
+      const k = maskOf(rec), x = Math.floor(wx - rec.b.ox), y = Math.floor(wy - rec.b.oy);
+      return x >= 0 && y >= 0 && x < k.w && y < k.h && k.m[y * k.w + x] === 1;
+    }
+    // Does building B, drawn after something at `depth` in the same column, cover the box (a person's
+    // hit box)? Sampled every 2 px; a few samples are enough, since a person is small.
+    function hidesBox(B, box, depth) {
+      const b = B.b, [x0, y0, x1, y1] = box;
+      if (x1 <= b.ox || x0 >= b.ox + b.c.width || y1 <= b.oy || y0 >= b.oy + b.c.height) return false;
+      let n = 0;
+      for (const sl of B.slices) {
+        if (sl.depth <= depth) continue;
+        const a0 = Math.max(x0, sl.wx), a1 = Math.min(x1, sl.wx + sl.sw);
+        for (let x = Math.ceil(a0); x < a1; x += 2) for (let y = Math.ceil(y0); y < y1; y += 2) if (opaqueAt(B, x, y) && ++n >= 3) return true;
+      }
+      return false;
+    }
+    // Does building B really cover building T: its strips, drawn after T's in the same columns, hide at
+    // least 120 px and 1.5% of T's opaque pixels? (A roof corner grazing a neighbour is not enough to
+    // make a whole building see-through.) Sampled every 2 px, so each sample stands for 4 px.
+    function hides(B, T) {
+      const b = B.b, t = T.b;
+      const x0 = Math.max(b.ox, t.ox), x1 = Math.min(b.ox + b.c.width, t.ox + t.c.width);
+      const y0 = Math.max(b.oy, t.oy), y1 = Math.min(b.oy + b.c.height, t.oy + t.c.height);
+      if (x1 <= x0 || y1 <= y0) return false;
+      const need = Math.max(120, maskOf(T).n * 0.015) / 4;
+      let n = 0;
+      for (const sB of B.slices) {
+        const a0 = Math.max(x0, sB.wx), a1 = Math.min(x1, sB.wx + sB.sw);
+        for (let x = Math.ceil(a0); x < a1; x += 2) {
+          const sT = T.slices.find(q => x >= q.wx && x < q.wx + q.sw);
+          if (!sT || sB.depth <= sT.depth) continue;
+          for (let y = Math.ceil(y0); y < y1; y += 2) if (opaqueAt(B, x, y) && opaqueAt(T, x, y) && ++n >= need) return true;
+        }
+      }
+      return false;
+    }
+    // The buildings drawn see-through this frame: those that actually cover the selected person (or the
+    // building they are inside), or the first highlighted place. Whole buildings, never single strips.
+    let ghostKey = "", ghostSet = null;
+    function ghosts() {
+      const m = scene.selected && scene.moverById ? scene.moverById(scene.selected) : null;
+      if (m && m.item) {
+        const it = m.item, h = it.hit || [0, 0, it.sw, it.sh];
+        const box = [it.wx + h[0], it.wy + h[1], it.wx + h[2], it.wy + h[3]];
+        const out = new Set();
+        for (const r of buildings) if (hidesBox(r, box, it.depth)) out.add(r);
+        return out.size ? out : null;
+      }
+      let rec = m && m.insideRec ? m.insideRec : null;
+      const hp = scene.highlight && scene.highlight.places && scene.highlight.places[0];
+      if (!rec && hp != null) rec = buildings.find(r => r.p.id === hp) || null;
+      if (!rec) return null;
+      const key = rec.p.id + "|" + staticsVersion;
+      if (key !== ghostKey) { ghostKey = key; ghostSet = new Set(buildings.filter(r => r !== rec && hides(r, rec))); }
+      return ghostSet.size ? ghostSet : null;
+    }
+    // A person (or vehicle) item whose foot point lies under a nearer building's opaque pixels.
+    function hiddenItem(it) {
+      const fx = it.wx + it.sw / 2, fy = it.wy + it.sh - 3;
+      for (const r of buildings) {
+        const b = r.b;
+        if (fx < b.ox || fx >= b.ox + b.c.width || fy < b.oy || fy >= b.oy + b.c.height) continue;
+        const sl = r.slices.find(q => fx >= q.wx && fx < q.wx + q.sw);
+        if (sl && sl.depth > it.depth && opaqueAt(r, fx, fy)) return true;
+      }
+      return false;
     }
     // Lamp bulbs and porch lights hidden behind a nearer building keep their glow off (the light pass is
     // additive and would otherwise shine through roofs). Recomputed with the statics.
@@ -404,12 +634,34 @@
         old[0].delete(old[1]);
       }
     }
+    // A chunk below zoom 1 is the finished zoom-1 chunk scaled down in one smoothed draw (from the cache, or
+    // painted into a scratch canvas). Drawing each tile at the small scale instead lets the dark background
+    // show through the half-covered pixels along every diamond edge, which reads as a grid.
+    let scratch = null;
     function renderChunk(level, cx, cy) {
       const size = Math.round(CH * level);
       const c = CV.canvas(size, size), q = c.getContext("2d");
+      if (level < 1) {
+        const m1 = levels.get(1), have = m1 && m1.get(cx + "," + cy);
+        let src = have && have.c;
+        if (!src) {
+          if (!scratch) scratch = CV.canvas(CH, CH);
+          const sq = scratch.getContext("2d");
+          sq.setTransform(1, 0, 0, 1, 0, 0); sq.clearRect(0, 0, CH, CH);
+          paintChunk(sq, cx, cy);
+          src = scratch;
+        }
+        q.imageSmoothingEnabled = true; q.imageSmoothingQuality = "high";
+        q.drawImage(src, 0, 0, CH, CH, 0, 0, size, size);
+        return c;
+      }
+      paintChunk(q, cx, cy);
+      return c;
+    }
+    function paintChunk(q, cx, cy) {
       const wx0 = B.x0 + cx * CH, wy0 = B.y0 + cy * CH;
-      q.imageSmoothingEnabled = level < 1;
-      q.setTransform(level, 0, 0, level, -wx0 * level, -wy0 * level);
+      q.imageSmoothingEnabled = false;
+      q.setTransform(1, 0, 0, 1, -wx0, -wy0);
       const off = art.tileOffset, iso = proj.kind === "iso";
       const front = iso ? proj.faces : [];
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -443,10 +695,10 @@
       for (const p of places) {
         if (p.style !== "big_house") continue;
         const b = CV.bodyOf(p);
-        if (b.pool) { const look = scene.looks[p.id]; art.pool(q, b.pool, look ? look.stage | 0 : 0, 0, 0); }
+        if (b.pool) { const look = scene.looks[p.id]; art.pool(q, b.pool, look ? look.stage | 0 : 0, 0, 0, scene.season); }
       }
       for (const [fx, fy] of fountains) { const p = proj.toWorld(fx, fy); art.fountainBasin(q, p[0], p[1]); }
-      return c;
+      for (const L of lands) if (L.kind === "field") { const [x0, y0, x1, y1] = L.inner, m = 0.3; art.pitchLines(q, x0 + m, y0 + m, x1 - m, y1 - m, L.alongX); }
     }
     function invalidateRect(x0, y0, x1, y1) {
       const pts = [proj.toWorld(x0, y0), proj.toWorld(x1, y0), proj.toWorld(x1, y1), proj.toWorld(x0, y1)];
@@ -483,26 +735,39 @@
     scene.worldToCss = (wx, wy) => { const v = scene.view(); return [(wx * v.S + v.ox) / scene.dpr, (wy * v.S + v.oy) / scene.dpr]; };
     scene.cssToWorld = (x, y) => { const v = scene.view(); return [(x * scene.dpr - v.ox) / v.S, (y * scene.dpr - v.oy) / v.S]; };
 
-    // Which places glow at night.
+    // Which places glow at night, and the share of their windows lit (null: the building's own share).
+    // Homes are lit while someone is in, up to stage 3 (a derelict house stays dark); between 00:30 and
+    // 05:30 a household that is all asleep keeps only about one window in six lit.
+    const LATE_SHARE = 17;
     function litPlaces() {
-      const st = scene.state, out = new Set();
+      const st = scene.state, out = new Map();
       if (!st) return out;
-      const inside = new Map();
-      for (const a of st.agents || []) if (a.alive !== false && a.inside) inside.set(a.inside, (inside.get(a.inside) || 0) + 1);
-      const hr = ((st.minute || 0) / 60) % 24;
+      const inside = new Map(), awake = new Set();
+      for (const a of st.agents || []) {
+        if (a.alive === false || !a.inside) continue;
+        const pid = scene.placeById.has(a.inside) ? a.inside : homePlace.get(a.inside) || a.inside;
+        inside.set(pid, (inside.get(pid) || 0) + 1);
+        if (a.activity !== "sleep") awake.add(pid);
+      }
+      const hr = ((st.minute || 0) / 60) % 24, late = hr >= 0.5 && hr < 5.5;
       for (const p of places) {
         if (p.kind === "park") continue;
-        if (p.kind === "home") { const l = scene.looks[p.id]; if ((inside.get(p.id) || 0) > 0 && (!l || (l.stage | 0) < 3)) out.add(p.id); continue; }
+        if (p.kind === "home") {
+          const l = scene.looks[p.id];
+          if ((inside.get(p.id) || 0) > 0 && (!l || (l.stage | 0) < 4)) out.set(p.id, late && !awake.has(p.id) ? LATE_SHARE : null);
+          continue;
+        }
         const open = !p.hours || (hr >= p.hours[0] && hr < p.hours[1]);
-        if (p.kind === "hospital" || open || inside.get(p.id)) out.add(p.id);
+        if (p.kind === "hospital" || open || inside.get(p.id)) out.set(p.id, null);
       }
       return out;
     }
-    function glowOf(rec, lit) {
-      const b = rec.b;
-      if (b.glow !== undefined) return b.glow;
-      const win = b.windows.filter((q, k) => hash(b.id + ":" + k) % 100 < b.litShare);
-      if (!win.length) { b.glow = null; return null; }
+    function glowOf(rec, share) {
+      const b = rec.b, pct = share == null ? b.litShare : share;
+      b.glows = b.glows || new Map();
+      if (b.glows.has(pct)) return b.glows.get(pct);
+      const win = b.windows.filter((q, k) => hash(b.id + ":" + k) % 100 < pct);
+      if (!win.length) { b.glows.set(pct, null); return null; }
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (const q of win) for (const [x, y] of q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
       x0 = Math.floor(x0); y0 = Math.floor(y0);
@@ -511,9 +776,9 @@
       for (const w of win) { CV.poly(q, w, "#e8a440"); }
       q.fillStyle = "#ffd890";
       for (const w of win) { const cx = (w[0][0] + w[2][0]) / 2, cy = (w[0][1] + w[2][1]) / 2; q.fillRect(Math.round(cx) - 1, Math.round(cy) - 1, 2, 2); }
-      b.glow = { c, wx: x0, wy: y0 };
-      void lit;
-      return b.glow;
+      const gl = { c, wx: x0, wy: y0 };
+      b.glows.set(pct, gl);
+      return gl;
     }
 
     function blit(img, sx, sy, sw, sh, wx, wy, v) {
@@ -555,7 +820,7 @@
       g.imageSmoothingEnabled = S < 1;
       const night = scene.nightAlpha(scene.minute);
       const ms = scene.movers;
-      const xr = xrayTarget();
+      const ghost = scene.ghost = ghosts();
       let i = 0, j = 0, n = 0;
       const pad = 2;
       const dyn = [];
@@ -565,8 +830,7 @@
         const s = i < statics.length ? statics[i] : null, m = j < merged.length ? merged[j] : null;
         const it = m && (!s || m.depth < s.depth) ? (j++, m) : (i++, s);
         if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx + it.sw < v.x0 - pad || it.wy + it.sh < v.y0 - pad) continue;
-        let alpha = 1;
-        if (xr && it.kind === "b" && it.depth > xr.depth && it.wx < xr.x1 && it.wx + it.sw > xr.x0 && it.wy < xr.y1 && it.wy + it.sh > xr.y0 && it.rec.p.id !== xr.place) alpha = 0.35;
+        const alpha = ghost && it.rec && ghost.has(it.rec) ? 0.35 : 1;
         if (alpha !== 1) g.globalAlpha = alpha;
         blit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v);
         if (alpha !== 1) g.globalAlpha = 1;
@@ -580,7 +844,7 @@
         g.fillStyle = `rgba(14,20,58,${(0.58 * night).toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height);
         const dusk = 0.1 * (1 - Math.abs(2 * night - 1));
         if (dusk > 0.005) { g.fillStyle = `rgba(255,140,60,${dusk.toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height); }
-        emissive(v, night, now);
+        emissive(v, night, now, ghost);
       }
       const wet = scene.weather === "rain" || scene.weather === "snow" || scene.weather === "storm";
       if (wet) weather(now, scene.season === "winter" || scene.weather === "snow");
@@ -603,18 +867,23 @@
       if (ov && (ov.colors || ov.values)) {
         const cond = ov.name === "condition";
         const col = val => cond ? ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"][Math.max(0, Math.min(4, Math.round(val)))] : `hsl(${Math.round(10 + 110 * Math.max(0, Math.min(1, val)))} 70% 50%)`;
+        // one path per place, filled once, so neighbouring diamonds leave no seams or darker edges
         g.globalAlpha = 0.5;
+        const add = pts => pts.forEach(([a, b], k) => k ? g.lineTo(a, b) : g.moveTo(a, b));
         for (const p of places) {
           const c = ov.colors && ov.colors[p.id] != null ? ov.colors[p.id] : ov.values && ov.values[p.id] != null ? col(ov.values[p.id]) : null;
           if (!c) continue;
           g.fillStyle = c;
+          g.beginPath();
           const i = placeById.get(p.id), lot = isHouseLike(p);
           for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
             if (x < 0 || y < 0 || x >= W || y >= H) continue;
             const k = y * W + x;
             const on = placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && tiles[y][x] !== "#" && tiles[y][x] !== "~"));
-            if (on) { path(diamond(x, y)); g.fill(); }
+            if (on) { add(diamond(x, y)); g.closePath(); }
           }
+          if (lot) for (const [x, y] of lotTiles[i]) if (dist(p, x, y) > 1) { add(diamond(x, y)); g.closePath(); }
+          g.fill();
         }
         g.globalAlpha = 1;
       }
@@ -646,23 +915,6 @@
       scene.pings = keep;
     }
 
-    // The selected character or highlighted place, for x-ray.
-    function xrayTarget() {
-      if (scene.selected && scene.moverById) {
-        const m = scene.moverById(scene.selected);
-        if (m && m.item) return { depth: m.item.depth, x0: m.item.wx - 8, y0: m.item.wy - 8, x1: m.item.wx + m.item.sw + 8, y1: m.item.wy + m.item.sh + 8, place: null };
-      }
-      const hp = scene.highlight && scene.highlight.places && scene.highlight.places[0];
-      if (hp != null && placeById.has(hp)) {
-        const rec = buildings.find(r => r.p.id === hp);
-        if (rec) {
-          const xs = rec.hull.map(q => q[0]), ys = rec.hull.map(q => q[1]);
-          return { depth: rec.depth, x0: Math.min(...xs) - 8, y0: Math.min(...ys) - 8, x1: Math.max(...xs) + 8, y1: Math.max(...ys) + 8, place: hp };
-        }
-      }
-      return null;
-    }
-
     function smoke(v, now) {
       for (const rec of smokeOf()) {
         const [sx, sy] = rec.b.smoke;
@@ -678,14 +930,19 @@
       }
     }
 
-    function emissive(v, night, now) {
-      const S = v.S, lit = litPlaces();
+    function emissive(v, night, now, ghost) {
+      const S = v.S, lit = litPlaces(), base = Math.min(1, night * 0.95);
       g.globalCompositeOperation = "lighter";
-      g.globalAlpha = Math.min(1, night * 0.95);
+      g.globalAlpha = base;
+      // a see-through building's glows fade with it
+      const fade = rec => { if (ghost && ghost.has(rec)) g.globalAlpha = base * 0.35; };
       for (const rec of buildings) {
         if (!lit.has(rec.p.id)) continue;
-        const gl = glowOf(rec);
-        if (gl && !(gl.wx > v.x1 || gl.wy > v.y1 || gl.wx + gl.c.width < v.x0 || gl.wy + gl.c.height < v.y0)) blit(gl.c, 0, 0, gl.c.width, gl.c.height, gl.wx, gl.wy, v);
+        const gl = glowOf(rec, lit.get(rec.p.id));
+        if (!gl || gl.wx > v.x1 || gl.wy > v.y1 || gl.wx + gl.c.width < v.x0 || gl.wy + gl.c.height < v.y0) continue;
+        fade(rec);
+        blit(gl.c, 0, 0, gl.c.width, gl.c.height, gl.wx, gl.wy, v);
+        g.globalAlpha = base;
       }
       const occ = occlusionOf();
       if (scene.quality !== "low") {
@@ -698,7 +955,9 @@
         });
         for (const rec of buildings) {
           const b = rec.b, vis = occ.porch.get(rec) || [], imgs = occ.porchImg.get(rec) || [];
+          fade(rec);
           [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) blit(img, 0, 0, img.width, img.height, q[0] - 22, q[1] - 12, v); });
+          g.globalAlpha = base;
         }
         for (const m of scene.movers) if (m.lights != null && m.moving) { const spr = art.headlights(m.lights); blit(spr.c, 0, 0, spr.c.width, spr.c.height, m.cx - spr.ax, m.cy - spr.ay, v); }
       }
@@ -750,22 +1009,41 @@
     }
 
     // --- labels and markers in screen space ---------------------------------------------------------------
+    // Name plates, badges and bubbles never go under the page's controls: scene.reserved holds their CSS
+    // rects (the view refreshes it on resize and toggles), and a plate that would land there moves or drops.
     function labels(v, now) {
       const z = scene.cam.zoom, k = scene.dpr, S = v.S;
       g.font = `600 ${11 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`; g.textAlign = "center"; g.textBaseline = "middle";
-      const placed = [];
-      const plate = (text, x, y, fg, bg, force) => {
-        const w = g.measureText(text).width + 12 * k, h = 17 * k;
-        const r = [x - w / 2, y - h / 2, x + w / 2, y + h / 2];
-        if (r[2] < 0 || r[0] > cv.width || r[3] < 0 || r[1] > cv.height) return false;
-        if (!force && placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) return false;
+      const blocked = (scene.reserved || []).map(r => [r[0] * k - 2 * k, r[1] * k - 2 * k, r[2] * k + 2 * k, r[3] * k + 2 * k]);
+      if (scene.inset && scene.inset.top) blocked.push([0, 0, cv.width, scene.inset.top * k]);
+      const placed = blocked.slice();
+      const hit = r => placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1]);
+      const offScreen = r => r[2] < 0 || r[0] > cv.width || r[3] < 0 || r[1] > cv.height;
+      // padR leaves room at the right end for an occupancy badge, which sits on the plate's top-right corner
+      const plate = (text, x, y, fg, bg, force, padR) => {
+        padR = padR || 0;
+        const w = g.measureText(text).width + 12 * k + padR, h = 17 * k;
+        let r = [x - w / 2, y - h / 2, x + w / 2, y + h / 2];
+        if (offScreen(r)) return null;
+        // a plate cut by the screen edge slides inside, as long as it still sits over its anchor
+        const m = (padR ? 10 : 4) * k, dx = r[0] < m ? m - r[0] : r[2] > cv.width - m ? cv.width - m - r[2] : 0;
+        if (dx) { if (Math.abs(dx) > w / 2 - 6 * k) return null; r = [r[0] + dx, r[1], r[2] + dx, r[3]]; }
+        if (!force && hit(r)) { // try just above, then just below, before giving up
+          const up = [r[0], r[1] - h - 2 * k, r[2], r[3] - h - 2 * k], dn = [r[0], r[1] + h + 2 * k, r[2], r[3] + h + 2 * k];
+          r = !hit(up) && !offScreen(up) ? up : !hit(dn) && !offScreen(dn) ? dn : null;
+          if (!r) return null;
+        }
         placed.push(r);
+        if (padR) placed.push([r[2] - 12 * k, r[1] - 9 * k, r[2] + 6 * k, r[1] + 9 * k]);
         g.fillStyle = bg; roundRect(r[0], r[1], w, h, 4 * k); g.fill();
-        g.fillStyle = fg; g.fillText(text, x, y + 0.5 * k);
-        return true;
+        g.fillStyle = fg; g.fillText(text, (r[0] + r[2] - padR) / 2, (r[1] + r[3]) / 2 + 0.5 * k);
+        return r;
       };
       const toScr = (wx, wy) => [wx * S + v.ox, wy * S + v.oy];
       const pulse = Math.floor(now / 400) % 2 === 0;
+      const plateOf = new Map();
+      const counts = (scene.state && scene.occupancy) || {};
+      const padOf = rec => z >= 0.5 && counts[rec.p.id] ? 9 * k : 0;
       // selected person: a bobbing arrow and their name
       const selM = scene.selected && scene.moverById ? scene.moverById(scene.selected) : null;
       if (selM && selM.item) {
@@ -777,7 +1055,7 @@
         const rec = selM.insideRec;
         outlineHull(rec, pulse ? "#ffe27a" : "#f6a945", v);
         const [x, y] = toScr(rec.label[0], rec.label[1]);
-        plate(`${(selM.name || "").split(" ")[0]} · inside`, x, y - 4 * k, "#2a1d05", "#ffe27a", true);
+        plateOf.set(rec, plate(`${(selM.name || "").split(" ")[0]} · inside`, x, y - 4 * k, "#2a1d05", "#ffe27a", true, padOf(rec)));
       }
       // hovered person
       if (scene.hover && scene.hover !== scene.selected && scene.moverById) {
@@ -788,34 +1066,29 @@
       const hl = scene.highlight;
       if (hl && hl.places) for (const id of hl.places) {
         const rec = buildings.find(r => r.p.id === id);
-        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v); const [x, y] = toScr(rec.label[0], rec.label[1]); plate(rec.p.name, x, y, "#08202e", "#9fdcff", true); }
+        if (rec) { outlineHull(rec, pulse ? "#7fd4ff" : "#4ab0f0", v); const [x, y] = toScr(rec.label[0], rec.label[1]); if (!plateOf.get(rec)) plateOf.set(rec, plate(rec.p.name, x, y, "#08202e", "#9fdcff", true, padOf(rec))); }
       }
       if (hl && hl.agents && scene.moverById) for (const id of hl.agents) {
         const m = scene.moverById(id);
         if (m && m.item) { const [x, y] = toScr(m.item.wx + m.item.sw / 2, m.item.wy); plate(m.name || id, x, y - 12 * k, "#08202e", "#9fdcff", true); }
       }
-      // speech bubbles
+      // speech bubbles, only over people the camera can see (or the selected one, who is drawn see-through)
       if (z >= 0.5) for (const m of scene.movers) {
         if (!m.bubble) continue;
+        if (m.id !== scene.selected && hiddenItem(m)) continue;
         const [x, y] = toScr(m.wx + m.sw / 2, m.wy);
-        bubble(x + 6 * k, y - 4 * k, m.bubble[0], m.bubble[1], Math.max(1, Math.round(z)) * k);
-      }
-      // occupancy badges
-      if (z >= 0.5 && scene.state) {
-        const counts = scene.occupancy || {};
-        for (const rec of buildings) {
-          const c = counts[rec.p.id];
-          if (!c) continue;
-          const [x, y] = toScr(rec.label[0], rec.label[1]);
-          badge(String(c), x + 26 * k, y - 10 * k, k);
-        }
+        const s2 = Math.max(1, Math.round(z)) * k, bw = (CV.textWidth(m.bubble[0]) + 6) * s2, bh = 12 * s2;
+        const r = [x + 6 * k - s2, y - 4 * k - bh, x + 6 * k + bw, y - 4 * k];
+        if (blocked.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
+        bubble(x + 6 * k, y - 4 * k, m.bubble[0], m.bubble[1], s2);
       }
       // building names (zoomed in) or district names (zoomed out)
       if (z >= 0.5) {
         for (const rec of buildings) {
           if (rec.p.kind === "home" && (rec.p.style !== "apartments" || z < 1)) continue;
+          if (plateOf.has(rec)) continue;
           const [x, y] = toScr(rec.label[0], rec.label[1]);
-          plate(rec.p.name, x, y, "#ffffff", "rgba(20,24,34,.78)");
+          plateOf.set(rec, plate(rec.p.name, x, y, "#ffffff", "rgba(20,24,34,.78)", false, padOf(rec)));
         }
         if (z >= 0.75) for (const p of parks) { const c = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2, 6); const [x, y] = toScr(c[0], c[1]); plate(p.name, x, y, "#eaffdf", "rgba(28,60,24,.8)"); }
       } else {
@@ -826,11 +1099,30 @@
           for (const r of d.rects) { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); }
           const c = proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2, 40);
           const [x, y] = toScr(c[0], c[1]);
-          const text = d.name.toUpperCase().split("").join(" ");
-          g.fillStyle = "rgba(10,14,22,0.55)";
+          const text = d.name.toUpperCase().split("").join(" ");
           const w = g.measureText(text).width + 16 * k;
-          roundRect(x - w / 2, y - 11 * k, w, 22 * k, 5 * k); g.fill();
+          const r = [x - w / 2, y - 11 * k, x + w / 2, y + 11 * k];
+          if (hit(r)) continue;
+          placed.push(r);
+          g.fillStyle = "rgba(10,14,22,0.55)";
+          roundRect(r[0], r[1], w, 22 * k, 5 * k); g.fill();
           g.fillStyle = "rgba(255,255,255,0.88)"; g.fillText(text, x, y + k);
+        }
+        g.font = `600 ${11 * k}px system-ui, -apple-system, "Segoe UI", sans-serif`;
+      }
+      // occupancy badges: pinned to the top-right corner of the name plate, or over the roof of a home
+      if (z >= 0.5 && scene.state) {
+        for (const rec of buildings) {
+          const c = counts[rec.p.id];
+          if (!c) continue;
+          const r = plateOf.get(rec);
+          if (r) { badge(String(c), r[2] - 3 * k, r[1], k); continue; }
+          if (plateOf.has(rec)) continue; // its plate was dropped: no badge floating on its own
+          const [x, y] = toScr(rec.label[0], rec.label[1]);
+          const bx = x + 14 * k, by = y - 4 * k, br = [bx - 10 * k, by - 9 * k, bx + 10 * k, by + 9 * k];
+          if (hit(br)) continue;
+          placed.push(br);
+          badge(String(c), bx, by, k);
         }
       }
     }
@@ -905,10 +1197,14 @@
         const sb = b ? JSON.stringify([b.stage | 0, b.works, b.moving, b.listing, b.anyListed, (b.units || []).map(u => [u.vacant, u.listing])]) : "";
         if (sa !== sb) {
           changed = true;
-          if (((a && a.stage) | 0) !== ((b && b.stage) | 0)) invalidateRect(p.x - 1, p.y - 1, p.x + p.w + 1, p.y + p.h + 1);
+          if (((a && a.stage) | 0) !== ((b && b.stage) | 0)) {
+            let x0 = p.x - 1, y0 = p.y - 1, x1 = p.x + p.w + 1, y1 = p.y + p.h + 1;
+            for (const [x, y] of lotTiles[placeById.get(p.id)]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 1); y1 = Math.max(y1, y + 1); }
+            invalidateRect(x0, y0, x1, y1);
+          }
         }
       }
-      if (changed) dirty = true;
+      if (changed) { dirty = true; scene.looksVersion = (scene.looksVersion | 0) + 1; }
       return changed;
     };
     scene.setSeason = s => {

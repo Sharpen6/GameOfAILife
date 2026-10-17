@@ -20,11 +20,20 @@
     const size = () => { const r = cv.getBoundingClientRect(); return [r.width || cv.width / scene.dpr, r.height || cv.height / scene.dpr]; };
     const changed = () => { if (hooks.change) hooks.change(); };
 
+    // Bounds: when the whole city fits on screen the camera stays on its centre (nothing to pan to);
+    // closer in, the centre stays over the map, inside [0, w] x [0, h] tiles.
     function clamp() {
-      const p = scene.proj, [tx, ty] = p.toTile(cam.x, cam.y);
-      const cx = Math.max(-2, Math.min(p.w + 2, tx)), cy = Math.max(-2, Math.min(p.h + 2, ty));
+      const p = scene.proj;
+      if (cam.zoom <= cam.fitZoom() * 1.0001) {
+        const B = scene.bounds(), cx = (B.x0 + B.x1) / 2, cy = (B.y0 + B.y1) / 2;
+        if (cam.x !== cx || cam.y !== cy) { cam.x = cx; cam.y = cy; cam.vx = cam.vy = 0; }
+        return;
+      }
+      const [tx, ty] = p.toTile(cam.x, cam.y);
+      const cx = Math.max(0, Math.min(p.w, tx)), cy = Math.max(0, Math.min(p.h, ty));
       if (cx !== tx || cy !== ty) { [cam.x, cam.y] = p.toWorld(cx, cy); cam.vx = cam.vy = 0; }
     }
+    cam.clamp = clamp;
     // The zoom at which the whole city fits in the area the UI leaves free.
     cam.fitZoom = function () {
       const B = scene.bounds(), [w, h] = size(), ins = scene.inset;

@@ -239,50 +239,129 @@
     return { state, plans, path, town };
   };
 
-  // Specimen street (?specimen=1): five houses of one type and one palette side by side, facing the camera,
-  // at neglect stages 0 to 4, with their lots, a street, lamps and a little traffic. The ids were picked so
-  // that every palette choice (paint, roof, trim, shutters, door, curtains) hashes the same.
+  // Specimen street (?specimen=1, =big, =flats): five homes of one type and one palette side by side, facing
+  // the camera, at neglect stages 0 to 4, with their lots, a street, lamps and a little traffic. The ids were
+  // picked so that every palette choice (paint, roof, trim, shutters, door, curtains) hashes the same.
   window.CityViewFake.specimen = function (opt) {
     opt = opt || {};
-    const ids = ["row_298", "row_2920", "row_20630", "row_23576", "row_33173"];
-    const W = 26, H = 20, Y = 9, rows = [];
+    const style = opt.style || "house";
+    if (style === "street") return streetSpecimen(opt);
+    const T = {
+      house: { ids: ["row_298", "row_2920", "row_20630", "row_23576", "row_33173"], w: 3, h: 3, step: 4, name: k => `${2 + 4 * k} Specimen Row` },
+      big_house: { ids: ["villa_24", "villa_57", "villa_59", "villa_72", "villa_125"], w: 5, h: 4, step: 6, name: k => `${4 + 12 * k} Specimen Row` },
+      apartments: { ids: ["block_2", "block_5", "block_9", "block_11", "block_12"], w: 5, h: 3, step: 7, name: k => ["Ash Court", "Beech Court", "Fir Court", "Larch Court", "Rowan Court"][k] },
+    }[style];
+    const ids = T.ids, flats = style === "apartments";
+    const W = 2 + T.step * 5 + 2, Y = 9, R = Y + T.h + 1, H = R + 11, rows = [];
     for (let y = 0; y < H; y++) {
       let r = "";
-      for (let x = 0; x < W; x++) r += y === Y + 4 ? "#" : (y <= Y - 3 || y >= Y + 6) && hash(`s${x},${y}`) % 4 === 0 ? "T" : ".";
+      for (let x = 0; x < W; x++) r += y === R ? "#" : (y <= Y - 3 || y >= R + 2) && hash(`s${x},${y}`) % 4 === 0 ? "T" : ".";
       rows.push(r.split(""));
     }
     const places = ids.map((id, k) => {
-      const x = 2 + 4 * k;
-      for (let y = Y; y < Y + 3; y++) for (let i = 0; i < 3; i++) rows[y][x + i] = y === Y + 2 && i === 1 ? "D" : "B";
-      rows[Y + 3][x + 1] = "e";
-      return { id, name: `${2 + 4 * k} Specimen Row`, kind: "home", x, y: Y, w: 3, h: 3, entry: [x + 1, Y + 3], face: "s", hours: null,
-        district: "maple_grove", style: "house", floors: 1, tier: "house", units: 1 };
+      const x = 2 + T.step * k, mid = x + (T.w >> 1);
+      for (let y = Y; y < Y + T.h; y++) for (let i = 0; i < T.w; i++) rows[y][x + i] = y === Y + T.h - 1 && x + i === mid ? "D" : "B";
+      rows[Y + T.h][mid] = "e";
+      return { id, name: T.name(k), kind: "home", x, y: Y, w: T.w, h: T.h, entry: [mid, Y + T.h], face: "s", hours: null,
+        district: "maple_grove", style, floors: { house: 1, big_house: 2, apartments: 3 }[style], tier: { house: "house", big_house: "big_house", apartments: "flat" }[style], units: flats ? 6 : 1 };
     });
-    const town = { w: W, h: H, tiles: rows.map(r => r.join("")), places,
-      homes: ids.map(id => ({ id, place: id, unit: null, name: places.find(p => p.id === id).name, tier: "house", bedrooms: 3, base_value: 16000, rent: 400 })),
-      districts: [{ id: "maple_grove", name: "Maple Grove", rects: [[0, 0, W, H]] }], streets: [{ name: "Specimen Row", axis: "row", at: Y + 4 }],
-      road_rows: [Y + 4], road_cols: [], junctions: [], stops: [], timetable: { bus: { lines: [] }, flights: [] } };
+    const UNITS = ["1A", "1B", "2A", "2B", "3A", "3B"];
+    const homesList = [];
+    for (const p of places) {
+      if (flats) for (const u of UNITS) homesList.push({ id: p.id + "_" + u.toLowerCase(), place: p.id, unit: u, name: `${p.name} ${u}`, tier: "flat", bedrooms: 2, base_value: 8800, rent: 220 });
+      else homesList.push({ id: p.id, place: p.id, unit: null, name: p.name, tier: style, bedrooms: 3, base_value: 16000, rent: 400 });
+    }
+    const town = { w: W, h: H, tiles: rows.map(r => r.join("")), places, homes: homesList,
+      districts: [{ id: "maple_grove", name: "Maple Grove", rects: [[0, 0, W, H]] }], streets: [{ name: "Specimen Row", axis: "row", at: R }],
+      road_rows: [R], road_cols: [], junctions: [], stops: [], timetable: { bus: { lines: [] }, flights: [] } };
     const cond = [92, 70, 50, 30, 10];
     function state(tick) {
       const m = ((tick % 1440) + 1440) % 1440;
       const lots = {}, homes = {};
-      ids.forEach((id, k) => {
-        lots[id] = { condition: cond[k], works: false, moving: false };
-        homes[id] = { hh: k < 3 ? "family" + k : null, owner: k === 4 ? "market" : "landlord", listing: k === 4 ? "for_sale" : k === 3 ? "for_rent" : null, price: null, value: 16000, emergency: null };
+      ids.forEach((id, k) => { lots[id] = { condition: cond[k], works: false, moving: false }; });
+      homesList.forEach(h => {
+        const k = ids.indexOf(h.place), u = h.unit ? UNITS.indexOf(h.unit) : 0;
+        const vacant = flats ? (k === 4 ? u !== 2 : k === 3 ? u % 3 === 1 : k === 2 && u === 5) : k === 4;
+        const listing = flats ? (vacant ? "for_rent" : null) : k === 4 ? "for_sale" : k === 3 ? "for_rent" : null;
+        homes[h.id] = { hh: vacant ? null : "family" + k + u, owner: k === 4 ? "market" : "landlord", listing, price: null, value: h.base_value, emergency: null };
       });
       const walk = (id, name, age, x, y, extra) => Object.assign({ id, name, x, y, inside: null, state: "travelling", activity: "errand", vehicle: "walk",
-        mood: 60, luck: 50, controller: null, alive: true, age, home: ids[0], car: false, riding: null }, extra || {});
+        mood: 60, luck: 50, controller: null, alive: true, age, home: homesList[0].id, car: false, riding: null }, extra || {});
+      const sleep = m < 390 || m > 1350 ? "sleep" : "relax_home";
       const agents = [
-        walk("pat", "Pat Row", 34, (5 + tick) % W, Y + 4),
-        walk("kim", "Kim Row", 9, (18 - tick % W + W) % W, Y + 4),
-        walk("lou", "Lou Row", 71, 7, Y + 3, { state: "idle", activity: "chat" }),
-        walk("sam", "Sam Row", 40, 7, Y + 3, { state: "idle", activity: "chat" }),
-        walk("dee", "Dee Row", 45, (2 + 3 * tick) % W, Y + 4, { vehicle: "car", car: true, home: ids[1] }),
-        walk("ray", "Ray Row", 52, 3, Y + 3, { inside: ids[0], state: "busy", activity: "relax_home", car: true }),
+        walk("pat", "Pat Row", 34, (5 + tick) % W, R),
+        walk("kim", "Kim Row", 9, (18 - tick % W + W) % W, R),
+        walk("lou", "Lou Row", 71, places[1].entry[0], R - 1, { state: "idle", activity: "chat" }),
+        walk("sam", "Sam Row", 40, places[1].entry[0], R - 1, { state: "idle", activity: "chat" }),
+        walk("dee", "Dee Row", 45, (2 + 3 * tick) % W, R, { vehicle: "car", car: true, home: homesList[flats ? 6 : 1].id }),
+        walk("ray", "Ray Row", 52, places[0].entry[0], R - 1, { inside: ids[0], state: "busy", activity: sleep, car: true }),
       ];
+      // someone at home in every lived-in home, so the night shows which ones are occupied
+      ids.forEach((id, k) => { if (k > 0 && (flats || k < 4)) agents.push(walk("in" + k, "Resident " + k, 30 + k, places[k].entry[0], R - 1, { inside: id, state: "busy", activity: sleep, home: homesList.find(h => h.place === id).id })); });
       return { tick, time: "Specimen Row", minute: m, day: 0, season: opt.season || "summer", weather: opt.weather || "clear",
         lights: { ns: "green", ew: "red" }, plane: null, buses: [], agents, lots, homes };
     }
     return { town, state };
   };
+
+  // A mixed residential street (?specimen=street): a big house, houses and a block of flats side by side on
+  // one road, mostly kept, with neighbours out walking, two chatting at a gate and a car going by.
+  function streetSpecimen(opt) {
+    const L = [
+      { id: "row_298", style: "house", w: 3, h: 3, cond: 88, name: "2 Linden Road" },
+      { id: "villa_24", style: "big_house", w: 5, h: 4, cond: 90, name: "6 Linden Road" },
+      { id: "block_5", style: "apartments", w: 5, h: 3, cond: 66, name: "Linden Court" },
+      { id: "row_511", style: "house", w: 3, h: 3, cond: 72, name: "14 Linden Road" },
+      { id: "row_740", style: "house", w: 3, h: 3, cond: 84, name: "18 Linden Road" },
+      { id: "villa_59", style: "big_house", w: 5, h: 4, cond: 58, name: "22 Linden Road" },
+    ];
+    const R = 14, H = R + 11;
+    let x = 3;
+    for (const p of L) { p.x = x; x += p.w + 2; }
+    const W = x + 2, rows = [];
+    for (let y = 0; y < H; y++) {
+      let r = "";
+      for (let i = 0; i < W; i++) r += y === R ? "#" : (y <= 5 || y >= R + 2) && hash(`t${i},${y}`) % 4 === 0 ? "T" : ".";
+      rows.push(r.split(""));
+    }
+    const places = L.map(p => {
+      const y = R - 1 - p.h, mid = p.x + (p.w >> 1);
+      for (let j = y; j < y + p.h; j++) for (let i = 0; i < p.w; i++) rows[j][p.x + i] = j === y + p.h - 1 && p.x + i === mid ? "D" : "B";
+      rows[y + p.h][mid] = "e";
+      const flats = p.style === "apartments";
+      return { id: p.id, name: p.name, kind: "home", x: p.x, y, w: p.w, h: p.h, entry: [mid, y + p.h], face: "s", hours: null, district: "maple_grove",
+        style: p.style, floors: { house: 1, big_house: 2, apartments: 3 }[p.style], tier: flats ? "flat" : p.style, units: flats ? 6 : 1 };
+    });
+    const UNITS = ["1A", "1B", "2A", "2B", "3A", "3B"], homesList = [];
+    for (const p of places) {
+      if (p.style === "apartments") for (const u of UNITS) homesList.push({ id: p.id + "_" + u.toLowerCase(), place: p.id, unit: u, name: `${p.name} ${u}`, tier: "flat", bedrooms: 2, base_value: 8800, rent: 220 });
+      else homesList.push({ id: p.id, place: p.id, unit: null, name: p.name, tier: p.style, bedrooms: 3, base_value: 16000, rent: 400 });
+    }
+    const town = { w: W, h: H, tiles: rows.map(r => r.join("")), places, homes: homesList,
+      districts: [{ id: "maple_grove", name: "Maple Grove", rects: [[0, 0, W, H]] }], streets: [{ name: "Linden Road", axis: "row", at: R }],
+      road_rows: [R], road_cols: [], junctions: [], stops: [], timetable: { bus: { lines: [] }, flights: [] } };
+    function state(tick) {
+      const m = ((tick % 1440) + 1440) % 1440, lots = {}, homes = {};
+      L.forEach(p => { lots[p.id] = { condition: p.cond, works: false, moving: false }; });
+      homesList.forEach((h, i) => {
+        const vacant = h.unit === "2B";
+        homes[h.id] = { hh: vacant ? null : "hh" + i, owner: "landlord", listing: vacant ? "for_rent" : null, price: null, value: h.base_value, emergency: null };
+      });
+      const walk = (id, name, age, ax, ay, extra) => Object.assign({ id, name, x: ax, y: ay, inside: null, state: "travelling", activity: "errand", vehicle: "walk",
+        mood: 60, luck: 50, controller: null, alive: true, age, home: homesList[0].id, car: false, riding: null }, extra || {});
+      const sleep = m < 390 || m > 1350 ? "sleep" : "relax_home";
+      const agents = [
+        walk("pat", "Pat Linden", 34, 14 + Math.floor(tick / 4) % 8, R - 1),
+        walk("kim", "Kim Linden", 9, 7 - Math.floor(tick / 5) % 5, R - 1),
+        walk("jo", "Jo Linden", 28, 26 - Math.floor(tick / 4) % 6, R - 1),
+        walk("lou", "Lou Linden", 71, places[1].entry[0], R - 1, { state: "idle", activity: "chat" }),
+        walk("sam", "Sam Linden", 40, places[1].entry[0] + 1, R - 1, { state: "idle", activity: "chat" }),
+        walk("dee", "Dee Linden", 45, (30 + 3 * tick) % W, R, { vehicle: "car", car: true, home: homesList[1].id }),
+      ];
+      places.forEach((p, k) => agents.push(walk("in" + k, "Resident " + k, 30 + k, p.entry[0], R - 1, { inside: p.id, state: "busy", activity: sleep, home: homesList.find(h => h.place === p.id).id })));
+      return { tick, time: "Linden Road", minute: m, day: 0, season: opt.season || "summer", weather: opt.weather || "clear",
+        lights: { ns: "green", ew: "red" }, plane: null, buses: [], agents, lots, homes };
+    }
+    return { town, state };
+  }
 })();

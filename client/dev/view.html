@@ -36,6 +36,10 @@
     #hud h1, #hud .stats, #hud .wide { display: none; }
     #hud .time { min-width: 0; }
   }
+  @media (max-height: 500px) { /* landscape phones: one HUD row */
+    #hud { gap: 4px 8px; padding: 4px 10px; min-height: 38px; }
+    #hud .stats, #hud .wide { display: none; }
+  }
   body.nohud #hud { display: none; }
 </style>
 </head>
@@ -62,7 +66,7 @@
     <span class="stats" id="stats"></span>
   </div>
   <div id="tooltip"></div>
-  <div id="info"></div>
+  <div id="info" data-cv-avoid></div>
 </div>
 <script src="../view/proj.js"></script>
 <script src="../view/art.js"></script>
@@ -79,13 +83,16 @@
 "use strict";
 (function () {
   // URL: zoom, at=x,y (tile), fit=1, minute, day, weather, season, flat=1, speed, select=id, follow=0, freeze=1,
-  // conditions=plan, overlay=condition, hud=0, persist=0, dyn=0, minimap=0
+  // conditions=plan, overlay=condition, hud=0, persist=0, dyn=0, minimap=0,
+  // specimen=1 (houses at stages 0-4), specimen=big (big houses), specimen=flats (blocks of flats),
+  // specimen=street (a mixed residential street)
   const q = new URLSearchParams(location.search);
   const $ = id => document.getElementById(id);
   if (q.get("hud") === "0") document.body.classList.add("nohud");
   let F = window.CityViewFixture;
   const opts = { season: q.get("season") || "summer", weather: q.get("weather") || "clear", conditions: q.get("conditions") || "showcase" };
-  const specimen = q.get("specimen") === "1";
+  const specimen = q.has("specimen") && q.get("specimen") !== "0";
+  opts.style = { big: "big_house", flats: "apartments", street: "street" }[q.get("specimen")] || "house";
   let fake = specimen ? CityViewFake.specimen(opts) : CityViewFake(opts);
   if (specimen) F = { town: fake.town, homes: {}, cast: [] };
   let speed = +(q.get("speed") || 1), frozen = q.get("freeze") === "1", paused = frozen;
@@ -124,6 +131,7 @@
       else { view.highlight(null); }
       info.style.display = hit ? "block" : "none";
       info.innerHTML = hit ? hit2text(hit) : "";
+      placeInfo();
     },
     onHover(hit, ev) {
       if (!hit || !ev || hit.kind === "tile") { tip.style.display = "none"; return; }
@@ -131,9 +139,17 @@
       const r = $("world").getBoundingClientRect();
       tip.style.left = Math.min(r.width - tip.offsetWidth - 8, ev.cssX + 14) + "px"; tip.style.top = Math.max(50, ev.cssY + 14) + "px";
     },
-    onSelect(id) { $("info").style.display = id ? "block" : "none"; },
+    onSelect(id) { $("info").style.display = id ? "block" : "none"; placeInfo(); },
   }, { persist: q.get("persist") !== "0" && !q.has("zoom") && !q.has("fit"), dynamicResolution: q.get("dyn") !== "0", minimap: q.get("minimap") !== "0", eager: q.has("eager") });
   const hudH = () => document.body.classList.contains("nohud") ? 0 : $("hud").offsetHeight;
+  // The info card sits bottom-left; when it would run into the minimap (narrow screens), it rises above it.
+  function placeInfo() {
+    const info = $("info"), mm = document.querySelector(".cv-minimap");
+    info.style.bottom = "12px";
+    if (!mm || info.style.display === "none") return;
+    const a = info.getBoundingClientRect(), b = mm.getBoundingClientRect(), r = $("world").getBoundingClientRect();
+    if (a.right > b.left - 6 && a.bottom > b.top - 6) info.style.bottom = (r.bottom - b.top + 8) + "px";
+  }
   view.setInset({ top: hudH() });
   if (q.get("flat") === "1") view.setMode({ projection: "flat" });
   else if (q.has("rot")) view.setMode({ projection: "iso", rot: +q.get("rot") });
@@ -141,7 +157,7 @@
   const send = () => { last = fake.state(tick); view.setState(last, speed); $("time").textContent = last.time; };
   send();
   if (q.has("zoom") || q.has("at")) {
-    const [x, y] = (q.get("at") || "40,25").split(",").map(Number);
+    const [x, y] = (q.get("at") || `${F.town.w / 2},${F.town.h / 2}`).split(",").map(Number);
     view.setCamera({ x, y, zoom: +(q.get("zoom") || 1) });
   }
   if (q.get("fit") === "1") view.setCamera({ fit: true });
@@ -154,8 +170,12 @@
     send();
   }, 50);
   setInterval(() => { const s = view.scene(); if (s) $("stats").textContent = `draw ${s.stats.draw.toFixed(1)} ms · ${s.stats.items} items · zoom ${view.camera().zoom.toFixed(2)}`; }, 500);
-  window.addEventListener("resize", () => view.setInset({ top: hudH() }));
-  if (window.ResizeObserver) new ResizeObserver(() => view.setInset({ top: hudH() })).observe($("hud"));
+  window.addEventListener("resize", () => { view.setInset({ top: hudH() }); placeInfo(); });
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => view.setInset({ top: hudH() })).observe($("hud"));
+    const mm = document.querySelector(".cv-minimap");
+    if (mm) new ResizeObserver(placeInfo).observe(mm);
+  }
 
   // HUD controls
   $("play").textContent = paused ? "Play" : "Pause";

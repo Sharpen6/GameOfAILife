@@ -60,6 +60,14 @@
 }
 .cv-minimap.cv-collapsed { padding: 4px; }
 .cv-minimap.cv-collapsed .cv-minimap-canvas { display: none; }
+.cv-minimap-legend {
+  display: none; align-self: stretch; align-items: center; justify-content: center; gap: 3px;
+  color: #cfd6e2; font: 600 10px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.cv-minimap.cv-homes .cv-minimap-legend { display: flex; }
+.cv-minimap.cv-collapsed .cv-minimap-legend { display: none; }
+.cv-minimap-legend-label { padding: 0 3px; }
+.cv-minimap-swatch { width: 11px; height: 8px; border-radius: 2px; }
 
 @media (max-width: 640px) {
   .cv-btn { width: 40px; height: 40px; }

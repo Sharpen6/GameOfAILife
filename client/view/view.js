@@ -30,7 +30,9 @@
     for (const b of [bIn, bOut, bFit, bView]) { b.type = "button"; ctl.appendChild(b); }
     const menu = el("div", "cv-menu");
     const mIso = el("button", "cv-menu-item", "Isometric"), mFlat = el("button", "cv-menu-item", "Top-down"), mRot = el("button", "cv-menu-item", "Rotate ↻"), mMini = el("button", "cv-menu-item", "Minimap");
-    for (const b of [mIso, mFlat, mRot, mMini]) { b.type = "button"; menu.appendChild(b); }
+    const mHomes = el("button", "cv-menu-item", "Homes");
+    mHomes.title = "Colour the homes on the minimap by condition (on by itself when zoomed out)";
+    for (const b of [mIso, mFlat, mRot, mMini, mHomes]) { b.type = "button"; menu.appendChild(b); }
     ctl.appendChild(menu);
     const chip = el("div", "cv-follow");
     const chipName = el("button", "cv-follow-name"), chipX = el("button", "cv-follow-x", "✕");
@@ -45,17 +47,25 @@
     mIso.addEventListener("click", () => { view.setMode({ projection: "iso" }); menu.classList.remove("cv-open"); });
     mFlat.addEventListener("click", () => { view.setMode({ projection: "flat" }); menu.classList.remove("cv-open"); });
     mRot.addEventListener("click", () => rotate(1));
-    mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); });
+    mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); refreshReserved(); });
+    mHomes.addEventListener("click", () => {
+      if (!mini) return;
+      mini.setHomes(!mini.homesOn());
+      if (mini.homesOn() && !mini.isOpen()) mini.setOpen(true);
+      prefs.homes = mini.homesPref(); syncMenu(); persist(true); refreshReserved();
+    });
     chipX.addEventListener("click", () => { if (cam) cam.follow = null; syncChip(); emitCamera(true); });
     chipName.addEventListener("click", () => { if (cam && selected) cam.follow = selected; syncChip(); emitCamera(true); });
     function syncMenu() {
       const proj = scene ? scene.proj.kind : prefs.projection;
       mIso.classList.toggle("cv-on", proj === "iso"); mFlat.classList.toggle("cv-on", proj === "flat");
       mRot.disabled = proj !== "iso"; mMini.classList.toggle("cv-on", !!(mini && mini.isOpen()));
+      mHomes.disabled = !mini; mHomes.classList.toggle("cv-on", !!(mini && mini.homesOn()));
     }
     function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : id; }
     function syncChip() {
       const on = !!(cam && selected);
+      if (chip.classList.contains("cv-show") !== on) reservedAt = 0;
       chip.classList.toggle("cv-show", on);
       if (!on) return;
       const first = String(nameOf(selected)).split(" ")[0];
@@ -68,6 +78,25 @@
       chip.style.top = (inset.top + 10) + "px";
       if (mini) { mini.el.style.right = (inset.right + 10) + "px"; mini.el.style.bottom = (inset.bottom + 10) + "px"; }
     }
+    // The screen rects (CSS px, canvas-relative) the map's labels keep clear of: the view's own controls
+    // and any page element marked data-cv-avoid (or matching opt.avoid). Refreshed a few times a second.
+    let reservedAt = 0;
+    function refreshReserved() {
+      reservedAt = performance.now();
+      if (!scene) return;
+      const cr = canvas.getBoundingClientRect(), rects = [];
+      const add = e => {
+        if (!e || !e.isConnected) return;
+        const r = e.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return;
+        rects.push([r.left - cr.left, r.top - cr.top, r.right - cr.left, r.bottom - cr.top]);
+      };
+      for (const b of ctl.children) add(b);
+      if (chip.classList.contains("cv-show")) add(chip);
+      if (mini) add(mini.el);
+      try { for (const e of document.querySelectorAll(opt.avoid || "[data-cv-avoid]")) add(e); } catch (e) { /* a bad selector */ }
+      scene.reserved = rects;
+    }
 
     // --- backing store --------------------------------------------------------------------------------
     function resize() {
@@ -79,8 +108,15 @@
       camDirty = true;
     }
     let ro = null;
-    if (window.ResizeObserver) { ro = new ResizeObserver(() => { resize(); if (!running && scene) frame(performance.now()); }); ro.observe(canvas); }
-    else window.addEventListener("resize", resize);
+    const onResize = () => {
+      resize();
+      if (mini && mini.resize()) { mini.draw(performance.now(), true); syncMenu(); }
+      if (cam) cam.clamp();
+      refreshReserved();
+      if (!running && scene) frame(performance.now());
+    };
+    if (window.ResizeObserver) { ro = new ResizeObserver(onResize); ro.observe(canvas); }
+    else window.addEventListener("resize", onResize);
     resize();
 
     // --- town, scene and camera --------------------------------------------------------------------------
@@ -136,7 +172,7 @@
       if (!force && now - lastSave < 600) return;
       lastSave = now;
       const t = scene.proj.toTile(cam.x, cam.y);
-      savePrefs({ projection: scene.proj.kind, rot: scene.proj.rot, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined });
+      savePrefs({ projection: scene.proj.kind, rot: scene.proj.rot, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined, homes: mini ? mini.homesPref() : undefined });
     }
     function rotate(dir) {
       if (!scene || scene.proj.kind !== "iso") return;
@@ -197,7 +233,7 @@
         rotate,
         change: () => { camDirty = true; },
       });
-      mini = opt.minimap === false ? null : CV.makeMinimap(host, scene, cam, { open: prefs.minimap, onToggle: () => { syncMenu(); persist(true); }, onFollowCancel: syncChip });
+      mini = opt.minimap === false ? null : CV.makeMinimap(host, scene, cam, { open: prefs.minimap, homes: prefs.homes, onToggle: () => { syncMenu(); persist(true); refreshReserved(); }, onFollowCancel: syncChip });
       placeControls();
       // initial view: the stored camera, else Downtown's centre (the map centre for older towns)
       const fit = cam.fitZoom();
@@ -212,7 +248,8 @@
         cam.zoom = opt.zoom || (fit > 1 ? Math.min(2, fit) : narrow ? 0.5 : 1);
       }
       if (selected) cam.follow = null;
-      syncMenu(); syncChip();
+      cam.clamp();
+      syncMenu(); syncChip(); refreshReserved();
       if (pendingState) { const s = pendingState; pendingState = null; view.setState(s, pendingSpeed); }
       if (highlightV) scene.highlight = highlightV;
       if (overlayV) scene.overlay = overlayV;
@@ -228,6 +265,7 @@
       cam.update(dt, followPos());
       if (!cam.follow && chip.classList.contains("cv-show") && !chip.classList.contains("cv-paused")) syncChip();
       scene.selected = selected;
+      if (now - reservedAt > 250) refreshReserved();
       scene.draw(now);
       if (mini) mini.draw(now);
       if (camDirty) { camDirty = false; emitCamera(false); persist(false); }
@@ -330,6 +368,7 @@
         if (c.zoom) cam.zoom = c.zoom;
         if (c.x != null && c.y != null) [cam.x, cam.y] = scene.proj.toWorld(c.x, c.y);
         if (c.fit) cam.fit(true);
+        cam.clamp();
         camDirty = true;
       },
       worldOfTile(x, y, z) { return scene ? scene.proj.toWorld(x, y, z) : null; },

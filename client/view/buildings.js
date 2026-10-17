@@ -16,7 +16,7 @@
   const VILLA_ROOF = ["#a9573a", "#4e5a6a", "#8c4a32", "#5a6a5a"];
   const CURTAIN = ["#d65a5a", "#e8c34a", "#6aa0d8", "#f2f2f2", "#8ac46a", "#c47ad8"];
   // Neglect: how far paint and roof fade toward grey, and how much darker, per stage 0..4.
-  const FADE = [0, 0.18, 0.4, 0.6, 0.8], DIM = [1, 0.97, 0.9, 0.82, 0.72];
+  const FADE = [0, 0.2, 0.45, 0.62, 0.8], DIM = [1, 0.96, 0.88, 0.8, 0.7];
   const GREY = "#9a968c";
 
   const STYLE = {
@@ -71,9 +71,14 @@
       if (o.shutters && !o.boarded && o.state < 4) {
         const sc = o.shutters, sw = Math.min(0.08, (u1 - u0) * 0.32);
         const drop = o.state === 3 ? 3 : 0;
-        poly(g, quad(F, u0 - fw - sw, u0 - fw, z0, z1), litFace ? sc : shade(sc, 0.8));
-        poly(g, quad(F, u0 - fw - sw, u0 - fw - sw + 0.012, z0, z1), shade(sc, 0.7));
-        if (!(o.state === 3 && o.idx % 2)) poly(g, [F.at(u1 + fw, z0 - drop), F.at(u1 + fw + sw, z0 - drop), F.at(u1 + fw + sw, z1 - drop), F.at(u1 + fw, z1)], litFace ? sc : shade(sc, 0.8));
+        const ghost = q2 => poly(g, q2, mix(o.wallCol || "#ffffff", "#ffffff", litFace ? 0.4 : 0.2)); // unfaded paint where a shutter hung
+        if (o.noShutter === "l") ghost(quad(F, u0 - fw - sw, u0 - fw, z0, z1));
+        else {
+          poly(g, quad(F, u0 - fw - sw, u0 - fw, z0, z1), litFace ? sc : shade(sc, 0.8));
+          poly(g, quad(F, u0 - fw - sw, u0 - fw - sw + 0.012, z0, z1), shade(sc, 0.7));
+        }
+        if (o.noShutter === "r") ghost(quad(F, u1 + fw, u1 + fw + sw, z0, z1));
+        else if (!(o.state === 3 && o.idx % 2)) poly(g, [F.at(u1 + fw, z0 - drop), F.at(u1 + fw + sw, z0 - drop), F.at(u1 + fw + sw, z1 - drop), F.at(u1 + fw, z1)], litFace ? sc : shade(sc, 0.8));
       }
       if (o.frame) poly(g, quad(F, u0 - fw, u1 + fw, z0 - 1, z1 + 1), litFace ? o.frame : shade(o.frame, 0.85));
       const q = quad(F, u0, u1, z0, z1);
@@ -179,10 +184,11 @@
         const u = 0.08 + R() * (F.len - 0.16), z1 = H - 2 - R() * 6;
         poly(g, quad(F, u, u + 0.025, z1 - 6 - R() * 10, z1), shade(col, 0.8));
       }
-      if (stage >= 2 && phase !== "over") for (let i = 0; i < stage * 2; i++) {
-        const u = 0.08 + R() * (F.len - 0.35), z = 3 + R() * (H - 10);
-        poly(g, quad(F, u, u + 0.1 + R() * 0.12, z, z + 2 + R() * 3), mix(col, "#ffffff", 0.3));
-        poly(g, quad(F, u, u + 0.1, z - 1, z), shade(col, 0.75));
+      if (stage >= 2 && phase !== "over") for (let i = 0; i < stage * 2 + (F.face === LIT ? 2 : 0); i++) { // peeling paint
+        const u = 0.08 + R() * (F.len - 0.35), z = 3 + R() * (H - 10), w = 0.12 + R() * 0.14, h = 3 + R() * 3;
+        poly(g, quad(F, u, u + w, z, z + h), mix(col, "#ffffff", F.face === LIT ? 0.6 : 0.35));
+        poly(g, quad(F, u, u + w, z - 1, z), shade(col, 0.7));
+        poly(g, quad(F, u + w, u + w + 0.02, z - 1, z + h), shade(col, 0.82));
       }
       if (phase === "under") return;
       const R2 = rng(seed + 991);
@@ -206,7 +212,7 @@
       const H = ctx.Hw, o = opts.o == null ? 0.13 : opts.o;
       const snow = CV.SEASON[ctx.season] && CV.SEASON[ctx.season].snow;
       const roofC = ctx.roofC;
-      const lit = snow ? "#f4f8fa" : roofC, dark = snow ? "#d2dce2" : shade(roofC, 0.76), back = shade(roofC, 0.58);
+      const lit = snow ? "#f4f8fa" : roofC, dark = snow ? "#d2dce2" : shade(roofC, 0.76), back = snow ? "#c4ced6" : shade(roofC, 0.58);
       const alongX = opts.alongX != null ? opts.alongX : (x1 - x0) >= (y1 - y0);
       const ym = (y0 + y1) / 2, xm = (x0 + x1) / 2;
       const r = kind === "hip" ? Math.min(x1 - x0, y1 - y0) / 2 : 0;
@@ -241,6 +247,7 @@
           poly(g, [P(p0[0], p0[1], cz - 3), P(p1[0], p1[1], cz - 3), P(p1[0], p1[1], cz + 3), P(p0[0], p0[1], cz + 3)], "#3a4250");
         }
         if (!f.gable && facing(f) && !snow) shingles(ctx, f, R, front ? lit : dark);
+        if (!f.gable && facing(f) && snow && ctx.isHome && ctx.stage >= 2) snowSlide(ctx, f, front ? roofC : shade(roofC, 0.76));
       }
       // ridge cap
       if (alongX) poly(g, [P(x0 - o + r, ym - 0.03, H + R + 1), P(x1 + o - r, ym - 0.03, H + R + 1), P(x1 + o - r, ym + 0.03, H + R - 1), P(x0 - o + r, ym + 0.03, H + R - 1)], snow ? "#ffffff" : shade(lit, 0.82));
@@ -253,7 +260,7 @@
       }
       // neglect on the main slope facing the camera (the lit one if it is a slope, else the other)
       const main = faces.find(f => !f.gable && f.n === LIT) || faces.find(f => !f.gable && facing(f) && f.pts.length === 4);
-      if (ctx.isHome && ctx.stage >= 2 && !snow && main) roofDamage(ctx, main, R, main.n === LIT ? lit : dark);
+      if (ctx.isHome && ctx.stage >= 2 && main) roofDamage(ctx, main, R, main.n === LIT ? roofC : shade(roofC, 0.76), snow);
       return { alongX, ym, xm, r, o, H, R };
     }
     // A point on a roof slope: s runs along the eave (0..1), t up to the ridge (0..1); dz lifts it in px.
@@ -270,6 +277,11 @@
       const rows = Math.max(4, Math.round(R / 5));
       const line = shade(col, 0.86), hi = shade(col, 1.07);
       const len = slopeLen(f), ds = 0.02 / Math.max(0.2, len), step = 0.24 / Math.max(0.2, len);
+      if (ctx.isHome && ctx.stage >= 1) { // sun-bleached, weathered courses
+        const Rw = rng(ctx.h0 + f.n.charCodeAt(0) * 5);
+        const pick = new Set([1 + Math.floor(Rw() * (rows - 2)), 1 + Math.floor(Rw() * (rows - 2)), ctx.stage >= 2 ? Math.floor(Rw() * rows) : -1]);
+        for (const k of pick) if (k >= 0) poly(g, [slopeAt(f, 0, k / rows), slopeAt(f, 1, k / rows), slopeAt(f, 1, (k + 1) / rows), slopeAt(f, 0, (k + 1) / rows)], mix(col, "#e6dccb", 0.3));
+      }
       for (let k = 1; k < rows; k++) {
         const t = k / rows, tp = (k - 1) / rows;
         poly(g, [slopeAt(f, 0, t), slopeAt(f, 1, t), slopeAt(f, 1, t, 1.1), slopeAt(f, 0, t, 1.1)], line);
@@ -279,23 +291,52 @@
       }
     }
     // Missing shingles from stage 2, dark holes from stage 3, big holes and a hanging gutter at 4.
-    function roofDamage(ctx, f, R, lit) {
+    function roofDamage(ctx, f, R, lit, snow) {
       const g = ctx.g, stage = ctx.stage;
       const Rn = rng(ctx.h0 + 17);
       const len = Math.max(0.5, slopeLen(f));
-      const n = stage === 2 ? 4 : stage === 3 ? 7 : 10;
+      const on = (s0, t, w, d) => [slopeAt(f, s0, t), slopeAt(f, s0 + w, t), slopeAt(f, s0 + w, t + d), slopeAt(f, s0, t + d)];
+      const n = stage === 2 ? 5 : stage === 3 ? 7 : 10;
       for (let i = 0; i < n; i++) {
         const t = 0.12 + Rn() * 0.62, s0 = 0.06 + Rn() * 0.8;
         const hole = stage >= 3 && i % 3 === 0, big = stage === 4 && i % 3 === 0;
-        const w = (big ? 0.5 : hole ? 0.3 : 0.18) / len, d = big ? 0.2 : 0.12;
-        const q = [slopeAt(f, s0, t), slopeAt(f, s0 + w, t), slopeAt(f, s0 + w, t + d), slopeAt(f, s0, t + d)];
-        poly(g, q, hole || big ? "#231d1a" : shade(lit, 0.68));
-        if (hole || big) poly(g, [slopeAt(f, s0 + w * 0.45, t), slopeAt(f, s0 + w * 0.55, t), slopeAt(f, s0 + w * 0.55, t + d), slopeAt(f, s0 + w * 0.45, t + d)], "#5a4030");
+        const w = (big ? 0.5 : hole ? 0.3 : 0.27) / len, d = big ? 0.2 : hole ? 0.13 : 0.17;
+        if (!hole && !big) { // shingles gone: dark felt with a pale batten showing
+          if (snow) continue;
+          poly(g, on(s0, t, w, d), "#3e322a");
+          poly(g, on(s0, t + d * 0.45, w, d * 0.16), "#b08a5a");
+          poly(g, on(s0, t + d - 0.02, w, 0.02), shade(lit, 1.12));
+          continue;
+        }
+        poly(g, on(s0, t, w, d), "#231d1a");
+        poly(g, on(s0 + w * 0.45, t, w * 0.1, d), "#5a4030");
+        if (snow) poly(g, on(s0, t + d, w, 0.03), "#ffffff");
       }
       if (stage >= 3) { // hanging gutter
         const a = 0.05, b = Math.min(0.45, 1.0 / len);
         poly(g, [slopeAt(f, a, 0, -1), slopeAt(f, b, 0, -1), slopeAt(f, b, 0, -2), slopeAt(f, a, 0, -2)], "#5a5048");
         poly(g, [slopeAt(f, b, 0, -1), slopeAt(f, b + 0.08, 0, -9), slopeAt(f, b + 0.09, 0, -8), slopeAt(f, b + 0.01, 0, 0)], "#5a5048");
+      }
+    }
+    // Snow on a neglected roof: it slides off in bare patches that grow with the stage (the roof colour shows
+    // with a course line or two); at stage 4 the cover is thin and patchy.
+    function snowSlide(ctx, f, bare) {
+      const g = ctx.g, stage = ctx.stage, Rn = rng(ctx.h0 + f.n.charCodeAt(0) * 13);
+      const len = Math.max(0.5, slopeLen(f));
+      const on = (s0, t, w, d) => [slopeAt(f, s0, t), slopeAt(f, s0 + w, t), slopeAt(f, s0 + w, t + d), slopeAt(f, s0, t + d)];
+      if (stage >= 4) {
+        poly(g, f.pts.map(q => P(q[0], q[1], q[2])), bare);
+        for (let k = 1; k < 6; k++) poly(g, [slopeAt(f, 0, k / 6), slopeAt(f, 1, k / 6), slopeAt(f, 1, k / 6, 1), slopeAt(f, 0, k / 6, 1)], shade(bare, 0.86));
+        for (let i = 0; i < 8; i++) { const s0 = Rn() * 0.8, t = Rn() * 0.8; poly(g, on(s0, t, (0.2 + Rn() * 0.3) / len, 0.08 + Rn() * 0.12), i % 3 ? "#e8eef2" : "#ccd6dc"); }
+        return;
+      }
+      const n = stage === 2 ? 3 : 5;
+      for (let i = 0; i < n; i++) {
+        const s0 = 0.04 + Rn() * 0.7, t = 0.05 + Rn() * 0.55;
+        const w = (0.3 + Rn() * (stage === 3 ? 0.5 : 0.25)) / len, d = 0.16 + Rn() * (stage === 3 ? 0.22 : 0.1);
+        poly(g, on(s0, t, w, d), bare);
+        poly(g, on(s0, t + d * 0.5, w, 0.025), shade(bare, 0.82));
+        poly(g, on(s0, t + d, w, 0.03), "#ffffff"); // the snow's broken edge
       }
     }
     // Flat roof with a parapet: the deck, the inner faces of the far parapets, then the coping.
@@ -337,14 +378,28 @@
 
     // --- per-style facades ------------------------------------------------------------------------------
     const windowState = (ctx, i, face, n) => {
-      const st = ctx.isHome ? ctx.stage : 0, s = (i * 7 + face.charCodeAt(0) * 3 + ctx.h0) >>> 0;
+      const st = ctx.isHome ? ctx.stage : 0, s = hash(ctx.p.id + ":" + face + ":" + i);
       return {
         state: st,
         boarded: ctx.isHome && (st === 4 ? s % 4 !== 3 : st === 3 && s % 5 === 0),
-        cracked: ctx.isHome && st === 3 && s % 3 === 1,
+        cracked: ctx.isHome && st >= 3 && (s >>> 4) % 3 === 1,
         dirty: ctx.isHome && st === 2 && i === (ctx.h0 + face.charCodeAt(0)) % Math.max(1, n),
       };
     };
+    // A dirty band under the eave where the gutter overflows, with drips down the wall (from stage 1).
+    function gutterStreak(ctx, F, H, col) {
+      const g = ctx.g, R = rng(ctx.h0 + F.face.charCodeAt(0) * 3), st = ctx.stage;
+      poly(g, quad(F, 0, F.len, H - 8, H - 4), shade(col, 0.76));
+      // the overflowing corner: a broad stain that tapers down the wall
+      const u0 = R() < 0.5 ? 0.1 : F.len - 0.22, L = 12 + st * 4;
+      poly(g, quad(F, u0, u0 + 0.12, H - 8 - L * 0.45, H - 8), shade(col, 0.7));
+      poly(g, quad(F, u0 + 0.02, u0 + 0.09, H - 8 - L * 0.8, H - 8 - L * 0.45), shade(col, 0.74));
+      poly(g, quad(F, u0 + 0.04, u0 + 0.06, H - 8 - L, H - 8 - L * 0.8), shade(col, 0.8));
+      for (let i = 0; i < 3 + st * 2; i++) {
+        const u = 0.05 + R() * (F.len - 0.1), l = 4 + R() * (6 + st * 3);
+        poly(g, quad(F, u, u + 0.035, H - 8 - l, H - 8), shade(col, 0.74));
+      }
+    }
 
     function drawHouse(ctx) {
       const g = ctx.g, { x0, y0, x1, y1, stage, H } = ctx;
@@ -355,12 +410,13 @@
         poly(g, quad(F, 0, F.len, 0, 3), shade(col, 0.66));
         poly(g, quad(F, 0, 0.05, 0, H), f === LIT ? ctx.trim : shade(ctx.trim, 0.82));
         poly(g, quad(F, F.len - 0.05, F.len, 0, H), f === LIT ? ctx.trim : shade(ctx.trim, 0.82));
-        if (stage >= 1) grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), col, "under");
+        if (stage >= 1) { grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), col, "under"); gutterStreak(ctx, F, H, col); }
         const isDoor = f === ctx.p.face;
         const us = isDoor ? [F.len * 0.2, F.len * 0.8] : [F.len * 0.27, F.len * 0.73];
         us.forEach((uc, i) => {
           const ws = windowState(ctx, i, f, us.length);
-          win(ctx, F, uc - 0.14, uc + 0.14, 8, 19, Object.assign(ws, { frame: ctx.trim, curtain: CURTAIN[(ctx.h0 + i) % CURTAIN.length], both: true, shutters: SHUTTER[(ctx.h0 >>> 5) % SHUTTER.length], box: f === LIT, idx: i, sill: ctx.trim, mullion: true }));
+          const lost = stage >= 1 && stage <= 2 && f === LIT && i === 1 ? "r" : stage === 2 && f !== LIT && i === 0 ? "l" : null;
+          win(ctx, F, uc - 0.14, uc + 0.14, 8, 19, Object.assign(ws, { frame: ctx.trim, curtain: CURTAIN[(ctx.h0 + i) % CURTAIN.length], both: true, shutters: SHUTTER[(ctx.h0 >>> 5) % SHUTTER.length], box: f === LIT, idx: i, sill: ctx.trim, mullion: true, noShutter: lost, wallCol: col }));
         });
         if (isDoor) {
           const uc = F.len / 2;
@@ -391,7 +447,7 @@
         poly(g, quad(F, 0, F.len, fh + 1, fh + 3), shade(col, 1.06)); // string course
         poly(g, quad(F, 0, F.len, fh + 3, fh + 4), shade(col, 0.88));
         poly(g, quad(F, 0, 0.07, 0, H), shade(col, 1.06)); poly(g, quad(F, F.len - 0.07, F.len, 0, H), shade(col, 0.92)); // quoins
-        if (stage >= 1) grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), col, "under");
+        if (stage >= 1) { grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), col, "under"); gutterStreak(ctx, F, H, col); }
         const isDoor = f === ctx.p.face;
         const doorU = isDoor ? Math.min(F.len - 0.4, Math.max(0.4, entryU(ctx, F))) : -9;
         const garageU = isDoor ? (doorU > F.len / 2 ? 0.75 : F.len - 0.75) : -9;
@@ -470,6 +526,14 @@
         for (let fl = 1; fl < floors; fl++) poly(g, quad(F, 0, F.len, fl * fh, fl * fh + 2), f === LIT ? "#cfc8bb" : "#a8a296"); // floor bands
         poly(g, quad(F, 0, F.len, H, ctx.Hw), f === LIT ? "#cfc8bb" : "#a8a296");
         if (stage >= 1) grime(ctx, F, H, Math.min(stage, 3), ctx.h0 + f.charCodeAt(0), col, "under");
+        if (stage >= 3) { // soot and rain streaks running down from the parapet
+          const Rs = rng(ctx.h0 + f.charCodeAt(0) * 7);
+          for (let i = 0; i < (stage >= 4 ? 12 : 5); i++) {
+            const u = 0.05 + Rs() * (F.len - 0.12), w = 0.04 + Rs() * 0.05, l = 8 + Rs() * (stage >= 4 ? H * 0.75 : 16);
+            poly(g, quad(F, u, u + w, H - l, H), "rgba(22,18,16,0.42)");
+            poly(g, quad(F, u + w * 0.3, u + w * 0.7, H - l - 5, H - l), "rgba(22,18,16,0.28)");
+          }
+        }
         const isDoor = f === ctx.p.face;
         const mid = F.len / 2;
         const per = f === "s" || f === "n" ? 2 : 2;
@@ -486,14 +550,24 @@
             win(ctx, F, uc - 0.14, uc + 0.14, z0, z1, Object.assign(ws, { frame: "#e8e2d6", vacant, curtain: CURTAIN[(hash(ctx.p.id + fl + side)) % CURTAIN.length], sill: "#cfc8bb", mullion: true, idx: i + fl * 5 }));
             if (isDoor && fl >= 1 && i % 2 === 0) { // balcony under the outer window pair
               const r = F.rect(uc - 0.24, uc + 0.24, 0, 0.2);
-              boxAt(g, r[0], r[1], r[2], r[3], fl * fh + 2, fl * fh + 4, "#bdb6a8");
+              const hb = hash(ctx.p.id + ":bal:" + fl + ":" + i);
+              boxAt(g, r[0], r[1], r[2], r[3], fl * fh + 2, fl * fh + 4, stage >= 4 ? "#a8a090" : "#bdb6a8");
               const rail = stage >= 3 ? "#5a4a3a" : "#3e4450";
-              poly(g, [F.out(uc - 0.24, fl * fh + 10, 0.2), F.out(uc + 0.24, fl * fh + 10, 0.2), F.out(uc + 0.24, fl * fh + 11, 0.2), F.out(uc - 0.24, fl * fh + 11, 0.2)], rail);
-              for (let k = 0; k <= 6; k++) { const p = F.out(uc - 0.24 + k * 0.08, fl * fh + 4, 0.2); g.fillStyle = rail; g.fillRect(Math.round(p[0]), Math.round(p[1]) - 6, 1, 6); }
-              if (u && !u.vacant && stage <= 2 && hash(ctx.p.id + fl + i) % 2 === 0) { // a potted plant
-                const p = F.out(uc + 0.14, fl * fh + 4, 0.1);
+              const gone = stage >= 4 && hb % 3 === 0; // rail torn off
+              const sag = stage >= 4 && !gone ? 3 : 0;
+              if (!gone) {
+                poly(g, [F.out(uc - 0.24, fl * fh + 10, 0.2), F.out(uc, fl * fh + 10 - sag, 0.2), F.out(uc, fl * fh + 11 - sag, 0.2), F.out(uc - 0.24, fl * fh + 11, 0.2)], rail);
+                poly(g, [F.out(uc, fl * fh + 10 - sag, 0.2), F.out(uc + 0.24, fl * fh + 10, 0.2), F.out(uc + 0.24, fl * fh + 11, 0.2), F.out(uc, fl * fh + 11 - sag, 0.2)], rail);
+                for (let k = 0; k <= 6; k++) {
+                  if (stage >= 4 && (hb >>> k) % 3 === 0) continue; // broken balusters
+                  const p = F.out(uc - 0.24 + k * 0.08, fl * fh + 4, 0.2); g.fillStyle = rail; g.fillRect(Math.round(p[0]), Math.round(p[1]) - 6 + (k > 1 && k < 5 ? Math.min(sag, 2) : 0), 1, 6 - (k > 1 && k < 5 ? Math.min(sag, 2) : 0));
+                }
+              } else { const p = F.out(uc + 0.2, fl * fh + 4, 0.2); g.fillStyle = rail; g.fillRect(Math.round(p[0]), Math.round(p[1]) - 6, 1, 6); }
+              if (u && !u.vacant && stage <= 3 && hb % 2 === 0) { // a potted plant, dead by stage 3
+                const p = F.out(uc + 0.14, fl * fh + 4, 0.1), dead = stage >= 3;
                 g.fillStyle = "#8a4a2a"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 3, 3, 3);
-                g.fillStyle = "#3f9a3a"; g.fillRect(Math.round(p[0]) - 2, Math.round(p[1]) - 7, 5, 4); g.fillStyle = "#5fba4a"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 7, 2, 2);
+                if (dead) { g.fillStyle = "#7a6638"; g.fillRect(Math.round(p[0]) - 2, Math.round(p[1]) - 5, 1, 2); g.fillRect(Math.round(p[0]), Math.round(p[1]) - 6, 1, 3); g.fillRect(Math.round(p[0]) + 2, Math.round(p[1]) - 5, 1, 2); g.fillStyle = "#9a8448"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 4, 1, 1); }
+                else { g.fillStyle = "#3f9a3a"; g.fillRect(Math.round(p[0]) - 2, Math.round(p[1]) - 7, 5, 4); g.fillStyle = "#5fba4a"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 7, 2, 2); }
               }
               if (u && u.vacant) { const p = F.out(uc - 0.05, fl * fh + 11, 0.2); g.fillStyle = "#f2a12c"; g.fillRect(Math.round(p[0]) - 4, Math.round(p[1]) - 1, 9, 5); CV.pixelText(g, "LET", Math.round(p[0]) - 3, Math.round(p[1]), "#1e1e1e"); }
             }
@@ -503,24 +577,33 @@
           }
         }
         if (isDoor) {
-          door(ctx, F, mid, 0.34, 19, { color: "#3a4a5a", frame: "#cfc8bb", glazed: true, step: true });
+          door(ctx, F, mid, 0.34, 19, { color: "#3a4a5a", frame: "#cfc8bb", glazed: true, step: true, boarded: stage >= 4 });
           const r = F.rect(mid - 0.3, mid + 0.3, 0, 0.28);
           boxAt(g, r[0], r[1], r[2], r[3], 21, 23, "#5a6070");
           const name = String(ctx.p.name || "").split(" ")[0].toUpperCase();
           if (name) wallSign(ctx, F, name, mid, 27, "#f6e7b8", "#2a2f3a");
           ctx.porch = F.out(mid, 20, 0.2);
         }
-        if (stage >= 3) grime(ctx, F, H, Math.min(stage, 3), ctx.h0 + f.charCodeAt(0), col, "over");
+        if (stage >= 3) grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), col, "over");
       }
       flatRoof(ctx, ctx.roofC);
       // water tank on legs, AC boxes, stair housing, antenna
       const Hd = ctx.H;
       const tx = x0 + 0.5, ty = y0 + 0.45;
-      for (const [dx, dy] of [[0, 0], [0.42, 0], [0, 0.42], [0.42, 0.42]]) boxAt(g, tx + dx, ty + dy, tx + dx + 0.04, ty + dy + 0.04, Hd, Hd + 8, "#4a3a2a");
-      boxAt(g, tx - 0.02, ty - 0.02, tx + 0.48, ty + 0.48, Hd + 8, Hd + 22, "#8a6440");
-      for (let z = Hd + 11; z < Hd + 22; z += 4) { const F2 = faceFn(LIT, tx - 0.02, ty - 0.02, tx + 0.48, ty + 0.48); poly(g, quad(F2, 0, F2.len, z, z + 1), "#5a4028"); }
-      poly(g, [P(tx - 0.04, ty - 0.04, Hd + 22), P(tx + 0.5, ty - 0.04, Hd + 22), P(tx + 0.5, ty + 0.5, Hd + 22), P(tx + 0.23, ty + 0.23, Hd + 30), P(tx - 0.04, ty + 0.5, Hd + 22)], "#6a4a30");
-      poly(g, [P(tx - 0.04, ty + 0.5, Hd + 22), P(tx + 0.5, ty + 0.5, Hd + 22), P(tx + 0.23, ty + 0.23, Hd + 30)], "#7a5838");
+      // the timber water tank; on a derelict block a leg has given way and it leans
+      const lean = stage >= 4 ? -16 : 0, dz = (x, y) => lean * (x - tx) + lean * 0.4 * (y - ty);
+      const Q = (x, y, z) => P(x, y, z + dz(x, y));
+      for (const [dx, dy] of [[0, 0], [0.42, 0], [0, 0.42], [0.42, 0.42]]) { const top = Math.max(1, 8 + dz(tx + dx, ty + dy)); boxAt(g, tx + dx, ty + dy, tx + dx + 0.04, ty + dy + 0.04, Hd, Hd + top, "#4a3a2a"); }
+      const a0 = tx - 0.02, b0 = ty - 0.02, a1 = tx + 0.48, b1 = ty + 0.48;
+      const sides = { s: [[a0, b1], [a1, b1]], e: [[a1, b1], [a1, b0]], n: [[a1, b0], [a0, b0]], w: [[a0, b0], [a0, b1]] };
+      for (const f of FACES) {
+        const [[p0x, p0y], [p1x, p1y]] = sides[f], col = f === LIT ? "#8a6440" : shade("#8a6440", 0.8);
+        poly(g, [Q(p0x, p0y, Hd + 8), Q(p1x, p1y, Hd + 8), Q(p1x, p1y, Hd + 22), Q(p0x, p0y, Hd + 22)], col);
+        for (let z = Hd + 11; z < Hd + 22; z += 4) poly(g, [Q(p0x, p0y, z), Q(p1x, p1y, z), Q(p1x, p1y, z + 1), Q(p0x, p0y, z + 1)], f === LIT ? "#5a4028" : "#4a3420");
+      }
+      poly(g, [Q(tx - 0.04, ty - 0.04, Hd + 22), Q(tx + 0.5, ty - 0.04, Hd + 22), Q(tx + 0.5, ty + 0.5, Hd + 22), Q(tx + 0.23, ty + 0.23, Hd + 30), Q(tx - 0.04, ty + 0.5, Hd + 22)], "#6a4a30");
+      poly(g, [Q(tx - 0.04, ty + 0.5, Hd + 22), Q(tx + 0.5, ty + 0.5, Hd + 22), Q(tx + 0.23, ty + 0.23, Hd + 30)], "#7a5838");
+      if (stage >= 4) { const p = Q(tx + 0.5, ty + 0.3, Hd + 9); g.fillStyle = "#2a3a4a"; g.fillRect(Math.round(p[0]), Math.round(p[1]), 1, 5); } // a dribble from a split stave
       boxAt(g, x1 - 1.4, y0 + 0.4, x1 - 0.7, y0 + 1.1, Hd, Hd + 12, "#a8a090");
       const Fs = faceFn(LIT, x1 - 1.4, y0 + 0.4, x1 - 0.7, y0 + 1.1);
       poly(g, quad(Fs, 0.25, 0.45, Hd, Hd + 9), "#5a5048");
@@ -906,18 +989,33 @@
         porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: roofTop + (p.style === "city_hall" ? 50 : p.style === "factory" ? 20 : 10) };
     };
 
-    // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty.
-    art.pool = function (g, rect, stage, ox, oy) {
+    // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty; in
+    // winter pale ice, and the derelict one an empty basin with dirty snow in the bottom.
+    art.pool = function (g, rect, stage, ox, oy, season) {
       const [a, b, c, d] = rect;
+      const snow = CV.SEASON[season] && CV.SEASON[season].snow;
       const T = (x, y, z) => { const q = P(x, y, z); return [q[0] - ox, q[1] - oy]; };
       const quadT = (x0, y0, x1, y1, z) => [T(x0, y0, z), T(x1, y0, z), T(x1, y1, z), T(x0, y1, z)];
-      poly(g, quadT(a - 0.08, b - 0.08, c + 0.08, d + 0.08, 0), stage >= 3 ? "#bdb6a6" : "#e8e2d4");
-      const water = ["#4fb4e8", "#4aaee0", "#5aa89a", "#4a8a52", "#8a8270"][stage];
-      poly(g, quadT(a, b, c, d, 0), stage === 4 ? "#a49c8c" : "#2f7aa0");
-      poly(g, quadT(a + 0.06, b + 0.06, c, d, 0), water);
+      poly(g, quadT(a - 0.08, b - 0.08, c + 0.08, d + 0.08, 0), snow ? "#eef3f2" : stage >= 3 ? "#bdb6a6" : "#e8e2d4");
       const Rr = rng(stage * 31 + 7);
-      if (stage <= 1) for (let i = 0; i < 5; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = "#bfe8ff"; g.fillRect(Math.round(q[0]), Math.round(q[1]), 3, 1); }
-      if (stage === 3) for (let i = 0; i < 9; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = ["#8a6a2a", "#a8843a", "#3a5a22"][i % 3]; g.fillRect(Math.round(q[0]), Math.round(q[1]), 2, 1); }
+      if (snow) {
+        poly(g, quadT(a, b, c, d, 0), stage === 4 ? "#8a8478" : "#9ab4c4");
+        if (stage === 4) { // empty basin: dirty snow drifted into the deep end, leaves and a crack
+          poly(g, quadT(a + 0.06, b + 0.06, c, d, 0), "#a49c8c");
+          poly(g, quadT(a + 0.06, b + (d - b) * 0.45, c, d, 0), "#cfd2cc");
+          for (let i = 0; i < 8; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = ["#7a6a4a", "#9a9488", "#6a5a3a"][i % 3]; g.fillRect(Math.round(q[0]), Math.round(q[1]), 2, 1); }
+        } else {
+          poly(g, quadT(a + 0.06, b + 0.06, c, d, 0), stage === 3 ? "#c8d4cc" : "#dfeaf0");
+          for (let i = 0; i < 4; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = "#ffffff"; g.fillRect(Math.round(q[0]), Math.round(q[1]), 4, 1); }
+          if (stage === 3) for (let i = 0; i < 6; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = "#8a6a2a"; g.fillRect(Math.round(q[0]), Math.round(q[1]), 2, 1); }
+        }
+      } else {
+        const water = ["#4fb4e8", "#4aaee0", "#5aa89a", "#4a8a52", "#8a8270"][stage];
+        poly(g, quadT(a, b, c, d, 0), stage === 4 ? "#a49c8c" : "#2f7aa0");
+        poly(g, quadT(a + 0.06, b + 0.06, c, d, 0), water);
+        if (stage <= 1) for (let i = 0; i < 5; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = "#bfe8ff"; g.fillRect(Math.round(q[0]), Math.round(q[1]), 3, 1); }
+        if (stage === 3) for (let i = 0; i < 9; i++) { const q = T(a + 0.1 + Rr() * (c - a - 0.2), b + 0.1 + Rr() * (d - b - 0.2), 0); g.fillStyle = ["#8a6a2a", "#a8843a", "#3a5a22"][i % 3]; g.fillRect(Math.round(q[0]), Math.round(q[1]), 2, 1); }
+      }
       if (stage === 4) { const q = T(a + 0.2, b + 0.3, 0); g.fillStyle = "#5a5246"; g.fillRect(Math.round(q[0]), Math.round(q[1]), 10, 1); g.fillRect(Math.round(q[0]) + 9, Math.round(q[1]) + 1, 6, 1); g.fillRect(Math.round(q[0]) + 14, Math.round(q[1]) + 2, 5, 1); }
       // ladder
       const l = T(c - 0.12, b + 0.2, 0); g.fillStyle = "#d8dde2"; g.fillRect(Math.round(l[0]), Math.round(l[1]) - 4, 1, 5); g.fillRect(Math.round(l[0]) + 3, Math.round(l[1]) - 3, 1, 5);
