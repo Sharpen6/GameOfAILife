@@ -443,6 +443,7 @@ const pretty = s => String(s || "").replace(/_/g, " ");
 const NEED_COLOR = { hunger: "#f0a04b", energy: "#6cb6ff", social: "#f08ab4", fun: "#6fcf7c" };
 
 function select(id) {
+  if (id !== selected) editingProfile = null;
   selected = id;
   detail = null;
   detailKey = "";
@@ -457,6 +458,22 @@ function renderHeader() {
   const plane = state.plane ? ` · ✈ ${state.plane.from} to ${state.plane.to}` : "";
   document.getElementById("weather").textContent = `${state.season[0].toUpperCase() + state.season.slice(1)} · ${w}${plane}`;
   for (const b of document.querySelectorAll("#speed button")) b.classList.toggle("on", Number(b.dataset.speed) === speed);
+}
+
+// A view that lost God keeps watching, with God's controls locked.
+function lockControls() {
+  const watching = role !== "god";
+  document.body.classList.toggle("watching", watching);
+  for (const el of document.querySelectorAll("#speed button, #luck, #saveprof")) el.disabled = watching;
+}
+
+let toastTimer = 0;
+function toast(text) {
+  const t = document.getElementById("toast");
+  t.textContent = text;
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 4000);
 }
 
 function renderPeople() {
@@ -482,8 +499,12 @@ document.getElementById("roster").addEventListener("click", ev => {
   const li = ev.target.closest("li");
   if (li) select(li.dataset.id);
 });
+// The roster is not refreshed while a press on it is down: replacing the row under the pointer loses the click.
+let rosterPress = false;
+document.getElementById("roster").addEventListener("pointerdown", () => { rosterPress = true; });
+for (const t of ["pointerup", "pointercancel"]) window.addEventListener(t, () => { rosterPress = false; }, true);
 
-let editingProfile = false;
+let editingProfile = null; // id of the character whose play style has unsaved edits in the panel
 let detailKey = "";
 // Everything in the panel except the live numbers; when it is unchanged we only refresh the numbers,
 // so scrolling, hovering and half-dragged sliders are never clobbered by the 800 ms refresh.
@@ -496,7 +517,8 @@ function renderDetail(box) {
   const active = document.activeElement;
   const key = staticKey(a);
   const same = key === detailKey && box.querySelector("#live");
-  if (same || box.contains(active) && (active.tagName === "TEXTAREA" || active.type === "range") || editingProfile) {
+  const mine = box.dataset.agent === a.id; // the panel already shows this character
+  if (same || mine && (box.contains(active) && (active.tagName === "TEXTAREA" || active.type === "range") || editingProfile === a.id)) {
     // Keep the God's edits; only refresh the live numbers.
     const live = box.querySelector("#live");
     if (live) live.innerHTML = liveHtml(a);
@@ -505,6 +527,7 @@ function renderDetail(box) {
     return;
   }
   detailKey = key;
+  box.dataset.agent = a.id;
   const traits = Object.entries(a.profile.traits).map(([k, v]) => `
       <label for="t-${k}">${k}</label><input id="t-${k}" data-trait="${k}" type="range" min="0" max="1" step="0.05" value="${v}"><span>${v.toFixed(2)}</span>`).join("");
   const forksHtml = a.forks.slice().reverse().map(forkHtml).join("") || '<li class="small">No decisions yet.</li>';
@@ -513,13 +536,14 @@ function renderDetail(box) {
   box.innerHTML = `
     <button class="back" id="back">← Everyone</button>
     <h2>${esc(a.name)}</h2>
-    <a class="small" href="character.html?id=${encodeURIComponent(a.id)}&from=city">Open the full character page</a>
+    <a class="small" id="fullpage" href="character.html?id=${encodeURIComponent(a.id)}">Open the full character page</a>
     <div class="small">${a.age} · ${a.job ? esc(a.job.title) : "retired"} · ${a.controller ? "played by " + esc(a.controller) : "running on profile defaults"}</div>
     <div id="live">${liveHtml(a)}</div>
     <div class="luck">
       <div class="row"><span>Cursed</span><b style="color:var(--text)">Luck <span id="luckv">${Math.round(a.luck)}</span></b><span>Blessed</span></div>
       <input id="luck" type="range" min="0" max="100" step="1" value="${a.luck}" aria-label="Luck">
       <div class="small">Your only power. ${esc(a.name.split(" ")[0])} will never know. Luck tilts the hidden odds of every outcome.</div>
+      <div class="small watchnote">Watching only: God moved to another window, so luck is locked here.</div>
     </div>
     <h3>Play style</h3>
     <textarea id="prompt" aria-label="Play-style prompt">${esc(a.profile.prompt)}</textarea>
@@ -537,21 +561,34 @@ function renderDetail(box) {
     </ul>
     <h3>People</h3><ul class="list">${rels || '<li class="small">Nobody yet.</li>'}</ul>
     <h3>Memory</h3><ul class="list">${a.memory.slice().reverse().map(m => `<li>${esc(m)}</li>`).join("") || '<li class="small">Nothing yet.</li>'}</ul>`;
-  box.querySelector("#back").onclick = () => { selected = null; detail = null; detailKey = ""; renderPeople(); };
+  box.querySelector("#back").onclick = () => { selected = null; detail = null; detailKey = ""; editingProfile = null; renderPeople(); };
+  box.querySelector("#fullpage").onclick = ev => {
+    // A plain click opens the page in this tab, and this view lets go of God as it unloads: leave that
+    // page a one-shot note so it skips its takeover question. A new tab gets no note and asks first.
+    if (role === "god" && ev.button === 0 && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey)) {
+      try { sessionStorage.setItem("goal.character.from-city", String(Date.now())); } catch {}
+    }
+  };
   const luck = box.querySelector("#luck");
   luck.oninput = () => { box.querySelector("#luckv").textContent = luck.value; };
-  luck.onchange = () => { send({ type: "set_luck", agent_id: a.id, luck: Number(luck.value) }); luck.blur(); };
+  // After a drag, let go of focus so the panel keeps refreshing; arrow keys keep it, to go on stepping.
+  let dragged = false;
+  luck.onpointerdown = () => { dragged = true; };
+  luck.onkeydown = () => { dragged = false; };
+  luck.onchange = () => { send({ type: "set_luck", agent_id: a.id, luck: Number(luck.value) }); if (dragged) luck.blur(); };
   for (const r of box.querySelectorAll("[data-trait]")) {
-    r.oninput = () => { editingProfile = true; r.nextElementSibling.textContent = Number(r.value).toFixed(2); };
+    r.oninput = () => { editingProfile = a.id; r.dataset.moved = "1"; r.nextElementSibling.textContent = Number(r.value).toFixed(2); };
   }
-  box.querySelector("#prompt").oninput = () => { editingProfile = true; };
+  box.querySelector("#prompt").oninput = () => { editingProfile = a.id; };
   box.querySelector("#saveprof").onclick = () => {
+    // Only the sliders God moved, so the others keep what the profile has learned since.
     const traitsOut = {};
-    for (const r of box.querySelectorAll("[data-trait]")) traitsOut[r.dataset.trait] = Number(r.value);
+    for (const r of box.querySelectorAll("[data-trait][data-moved]")) traitsOut[r.dataset.trait] = Number(r.value);
     const prompt = box.querySelector("#prompt").value;
     send({ type: "set_profile", agent_id: a.id, traits: traitsOut, prompt: prompt !== a.profile.prompt ? prompt : null });
-    editingProfile = false;
+    editingProfile = null;
   };
+  lockControls();
 }
 
 function liveHtml(a) {
@@ -577,15 +614,20 @@ function forkHtml(f) {
     ${f.reason && f.decided_by === "model" ? `<div class="small">“${esc(f.reason)}”</div>` : ""}${happened}</li>`;
 }
 
-function renderFeeds(newEvents, newForks) {
-  if (newEvents.length) {
+function renderFeeds(newEvents, newForks, reset = false) {
+  if (reset) { events.length = 0; forks.length = 0; }
+  if (newEvents.length || reset) {
     events.unshift(...newEvents.slice().reverse());
     events.length = Math.min(events.length, 200);
     document.getElementById("events").innerHTML = events.map(e =>
       `<li class="k-${e.kind}"><span class="time">${esc(e.time)}</span>${esc(e.text)}</li>`).join("");
   }
-  if (newForks.length) {
-    forks.unshift(...newForks.slice().reverse());
+  if (newForks.length || reset) {
+    // A fork comes again once its outcomes land: that copy replaces its entry, which keeps its place.
+    for (const f of newForks) {
+      const i = forks.findIndex(x => x.id === f.id);
+      if (i >= 0) forks[i] = f; else forks.unshift(f);
+    }
     forks.length = Math.min(forks.length, 120);
     const keep = selected; selected = null;
     document.getElementById("forks").innerHTML = forks.map(forkHtml).join("");
@@ -607,14 +649,16 @@ function connect() {
       town = msg.town; state = msg.state; speed = msg.speed; terrain = null;
       role = msg.role;
       document.getElementById("role").textContent = "You are God of this city";
-      renderHeader(); renderPeople(); renderFeeds(msg.history || [], []);
+      lockControls();
+      // A reconnect starts the feeds again from the welcome, as a fresh page would.
+      renderHeader(); renderPeople(); renderFeeds(msg.history || [], [], true);
     } else if (msg.type === "state") {
       state = msg.state; state.speed = msg.speed; speed = msg.speed;
       renderHeader();
       renderFeeds(msg.events, msg.forks);
       const now = performance.now();
       if (selected && now - lastDetailAsk > 800) { lastDetailAsk = now; send({ type: "get_agent", agent_id: selected }); }
-      if (!selected && now - lastRoster > 1000) { lastRoster = now; renderPeople(); }
+      if (!selected && !rosterPress && now - lastRoster > 1000) { lastRoster = now; renderPeople(); }
     } else if (msg.type === "agent") {
       if (msg.agent.id === selected) {
         const first = !detail;
@@ -626,7 +670,10 @@ function connect() {
       speed = msg.speed; if (state) renderHeader();
     } else if (msg.type === "demoted") {
       role = "observer";
-      document.getElementById("role").textContent = "Watching: God moved to another window";
+      document.getElementById("role").textContent = "Watching only: God moved to another window. Reload to be God here.";
+      lockControls();
+    } else if (msg.type === "error") {
+      toast(`Not done: ${msg.error}`);
     }
   };
   ws.onclose = () => {
