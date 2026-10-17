@@ -2,7 +2,7 @@
 
 A living city simulation where every resident is an AI agent with a home, a family, a job, a bank balance, friends and a memory. Any AI model (Claude, ChatGPT, Gemini) or any program that speaks the game's WebSocket API can play a character. The player is God: they see everything and can change an agent's luck, and nothing more.
 
-**Status:** design stage. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. A small, untuned Python prototype from before the design was agreed lives in `gameofailife/`; the first real build (the Pokémon-style web map) has not started yet.
+**Status:** first playable build. A small town of 20 characters lives on a pixel map in your browser, you watch as God and bend their luck, and any program can connect over a WebSocket to play characters. Jump to [Play it](#play-it) to run it, and see [What's in this first build](#whats-in-this-first-build) for what works today. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. Most of the design is still ahead of the code.
 
 ## Contents
 
@@ -27,7 +27,9 @@ A living city simulation where every resident is an AI agent with a home, a fami
 - [Interface and observability](#interface-and-observability)
 - [Roadmap](#roadmap)
 - [Decisions so far](#decisions-so-far)
-- [Running the prototype](#running-the-prototype)
+- [Play it](#play-it)
+- [What's in this first build](#whats-in-this-first-build)
+- [Project layout](#project-layout)
 
 
 ## Vision and design pillars
@@ -61,7 +63,7 @@ The player is God, and God has exactly two powers: seeing everything, and changi
 
 ## Time and the simulation loop
 
-The world advances in ticks of 15 in-game minutes (96 per day), and every tick runs the same eight steps for the whole city, drawn below.
+The world advances in ticks of one in-game minute (1,440 per day), and every tick runs the same eight steps for the whole city, drawn below.
 
 *Diagram: simulation loop · 8 steps per tick (see the [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40))*
 
@@ -340,16 +342,16 @@ The world runs on fixed rules that no agent and no God can change: lights cycle,
 
 | System | Rule | Forks it creates |
 | --- | --- | --- |
-| Traffic lights | Each junction cycles green, yellow, red on a fixed timer (default 30 s green, 4 s yellow, 30 s red), offset per junction | Late for work after a run of reds: speed up, take the side street, or call ahead? |
+| Traffic lights | Each junction cycles green, yellow, red on a fixed timer (in the first build a 6-minute cycle: 2 minutes green, 1 minute yellow, 3 minutes red for each direction), and cars wait at red | Late for work after a run of reds: speed up, take the side street, or call ahead? |
 | Rush hour | Road speed drops to about half from 07:30 to 09:30 and 17:00 to 19:00 | Leave early, leave late, take the metro, or work from home? |
-| City transit timetable | Buses every 10 to 20 minutes, metro every 5, a night bus hourly after midnight | Missed the bus: wait, walk, taxi, or skip the plan? |
-| Intercity flights and trains | Scheduled departures between Millbrook and other cities (for example a daily 08:00 flight and trains every two hours), with fixed fares that rise near the date | Book the cheap early flight, the pricey later one, the train, or postpone the visit? |
+| City transit timetable | Buses every 10 to 20 minutes, metro every 5, a night bus hourly after midnight (the first build runs one bus around the ring road, stopping two minutes at each of its ten stops) | Missed the bus: wait, walk, taxi, or skip the plan? |
+| Intercity flights and trains | Scheduled departures between Millbrook and other cities (the first build has three flights a day, at 08:00, 14:00 and 20:00, that cross the sky from Riverton to Lakeside; trains come later), with fixed fares that rise near the date | Book the cheap early flight, the pricey later one, the train, or postpone the visit? |
 | Day and night | Sunrise and sunset move with the season | Go for a run after dark, run at dawn, skip it, or use the gym? |
 | Seasons | Spring, summer, autumn, winter, 90 days each | Spend on heating, wear a coat, travel for the holidays, take a summer job? |
-| Weather | Rolled each morning from the season's odds, updated hourly | Rain: drive instead of cycling, take an umbrella, cancel the picnic, or go anyway? |
+| Weather | Rolled each morning from the season's odds, and again in the afternoon | Rain: drive instead of cycling, take an umbrella, cancel the picnic, or go anyway? |
 | Opening hours | Every place has fixed hours and closes on some holidays | Shop now on the way home, or risk the market being closed? |
 | School terms and holidays | Fixed calendar of terms, breaks and exams | Who looks after the kids in the break: a grandparent, paid childcare, or a day off? |
-| Paydays and bills | Wages on fixed days; rent on the 1st; utilities monthly | The forks in Money and the economy, timed by the calendar |
+| Paydays and bills | Wages on fixed days; rent on a fixed day; utilities monthly (in the first build wages land at the end of every shift, payday is Friday evening, and rent is due every Sunday night) | The forks in Money and the economy, timed by the calendar |
 
 **Season defaults** (tunable per city):
 
@@ -360,7 +362,7 @@ The world runs on fixed rules that no agent and no God can change: lights cycle,
 | Autumn | 40% | 8 to 18 °C | School starts, colds begin, shorter days |
 | Winter | 60% | -2 to 10 °C | Heating bills, flu season, more driving, holiday spending, lower mood |
 
-**Resolution.** The world ticks every 15 minutes, but trips are stepped every few seconds while an agent is moving, so traffic lights, missed buses and departure times shape each journey exactly.
+**Resolution.** The world ticks every in-game minute and characters move tile by tile on each tick, so traffic lights, missed buses and departure times shape each journey exactly.
 
 **Beyond God's reach.** These systems are physical, so God cannot change them. Luck cannot turn a light green or move a plane; it only shifts the odds of chance events such as a seat on a full bus or dodging the flu in winter.
 
@@ -443,11 +445,13 @@ The world feeds perception, the mind turns it into actions and speech, and God's
 | send_message | Texts or calls another agent; propose_meeting and respond_invite set up work meetings, dates and get-togethers (see Communication between agents) |
 | set_goal | Records or changes a personal goal, such as saving $300 for a phone |
 
+In the first build these calls are WebSocket messages: forks arrive as `fork` messages and are answered with `choose`, `query` returns possessions, attributes, relationships, memory, inbox, the world and the people in town, and `send_message` and `invite` reach other characters. Goals cannot be set yet. [docs/protocol.md](docs/protocol.md) lists every message.
+
 **Honest answers only.** Queries return what the agent could really know: its own possessions and attributes exactly (Luck stays hidden), and other people only through what it has seen or been told. Queries cost no game time. Agents believe they are real people: nothing they see mentions a game, a God or AI models.
 
 **Structured outcomes.** Every controller answer is a typed message the engine validates (a choice index, an accepted invite for Friday 19:00 at Corner Cafe), so no controller can break the world's rules.
 
-**Tech stack (proposed).** A Python simulation core (fast to iterate, rich AI libraries), a web front end in TypeScript on a 2D tile-map game engine (such as Phaser) for the Pokémon-style view, a WebSocket link between them, SQLite or Postgres for saves and the memory stream, and an adapter per model provider (Anthropic, OpenAI, Google, local models) that connects to the agent interface over the game's WebSocket API (the only way controllers connect), running on the player's own API keys, with a token budget per agent.
+**Tech stack (proposed).** A Python simulation core (fast to iterate, rich AI libraries), a web front end in TypeScript on a 2D tile-map game engine (such as Phaser) for the Pokémon-style view, a WebSocket link between them, SQLite or Postgres for saves and the memory stream, and an adapter per model provider (Anthropic, OpenAI, Google, local models) that connects to the agent interface over the game's WebSocket API (the only way controllers connect), running on the player's own API keys, with a token budget per agent. The first build keeps it simpler: the Python standard library only (its own small WebSocket server included), and a plain JavaScript client drawing on an HTML canvas, with no build step and no saves yet.
 
 ## Interface and observability
 
@@ -459,7 +463,7 @@ The screen is God's view: a living city map on top, and any mind one click away.
 - **Fortune log.** Every chance event that touched an agent and every Luck change God made; the odds stay hidden.
 - **Conversations.** Live and past conversations shown as chat transcripts, filterable by agent, place or topic.
 - **Chronicle and dashboards.** The running story feed, plus city charts: population, employment, average wellbeing, inequality, faith over time.
-- **Time controls.** Pause, 1x, 10x, 100x, skip to next notable event, and save points for rewind.
+- **Time controls.** Pause, 1x, 10x, 100x, skip to next notable event, and save points for rewind. The first build has pause and 1x, 2x, 4x, 8x and 16x.
 - **Character creation page.** Create a character's identity, looks, traits, household and play-style profile, and choose the AI model that plays it. The profile updates from the character's choices and stays editable at any time. A new city starts with a generated starter town of about 20 characters, which the player can edit here.
 
 ## Roadmap
@@ -483,14 +487,132 @@ The game is built in five phases, each ending at a gate that proves the layer wo
 
 - Agents never know for certain that God exists; faith always stays belief.
 - God has no Faith or other resource; the only powers are observing and changing luck.
-- The first playable city has about 20 agents in one neighbourhood.
+- The first playable city has 20 agents in one neighbourhood.
 - One player, one God, per city.
 - A web app comes first, and the first build goes straight to the Pokémon-style web map. Controllers connect over a WebSocket API only. It runs live, asks each character's model for answers, and falls back to default answers when a reply takes too long.
 - The first city runs on Claude only, with other models added later. Players bring their own API keys.
 
-## Running the prototype
+## Play it
 
-The current code is an early, untuned sketch (Python 3.10+, no dependencies) and predates most of the design above.
+### What you need
 
-    python3 -m gameofailife --days 3          # verbose event log
-    python3 -m gameofailife --days 7 --quiet  # end-of-day summaries only
+Python 3.11 or newer and a web browser. There is nothing to install: the game uses only the Python standard library, and the web client is plain HTML and JavaScript.
+
+### Start the city
+
+From the repository root:
+
+    python3 -m gameofailife
+
+Then open <http://localhost:8000> in your browser. You are God.
+
+![The city at midday](docs/screenshots/day.png)
+
+Useful flags:
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` to let friends on your network connect. |
+| `--port` | `8000` | Port for the web page and the WebSocket. |
+| `--seed` | `1` | Seed for the starter town and its dice, so a run can be repeated. |
+| `--speed` | `1` | Starting speed: `0` (paused), `1`, `2`, `4`, `8` or `16`. At 1x a game day takes about ten real minutes. |
+| `--luck-log FILE` | off | Appends every hidden odds roll (base odds, odds after Luck, the roll) to a JSONL file for analysis. The game itself never shows the odds. |
+| `--headless` | off | Simulates without a server and prints what happened. |
+| `--days N` | `3` | How many days to simulate with `--headless`. |
+
+### What you see and can do as God
+
+- **The map.** Millbrook's 40 by 25 tile town: eight family homes, Brightline Tech, Millbrook School, Fresh Market, Corner Cafe, City Hospital and Riverside Park, joined by a grid of roads. Characters walk, run or drive to work, school, the shops and each other. Traffic lights change at every junction, a bus loops the ring road, planes cross the sky three times a day, rain falls (snow in winter) and the town darkens at night with lit windows.
+- **Hover and click.** Hover over a character to see what they are doing, or over a building to see its hours and who is inside. Click a character, or a building with people in it, to open their panel.
+- **People, Events and Decisions tabs.** The roster shows everyone's activity, Luck and whether a controller plays them. The event feed tells the town's story. The decisions feed shows every fork: the question, all four options, the one chosen, who decided it (`habit`, `default`, `model` or `timeout`), the model's reason, and what came of it.
+- **A character's panel.** Needs bars (hunger, energy, social, fun), money, health, mood, reputation, recent decisions, what they own, the people they know and their memories.
+- **Luck.** The slider on the panel is your only power over the world. It runs from 0 to 100, everyone starts at 50, and it tilts the hidden odds of every outcome. The character never knows.
+- **Play style.** You can rewrite a character's play-style prompt and move their trait sliders (thrift, family, social, diligence, health, adventure). The Decision Director uses them for every fork no model answers.
+- **Time.** Pause, or run at 1x, 2x, 4x, 8x or 16x.
+- **The character page.** `client/character.html` shows one character on a full page.
+
+There is one God per city. If a second browser opens the God view, it takes over and the first one keeps watching without powers.
+
+### Connect a controller
+
+Anything that speaks the WebSocket API can play characters: an AI model, a script, or a person typing JSON. Connect to `ws://localhost:8000/ws`, say hello as a controller, and claim the characters you want. Forks arrive as messages with four options; answer within 5 seconds or the Director plays the default for you. An answer that arrives within 10 seconds is too late to act on but still teaches the character's play style. [docs/protocol.md](docs/protocol.md) describes every message.
+
+Two example controllers come with the game. Start the city first, then in another terminal:
+
+    # A simple rule-based bot playing Ari and Tom
+    python3 examples/simple_controller.py --url ws://localhost:8000/ws --name simple-bot --characters ari,tom
+
+    # Claude playing every character no one else has claimed
+    export ANTHROPIC_API_KEY=your-key-here
+    python3 examples/claude_controller.py --url ws://localhost:8000/ws --characters all
+
+The Claude controller uses `claude-haiku-5-5` by default and runs on your own API key. Characters played by a controller show a robot icon in the roster, and their decisions are tagged `model` with the reason the model gave. Characters no controller plays still live full days on their play-style defaults.
+
+### Run without a browser
+
+    python3 -m gameofailife --headless --days 3
+
+This runs three game days as fast as your computer allows, prints the event log, and ends with a count of forks by kind and by who decided them, and a line per character with their money, health, mood and savings goal.
+
+### Run the tests
+
+    python3 -m unittest discover -s tests -v
+
+## What's in this first build
+
+The first build is the foundation from the roadmap: one small town, running live, that you can watch, nudge and connect to. A lot of the design above is not built yet.
+
+**Working now**
+
+- A clock of one tick per game minute, about ten real minutes per game day at 1x, with weekdays, weekends and seasons of 90 days.
+- A 40 by 25 tile map with eight homes, an office, a school, a market, a cafe, a hospital and a park, each with opening hours.
+- A starter cast of 20 characters in eight households, with ages from 6 to 74, jobs, wages, school places, cars for some, friendships, family ties, and savings goals for a few (Ari's new phone, Tom's guitar).
+- Four needs (hunger, energy, social, fun) that fall over time and are restored by sleeping, eating, seeing people and having fun.
+- Eight kinds of fork, each with exactly four options: getting to work or school, sleep, hunger, payday, groceries, loneliness, free time, and answering an invitation. Every option carries hidden outcomes with odds that the character's Luck shifts, and some outcomes land hours later.
+- The Decision Director: obvious forks are decided by habit, close ones go to the character's controller with a 5 second window and a 10 second learning window, and characters with no controller play their default.
+- Play-style profiles that learn from a controller's choices and that God can edit.
+- Weather by season, traffic lights that stop cars, a bus on a fixed loop, three daily flights overhead, day and night.
+- Money that moves: wages for each shift, weekly rent, groceries, cafe bills, a $50 hospital stay.
+- Health that drops when characters go hungry or exhausted, hospital visits, and deaths from old age (from 70, softened by Luck) or from health running out.
+- Text messages and invitations between characters, sent by controllers.
+- The God view in the browser, the character page, and the WebSocket API for controllers, with two example controllers.
+
+**Not built yet (design only)**
+
+- Births, pregnancy, children growing up, and generations.
+- Creating brand-new characters or editing the starter cast's identity. Only play style and Luck can be changed.
+- More cities, neighbourhoods or a growing town.
+- Riding the bus, taking a flight, taxis, bikes, the metro and rush hour. The bus and planes run, but nobody gets on.
+- Saving, loading, replaying or branching a world.
+- Natural-language conversations and meetings with a time and an agenda. Characters can text and invite, but not hold a conversation.
+- The other four needs (hygiene, bladder, comfort, safety), emotions, the Big Five personality and skills.
+- Finding, changing or losing jobs, promotions, businesses, banks, loans, taxes, the housing market and evictions.
+- Illness and contagion, schools with grades, government, elections, crime, news and religion.
+- The chronicle, per-model dashboards, the fortune log and Luck history in the God view.
+
+## Project layout
+
+```
+GameOfAILife/
+├── gameofailife/          the game server (Python standard library only)
+│   ├── __main__.py        command line: python3 -m gameofailife
+│   ├── clock.py           game time, days, weekdays and seasons
+│   ├── town.py            the tile map, the places and the starter cast
+│   ├── agent.py           characters: needs, jobs, households, relationships, play style
+│   ├── forks.py           the eight fork kinds, their options and hidden odds
+│   ├── sim.py             the simulation loop, world clockwork and the Decision Director
+│   ├── server.py          HTTP for the web client and the /ws endpoint
+│   └── ws.py              a small WebSocket implementation
+├── client/                the God view in the browser
+│   ├── index.html
+│   ├── game.js
+│   ├── style.css
+│   └── character.html     the character page
+├── examples/
+│   ├── simple_controller.py   a rule-based controller
+│   └── claude_controller.py   Claude plays characters
+├── docs/
+│   ├── protocol.md        the WebSocket API reference
+│   └── screenshots/
+└── tests/                 python3 -m unittest discover -s tests -v
+```
