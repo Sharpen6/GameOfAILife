@@ -253,7 +253,10 @@ class PaydayTest(unittest.TestCase):
         self.assertIsNone(payday_fork(fri_morning, fri_morning.agents["dana"]))
         fri = self._sim_at(4, 18)
         self.assertIsNone(payday_fork(fri, fri.agents["noa"]))  # a child
-        self.assertIsNone(payday_fork(fri, fri.agents["miriam"]))  # retired
+
+    def test_retirees_get_a_payday_for_their_pension(self):
+        fri = self._sim_at(4, 18)
+        self.assertIsNotNone(payday_fork(fri, fri.agents["miriam"]))
 
     def test_payday_appears_in_simulated_friday_evening(self):
         sim = Simulation(seed=SEED)
@@ -266,7 +269,7 @@ class PaydayTest(unittest.TestCase):
         self.assertTrue(paydays, "no payday fork by Friday 21:00")
         for f in paydays:
             agent = sim.agents[f["agent"]]
-            self.assertTrue(agent.is_adult and agent.job is not None)
+            self.assertTrue(agent.is_adult and (agent.job is not None or agent.age >= 65))
             self.assertIn("Fri", f["time"])
             self.assertEqual(len(f["options"]), 4)
 

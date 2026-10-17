@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
-from .clock import MINUTES_PER_DAY, Clock
+from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
 from .forks import COOLDOWN, OBVIOUS_MARGIN, RAIN_CHANCE, Fork, build_fork, default_scores, luck_odds
 from .town import ROAD_COLS, ROAD_ROWS, TownMap, build_cast, build_map
 
@@ -217,7 +217,7 @@ class Simulation:
                 self._log_roll(agent, "old_age", p, roll := self.rng.random())
                 if roll < p:
                     self._die(agent, "passed away peacefully in their sleep")
-        if self.clock.day % 365 == 0 and self.clock.day:
+        if self.clock.day % (DAYS_PER_SEASON * len(SEASONS)) == 0 and self.clock.day:
             for agent in self.living():
                 agent.age += 1
 
