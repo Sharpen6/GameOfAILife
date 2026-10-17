@@ -382,6 +382,11 @@ class Simulation:
     def _begin_activity(self, agent: Agent) -> None:
         act = ACTIVITIES[agent.activity]
         place_id = agent.activity_place
+        paid, agent.paid = getattr(agent, "paid", None), None  # type: ignore[attr-defined]
+        place = self.town.places.get(place_id or "")
+        if place and place.hours and agent.activity != "work" and not place.is_open(self.clock.hour):
+            self._find_shut(agent, place, paid)
+            return
         agent.state = "busy"
         agent.path = []
         if place_id:
@@ -434,6 +439,18 @@ class Simulation:
             agent.busy_until = self.clock.tick  # closing time: everyone out
         if self.clock.tick >= agent.busy_until:
             self._end_activity(agent)
+
+    def _find_shut(self, agent: Agent, place, paid: tuple[str, float] | None) -> None:
+        """Nothing is served at a shut place: the money comes back and the outing is off (a shift still stands)."""
+        refund = paid[1] if paid else 0.0
+        if paid:  # the first stop of the character's own choice: none of what it promised happens either
+            self.agents[paid[0]].money += refund
+            agent.pending_outcomes = [p for p in agent.pending_outcomes if p["fork"] != agent.fork_id]
+        self.event(f"{agent.name} finds {place.name} closed" + (f" (${refund:.0f} refunded)." if refund else "."), agent)
+        agent.path = []
+        agent.plan = [s for s in agent.plan if s[0] == "work"]
+        agent.state = "idle"
+        agent.activity = "idle" if not agent.plan else agent.activity
 
     def _wander_park(self, agent: Agent) -> None:
         park = self.town.places["park"]
@@ -592,7 +609,9 @@ class Simulation:
             self.forks.pop(fork.id, None)
         if not agent.alive:
             return
-        self._payer_for(agent, opt.cost).money -= opt.cost
+        payer = self._payer_for(agent, opt.cost)
+        payer.money -= opt.cost
+        agent.paid = (payer.id, opt.cost)  # type: ignore[attr-defined]  # handed back if the place is shut on arrival
         agent.vehicle = opt.vehicle if opt.vehicle in SPEEDS else "walk"
         agent.speed = SPEEDS[agent.vehicle]
         agent.plan = list(opt.steps)

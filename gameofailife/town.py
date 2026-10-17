@@ -57,16 +57,22 @@ class TownMap:
         if start == goal:
             return []
         prev: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
-        queue = deque([start])
-        while queue:
-            cur = queue.popleft()
-            if cur == goal:
-                break
-            x, y = cur
-            for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-                if nxt not in prev and self.walkable(*nxt):
-                    prev[nxt] = cur
-                    queue.append(nxt)
+        off_road = {start: 0}  # fewest non-road tiles on a shortest path to each tile
+        layer = [start]
+        while layer and goal not in prev:
+            ahead: dict[tuple[int, int], None] = {}  # one step further out, in the order found
+            for cur in layer:
+                x, y = cur
+                for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if nxt in ahead:
+                        if off_road[cur] < off_road[prev[nxt]]:
+                            prev[nxt] = cur  # just as short, and more of it on the road
+                    elif nxt not in prev and self.walkable(*nxt):
+                        prev[nxt] = cur
+                        ahead[nxt] = None
+            for x, y in ahead:
+                off_road[x, y] = off_road[prev[x, y]] + (self.tiles[y][x] != ROAD)
+            layer = list(ahead)
         if goal not in prev:
             return []
         out = []
@@ -129,12 +135,28 @@ def build_map(seed: int) -> TownMap:
     for yy in range(py, py + ph):
         for xx in range(px, px + pw):
             tiles[yy][xx] = PARK
+    town.places["park"] = Place("park", "Riverside Park", "park", px, py, pw, ph, None, (30, 16))
     for _ in range(14):
         tx, ty = rng.randrange(px, px + pw), rng.randrange(py, py + ph)
         if (tx, ty) != (30, 16):
             tiles[ty][tx] = TREE
-    town.places["park"] = Place("park", "Riverside Park", "park", px, py, pw, ph, None, (30, 16))
+            if not all(_reaches_road(town, p.entry) for p in town.places.values()):
+                tiles[ty][tx] = PARK  # never wall in a place's entry
     return town
+
+
+def _reaches_road(town: TownMap, start: tuple[int, int]) -> bool:
+    """True when a walk from `start` gets to the road, and so to every other place."""
+    seen, queue = {start}, deque([start])
+    while queue:
+        x, y = queue.popleft()
+        if town.tiles[y][x] == ROAD:
+            return True
+        for nxt in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+            if nxt not in seen and town.walkable(*nxt):
+                seen.add(nxt)
+                queue.append(nxt)
+    return False
 
 
 # --- the starter cast ---------------------------------------------------------
