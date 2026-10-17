@@ -5,8 +5,9 @@ and `importance` (0 routine, 1 notable, 2 major; `major` is importance 2). The N
 come from TOPIC_OF_TAG. Outcome events are classified from their effects by `outcome_tag`, with the
 money amount appended to the text.
 
-Pure data and pure functions: nothing here imports the simulation, so `sim.py` can import this module,
-and `chronicle.js` is a line-by-line port.
+Pure data and pure functions, except `on_affinity`, the friendship rule run after every relationship bump.
+Nothing here imports the simulation or the engine (not even `agent` or `clock`), so `sim.py` can import this
+module, and `chronicle.js` is a line-by-line port.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ INJURY = -8  # an outcome whose health effect is this or worse is an injury
 FRIEND_AT = 40  # an acquaintance or coworker becomes a friend when affinity rises to this
 RIFT_AT = 0  # a friend or partner falls out when affinity drops below this
 RIFT_GAP_DAYS = 7  # at most one falling-out per pair in this many game days
+TICKS_PER_DAY = 24 * 60  # a tick is a game minute (clock.MINUTES_PER_DAY; not imported, see the module docstring)
 
 # tag -> (kind, default importance). Every event uses one of these tags; a call may override importance.
 EVENT_TAGS: dict[str, tuple[str, int]] = {
@@ -198,9 +200,49 @@ def make_event(seq: int, tick: int, time: str, text: str, tag: str = "other", ki
             "at": list(at) if at is not None else None}
 
 
+FRIENDS_FROM = ("acquaintance", "coworker")  # the kinds of relationship that can grow into a friendship
+RIFT_KINDS = ("friend", "partner")  # ... and the ones that can end in a falling-out
+
+
+def rift_key(a_id: str, b_id: str) -> str:
+    """The pair's key in sim._rifts: both ids in code-unit order, joined by "|" (ids never contain it)."""
+    return f"{a_id}|{b_id}" if a_id < b_id else f"{b_id}|{a_id}"
+
+
 def on_affinity(sim: Simulation, a_id: str, b_id: str, before: float, after: float) -> None:
     """Called at the end of every relationship bump with a's affinity to b before and after it.
 
-    P0: does nothing. P3 adds the friendship and falling-out rule here (FRIEND_AT, RIFT_AT, RIFT_GAP_DAYS).
+    An acquaintance or coworker whose affinity rises to FRIEND_AT becomes a friend, on both sides (a side that
+    is family or a partner keeps its kind), with one `new_friend` event. A friend or partner whose affinity
+    drops below RIFT_AT falls out (`falling_out`; the kind stays), at most once per pair in RIFT_GAP_DAYS game
+    days: sim._rifts maps rift_key(a, b) to the tick of the pair's last falling-out. No fork reads a
+    relationship's kind, so no decision changes. Unknown characters (or a city with nobody) do nothing.
     """
+    agents = getattr(sim, "agents", None) or {}
+    a, b = agents.get(a_id), agents.get(b_id)
+    rel = a.relationships.get(b_id) if a is not None and b is not None else None
+    if rel is None:
+        return None
+    kind = rel.kind.value
+    if kind in FRIENDS_FROM and before < FRIEND_AT <= after:
+        friend = type(rel.kind)("friend")  # RelationKind.FRIEND, without importing agent
+        rel.kind = friend
+        back = b.relationships.get(a_id)
+        if back is not None and back.kind.value in FRIENDS_FROM:
+            back.kind = friend
+        text = f"{a.name} and {b.name} have become friends."
+        sim.event(text, a, tag="new_friend", agents=[b.id])
+        b.remember(sim.clock.stamp(), text)
+    elif kind in RIFT_KINDS and before >= RIFT_AT > after:
+        rifts = getattr(sim, "_rifts", None)
+        if rifts is None:
+            rifts = sim._rifts = {}
+        key = rift_key(a_id, b_id)
+        last = rifts.get(key)
+        if last is not None and sim.clock.tick - last < RIFT_GAP_DAYS * TICKS_PER_DAY:
+            return None
+        rifts[key] = sim.clock.tick
+        text = f"{a.name} and {b.name} have fallen out."
+        sim.event(text, a, tag="falling_out", agents=[b.id])
+        b.remember(sim.clock.stamp(), text)
     return None
