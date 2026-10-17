@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Dashboard dev page</title>
+  <link rel="stylesheet" href="../dashboard.css">
+  <style>
+    /* The page shell that client/index.html and style.css are expected to provide (see the P3c handoff):
+       a header, then #stage as a grid of #world (the map, position: relative) and #panel. */
+    :root {
+      --bg: #1d2330; --panel: #262e3d; --panel-2: #2f3849; --line: #3d475b; --text: #e9edf3; --muted: #9aa5b8;
+      --accent: #f6c445; --good: #6fcf7c; --bad: #ef6b6b; --blue: #6cb6ff;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden;
+      background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    header {
+      flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; min-height: 48px; padding: 6px 16px;
+      background: var(--panel); border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; color: var(--accent); font: 700 17px/1 ui-monospace, monospace; letter-spacing: .5px; }
+    #clock { min-width: 17ch; font: 15px ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+    #weather { color: var(--muted); font-size: 13px; }
+    #speed { display: flex; gap: 4px; }
+    #speed button, .devbtn {
+      min-width: 38px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel-2);
+      color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+    }
+    #speed button.on { background: var(--accent); border-color: var(--accent); color: #222; }
+    #speed button:disabled { opacity: .5; cursor: not-allowed; }
+    #role { margin-left: auto; color: var(--muted); font-size: 13px; }
+    body.watching #role { padding: 2px 8px; border-radius: 4px; background: #4a3a1c; color: #ffe1b8; }
+    details.dev { position: relative; color: var(--muted); font-size: 12px; }
+    details.dev summary { cursor: pointer; list-style: none; padding: 3px 8px; border: 1px dashed var(--line); border-radius: 4px; }
+    details.dev[open] .devmenu { display: flex; }
+    .devmenu {
+      position: absolute; right: 0; top: calc(100% + 6px); z-index: 50; display: none; flex-direction: column; gap: 6px;
+      width: 250px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, .4);
+    }
+    .devmenu a { color: var(--blue); }
+    #stage { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+    #world { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #1d2330; }
+    #map { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; cursor: pointer; }
+    @media (max-width: 900px) {
+      #stage { grid-template-columns: minmax(0, 1fr); }
+    }
+    @media (max-width: 520px) {
+      header { gap: 6px 12px; padding: 8px 16px; }
+      h1 { font-size: 15px; }
+      #clock { min-width: 0; font-size: 14px; }
+      #weather { font-size: 12px; }
+      #speed { order: 5; width: 100%; }
+      #speed button { flex: 1; min-width: 0; padding: 6px 0; }
+      body:not(.watching) #role { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GameOfAILife</h1>
+    <div id="clock">Connecting…</div>
+    <div id="weather"></div>
+    <div id="speed" role="group" aria-label="Speed">
+      <button data-speed="0" title="Pause" aria-label="Pause">⏸</button>
+      <button data-speed="1">1x</button>
+      <button data-speed="2">2x</button>
+      <button data-speed="4">4x</button>
+      <button data-speed="8">8x</button>
+      <button data-speed="16">16x</button>
+    </div>
+    <div id="role">You are God of this city</div>
+    <details class="dev">
+      <summary>dev</summary>
+      <div class="devmenu">
+        <div>Fake host, stub map. Options:
+          <a href="?">default</a> · <a href="?slow">?slow</a> · <a href="?browser">?browser</a> ·
+          <a href="?fresh">?fresh</a> · <a href="?speed=8">?speed=8</a> · <a href="?view=real">?view=real</a></div>
+        <button type="button" class="devbtn" id="dev-demote">Demote this view</button>
+        <button type="button" class="devbtn" id="dev-error">Send a bad request</button>
+      </div>
+    </details>
+  </header>
+  <main id="stage">
+    <section id="world">
+      <canvas id="map"></canvas>
+      <div id="hud"></div>
+      <div id="overlay-chips"></div>
+      <div id="toasts"></div>
+      <div id="ticker"></div>
+      <div id="tooltip" hidden></div>
+    </section>
+    <aside id="panel"></aside>
+  </main>
+  <script src="dashboard_fixture.js"></script>
+  <script src="../dashboard.js"></script>
+  <script>
+    // Wired the way game.js wires the real page: the view gets setTown/setState, Dash gets the messages.
+    "use strict";
+    (function () {
+      const q = new URLSearchParams(location.search);
+      const F = window.DASH_FIXTURE;
+      const host = F.createHost({ browser: q.has("browser"), slow: q.has("slow"), fresh: q.has("fresh"),
+        speed: Number(q.get("speed") || 1), seed: Number(q.get("seed") || 7) });
+      const canvas = document.getElementById("map");
+      const VIEW_SCRIPTS = ["proj", "art", "buildings", "actors", "scene", "movers", "camera", "minimap", "view"];
+      let view = null, speed = 1, state = null;
+      const viewOpts = {
+        onPick: (hit, ev) => Dash.pick(hit, ev),
+        onHover: (hit, ev) => Dash.hover(hit, ev),
+        onSelect: id => Dash.viewSelected(id),
+        onCamera: () => {},
+      };
+
+      function renderHeader() {
+        if (!state) return;
+        document.getElementById("clock").textContent = state.time;
+        const w = state.weather === "rain" ? (state.season === "winter" ? "❄ Snow" : "🌧 Rain") : "☀ Clear";
+        const plane = state.plane ? ` · ✈ ${state.plane.from} to ${state.plane.to}` : "";
+        document.getElementById("weather").textContent = `${state.season[0].toUpperCase() + state.season.slice(1)} · ${w}${plane}`;
+        for (const b of document.querySelectorAll("#speed button")) b.classList.toggle("on", Number(b.dataset.speed) === speed);
+      }
+      function onMessage(msg) {
+        if (msg.type === "welcome") {
+          state = msg.state; speed = msg.speed;
+          view.setTown(msg.town);
+          view.setState(msg.state, msg.speed);
+          Dash.welcome(msg);
+          renderHeader();
+          view.start();
+          host.start();
+        } else if (msg.type === "state") {
+          state = msg.state; speed = msg.speed;
+          view.setState(msg.state, msg.speed);
+          Dash.frame(msg);
+          renderHeader();
+        } else if (msg.type === "stats") {
+          Dash.stats(msg);
+        } else if (msg.type === "speed") {
+          speed = msg.speed;
+          renderHeader();
+        } else {
+          Dash.reply(msg);
+          if (msg.type === "demoted") {
+            document.body.classList.add("watching");
+            document.getElementById("role").textContent = "Watching only: God moved to another window. Reload to be God here.";
+            for (const b of document.querySelectorAll("#speed button")) b.disabled = true;
+          }
+        }
+      }
+      function start(real) {
+        view = real ? window.CityView.create(canvas, viewOpts) : F.createStubView(canvas, viewOpts);
+        window.devView = view;
+        window.devHost = host;
+        Dash.init(view, { send: msg => host.send(msg), characterPage: "../character.html" });
+        host.onmessage = onMessage;
+        host.send({ type: "hello", role: "god" });
+        if (q.get("view") === "real" && !real) Dash.notice("client/view/*.js did not load: showing the stub map.", "info");
+      }
+      document.getElementById("speed").addEventListener("click", ev => {
+        const b = ev.target.closest("button");
+        if (b) host.send({ type: "set_speed", speed: Number(b.dataset.speed) });
+      });
+      document.getElementById("dev-demote").addEventListener("click", () => host.demote());
+      document.getElementById("dev-error").addEventListener("click", () => host.send({ type: "get_home", home_id: "nowhere" }));
+
+      // ?view=real loads the renderer's 9 scripts in the PLAN 3.12 order (when client/view exists).
+      if (q.get("view") === "real") {
+        const load = i => {
+          if (i >= VIEW_SCRIPTS.length) { start(!!(window.CityView && window.CityView.create)); return; }
+          const s = document.createElement("script");
+          s.src = `../view/${VIEW_SCRIPTS[i]}.js`;
+          s.onload = () => load(i + 1);
+          s.onerror = () => start(false);
+          document.body.appendChild(s);
+        };
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = "../view/view.css";
+        document.head.appendChild(css);
+        load(0);
+      } else start(false);
+    })();
+  </script>
+</body>
+</html>
