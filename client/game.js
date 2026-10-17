@@ -15,6 +15,7 @@ let selected = null;
 let detail = null;
 let terrain = null; // pre-rendered static layer
 let terrainSeason = null;
+let lamps = []; // [x, y] canvas pixels of street-lamp bulbs, for the night glow
 const shown = {}; // agent id -> smoothed {x, y} for drawing
 const events = [];
 const forks = [];
@@ -38,6 +39,50 @@ function hash(s) {
   for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
   return h >>> 0;
 }
+// --- a tiny 3x5 pixel font, so map text stays crisp when the canvas is scaled up ---------
+
+const GLYPHS = {
+  A: "010101111101101", B: "110101110101110", C: "011100100100011", D: "110101101101110",
+  E: "111100110100111", F: "111100110100100", G: "011100101101011", H: "101101111101101",
+  I: "111010010010111", J: "001001001101010", K: "101110100110101", L: "100100100100111",
+  M: "1000111011101011000110001", N: "10011101101110011001", O: "010101101101010", P: "110101110100100",
+  Q: "010101101110011", R: "110101110101101", S: "011100010001110", T: "111010010010010",
+  U: "101101101101111", V: "101101101101010", W: "1000110001101011101110001", X: "101101010101101",
+  Y: "101101010010010", Z: "111001010100111",
+  0: "111101101101111", 1: "010110010010111", 2: "110001010100111", 3: "110001010001110",
+  4: "101101111001001", 5: "111100110001110", 6: "011100111101111", 7: "111001010010010",
+  8: "111101111101111", 9: "111101111001110",
+  "'": "010010000000000", "-": "000000111000000", ".": "000000000000010", "?": "110001010000010",
+  "!": "010010010000010", "+": "000010111010000", "$": "011110010011110", " ": "000000000000000",
+};
+// Glyphs are 5 rows tall; their width is the string length / 5 (M and W are wider so they stay legible).
+const glyphOf = ch => GLYPHS[ch] || GLYPHS["?"];
+function pixelWidth(text) {
+  let w = -1;
+  for (const ch of text.toUpperCase()) w += glyphOf(ch).length / 5 + 1;
+  return Math.max(0, w);
+}
+function pixelText(g, text, x, y, color) {
+  g.fillStyle = color;
+  let cx = x;
+  for (const ch of text.toUpperCase()) {
+    const glyph = glyphOf(ch), gw = glyph.length / 5;
+    for (let b = 0; b < glyph.length; b++) if (glyph[b] === "1") g.fillRect(cx + (b % gw), y + Math.floor(b / gw), 1, 1);
+    cx += gw + 1;
+  }
+}
+// Text with a dark plate behind it, centred on cx; y is the top of the plate.
+function plate(g, text, cx, y, fg = "#ffffff", bg = "rgba(20,24,34,.85)") {
+  const w = pixelWidth(text) + 4, x = Math.round(cx - w / 2);
+  g.fillStyle = bg; g.fillRect(x, y, w, 9); g.fillRect(x + 1, y - 1, w - 2, 11);
+  pixelText(g, text, x + 2, y + 2, fg);
+}
+
+function shortName(p) {
+  if (p.kind === "home") return p.name.replace(/ house$/i, "");
+  return p.name;
+}
+
 function shirt(id) { return `hsl(${hash(id) % 360} 65% 55%)`; }
 function hair(id) { return ["#3b2416", "#6b4423", "#1d1d1d", "#c9a14a", "#8a3b1c", "#b8b8b8"][hash(id + "h") % 6]; }
 
@@ -87,7 +132,25 @@ function buildTerrain() {
     g.fillStyle = season === "autumn" ? "#e2913a" : season === "winter" ? "#ffffff" : "#45a047";
     g.fillRect(px + 4, py + 2, 4, 3);
   }
+  // Street lamps on the grass verge north of each east-west road.
+  lamps = [];
+  for (const ry of town.road_rows) for (let x = 1; x < town.w; x += 4) {
+    if (ry < 1 || town.road_cols.includes(x) || town.tiles[ry - 1][x] !== ".") continue;
+    const px = x * T + 12, py = ry * T - 14;
+    g.fillStyle = "rgba(0,0,0,.25)"; g.fillRect(px - 1, py + 13, 4, 2);
+    g.fillStyle = "#3b4150"; g.fillRect(px, py + 2, 2, 12);
+    g.fillStyle = "#2a2f3a"; g.fillRect(px - 1, py, 4, 3);
+    g.fillStyle = "#fff3c4"; g.fillRect(px, py + 1, 2, 1);
+    lamps.push([px + 1, py + 2]);
+  }
   for (const p of town.places) if (p.kind !== "park") drawBuilding(g, p);
+  // A park sign at the park's entrance tile.
+  const park = town.places.find(p => p.kind === "park");
+  if (park) {
+    const ex = park.entry[0] * T, ey = park.entry[1] * T;
+    g.fillStyle = "#6b4a2b"; g.fillRect(ex + 3, ey + 8, 2, 7); g.fillRect(ex + 11, ey + 8, 2, 7);
+    plate(g, park.name, ex + 8, ey + 1, "#ffffff", "#7a5530");
+  }
   // Pond in the park corner, for some life.
   g.fillStyle = "#3d8fd1"; g.fillRect(33 * T + 2, 18 * T + 4, 2 * T + 8, T + 6);
   g.fillStyle = "#79b9ea"; g.fillRect(33 * T + 6, 18 * T + 7, 10, 2);
@@ -115,8 +178,17 @@ function drawBuilding(g, p) {
   const dx = p.entry[0] * T + 4, dy = (p.entry[1] - 1) * T + 4;
   g.fillStyle = "#6b4226"; g.fillRect(dx, dy, 8, 12);
   g.fillStyle = "#e3b54a"; g.fillRect(dx + 6, dy + 6, 1, 2);
+  // Chimney on houses, roof ridge highlight on everything.
+  g.fillStyle = "rgba(255,255,255,.25)"; g.fillRect(x - 1, y, w + 2, 2);
+  if (p.kind === "home") {
+    g.fillStyle = "#7a3a2a"; g.fillRect(x + w - 11, y - 4, 5, 8);
+    g.fillStyle = "#5a2a1e"; g.fillRect(x + w - 12, y - 5, 7, 2);
+  }
+  // Name plate over the eave, Pokémon-sign style.
+  const name = shortName(p);
+  if (pixelWidth(name) + 4 <= w + 6) plate(g, name, x + w / 2, y + roofH - 7, "#ffffff", "rgba(30,26,22,.78)");
   // Sign on the roof.
-  const sx = x + w / 2, sy = y + roofH / 2;
+  const sx = Math.round(x + w / 2), sy = Math.round(y + (roofH - 7) / 2);
   g.fillStyle = "#ffffff";
   if (p.kind === "hospital") { g.fillStyle = "#e23b3b"; g.fillRect(sx - 1, sy - 5, 3, 11); g.fillRect(sx - 5, sy - 1, 11, 3); }
   else if (p.kind === "cafe") { g.fillRect(sx - 4, sy - 2, 7, 6); g.fillRect(sx + 3, sy - 1, 2, 3); }
@@ -146,17 +218,6 @@ function draw(now) {
   ctx.drawImage(terrain, 0, 0);
 
   const night = nightAlpha(state.minute);
-  if (night > 0.2) { // lit windows
-    ctx.fillStyle = "rgba(255, 214, 102, .85)";
-    for (const p of town.places) {
-      if (p.kind === "park") continue;
-      const roofH = Math.floor(p.h * T * 0.55), wy = p.y * T + roofH + 4;
-      for (let wx = p.x * T + 4; wx < (p.x + p.w) * T - 6; wx += 12) {
-        if (Math.abs(wx + 3 - (p.entry[0] * T + 8)) < 9) continue;
-        if (hash(p.id + wx) % 3) ctx.fillRect(wx, wy, 7, 6);
-      }
-    }
-  }
   drawLights();
   drawBus();
 
@@ -169,11 +230,62 @@ function draw(now) {
     if (d > 4 || d <= step) { s.x = a.x; s.y = a.y; } else { s.x += dx / d * step; s.y += dy / d * step; }
   }
   for (const a of ppl) drawAgent(a, shown[a.id], now);
-  drawOccupancy();
   drawPlane();
 
-  if (night > 0) { ctx.fillStyle = `rgba(16, 24, 64, ${night})`; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+  if (night > 0) {
+    ctx.fillStyle = `rgba(16, 24, 64, ${night})`; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawNightLights(night);
+  }
   if (state.weather === "rain") drawRain(dt, state.season === "winter");
+  drawSelectedInside(now);
+  drawOccupancy();
+  for (const a of ppl) if (selected === a.id || hover === a.id) {
+    const s = shown[a.id];
+    plate(ctx, a.name.split(" ")[0], Math.round(s.x * T) + 8, Math.round(s.y * T) - 12,
+      selected === a.id ? "#ffe27a" : "#ffffff");
+  }
+}
+
+// Windows of occupied buildings and street lamps glow through the night tint.
+function drawNightLights(night) {
+  const k = Math.min(1, night / 0.5);
+  const occupied = new Set(state.agents.filter(a => a.alive && a.inside).map(a => a.inside));
+  for (const p of town.places) {
+    if (p.kind === "park") continue;
+    const lit = occupied.has(p.id) || (p.kind !== "home" && p.kind !== "school" && (!p.hours || (state.minute / 60 >= p.hours[0] && state.minute / 60 < p.hours[1])));
+    if (!lit) continue;
+    const roofH = Math.floor(p.h * T * 0.55), wy = p.y * T + roofH + 4;
+    for (let wx = p.x * T + 4; wx < (p.x + p.w) * T - 6; wx += 12) {
+      if (Math.abs(wx + 3 - (p.entry[0] * T + 8)) < 9) continue;
+      if (p.kind === "home" && hash(p.id + wx) % 4 === 0) continue;
+      ctx.fillStyle = `rgba(255, 200, 90, ${0.18 * k})`; ctx.fillRect(wx - 2, wy - 2, 11, 10);
+      ctx.fillStyle = `rgba(255, 220, 120, ${0.95 * k})`; ctx.fillRect(wx, wy, 7, 6);
+      ctx.fillStyle = `rgba(200, 140, 60, ${0.9 * k})`; ctx.fillRect(wx + 3, wy, 1, 6);
+    }
+  }
+  for (const [lx, ly] of lamps) {
+    // A pool of light on the ground below the bulb, plus the bulb itself.
+    const gx = lx, gy = ly + 14;
+    const grad = ctx.createRadialGradient(gx, gy, 1, gx, gy, 16);
+    grad.addColorStop(0, `rgba(255, 226, 140, ${0.32 * k})`);
+    grad.addColorStop(1, "rgba(255, 226, 140, 0)");
+    ctx.fillStyle = grad; ctx.fillRect(gx - 16, gy - 16, 32, 32);
+    ctx.fillStyle = `rgba(255, 240, 190, ${0.35 * k})`; ctx.fillRect(lx - 2, ly - 2, 4, 4);
+    ctx.fillStyle = `rgba(255, 248, 215, ${k})`; ctx.fillRect(lx - 1, ly - 1, 2, 2);
+  }
+}
+
+// The selected character is indoors: pulse an outline around their building and name them at the door.
+function drawSelectedInside(now) {
+  if (!selected) return;
+  const a = state.agents.find(x => x.id === selected);
+  if (!a || !a.alive || !a.inside) return;
+  const p = town.places.find(q => q.id === a.inside);
+  if (!p) return;
+  const on = Math.floor(now / 400) % 2 === 0;
+  ctx.strokeStyle = on ? "#ffe27a" : "#f6a945"; ctx.lineWidth = 2;
+  ctx.strokeRect(p.x * T - 3, p.y * T - 3, p.w * T + 6, p.h * T + 6);
+  plate(ctx, a.name.split(" ")[0], p.entry[0] * T + 8, p.entry[1] * T + 4, "#ffe27a");
 }
 
 function drawLights() {
@@ -218,21 +330,16 @@ function drawAgent(a, s, now) {
   ctx.fillStyle = "#f1c6a0"; ctx.fillRect(px + 5, top, 6, 5); // face
   ctx.fillStyle = a.age >= 65 ? "#d0d0d0" : hair(a.id); ctx.fillRect(px + 4, top - 1, 8, 2);
   ctx.fillStyle = "#222"; ctx.fillRect(px + 6, top + 2, 1, 1); ctx.fillRect(px + 9, top + 2, 1, 1);
-  if (a.state === "deciding") bubble(px + 10, top - 8, "?", a.controller ? "#6cb6ff" : "#ffffff");
-  else if (a.activity === "phone_call" || a.activity === "text") bubble(px + 10, top - 8, "…", "#ffffff");
-  if (sel || hover === a.id) label(a.name.split(" ")[0], px + 8, py - 6);
+  if (a.state === "deciding") bubble(px + 10, top - 9, "?", a.controller ? "#6cb6ff" : "#ffffff");
+  else if (a.activity === "phone_call" || a.activity === "text") bubble(px + 10, top - 9, "...", "#ffffff");
 }
 
+// A speech bubble with a pixel-font glyph, outlined so it reads on grass and road alike.
 function bubble(x, y, ch, color) {
-  ctx.fillStyle = color; ctx.fillRect(x, y, 8, 7); ctx.fillRect(x + 1, y + 7, 2, 2);
-  ctx.fillStyle = "#222"; ctx.font = "bold 7px monospace"; ctx.textAlign = "center"; ctx.fillText(ch, x + 4, y + 6);
-}
-
-function label(text, x, y) {
-  ctx.font = "8px monospace"; ctx.textAlign = "center";
-  const w = ctx.measureText(text).width + 4;
-  ctx.fillStyle = "rgba(15,18,26,.8)"; ctx.fillRect(x - w / 2, y - 7, w, 9);
-  ctx.fillStyle = "#fff"; ctx.fillText(text, x, y);
+  const w = pixelWidth(ch) + 4;
+  ctx.fillStyle = "#222"; ctx.fillRect(x - 1, y - 1, w + 2, 9); ctx.fillRect(x, y + 8, 3, 2);
+  ctx.fillStyle = color; ctx.fillRect(x, y, w, 7); ctx.fillRect(x + 1, y + 7, 1, 1);
+  pixelText(ctx, ch, x + 2, y + 1, "#222");
 }
 
 function drawOccupancy() {
@@ -240,10 +347,12 @@ function drawOccupancy() {
   for (const a of state.agents) if (a.alive && a.inside) counts[a.inside] = (counts[a.inside] || 0) + 1;
   for (const p of town.places) {
     const n = counts[p.id];
-    if (!n) continue;
-    const x = (p.x + p.w) * T - 6, y = p.y * T + 2;
-    ctx.fillStyle = "#f6c445"; ctx.fillRect(x - 6, y, 11, 9);
-    ctx.fillStyle = "#222"; ctx.font = "bold 8px monospace"; ctx.textAlign = "center"; ctx.fillText(String(n), x, y + 8);
+    if (!n || p.kind === "park") continue;
+    const text = String(n), w = pixelWidth(text) + 4;
+    const x = (p.x + p.w) * T - w - 1, y = p.y * T - 3;
+    ctx.fillStyle = "#3a2a10"; ctx.fillRect(x - 1, y - 1, w + 2, 9);
+    ctx.fillStyle = "#f6c445"; ctx.fillRect(x, y, w, 7);
+    pixelText(ctx, text, x + 2, y + 1, "#2a1d05");
   }
 }
 
@@ -274,7 +383,7 @@ function tileAt(ev) {
   return { x: (ev.clientX - r.left) / r.width * canvas.width / T, y: (ev.clientY - r.top) / r.height * canvas.height / T };
 }
 function agentAt(t) {
-  let best = null, bestD = 0.9;
+  let best = null, bestD = 1.1;
   for (const a of state.agents) {
     if (!a.alive || a.inside) continue;
     const s = shown[a.id] || a;
@@ -301,7 +410,7 @@ canvas.addEventListener("mousemove", ev => {
   tip.hidden = !text;
   tip.textContent = text;
   const r = canvas.getBoundingClientRect(), wr = canvas.parentElement.getBoundingClientRect();
-  tip.style.left = `${Math.min(ev.clientX - wr.left + 12, r.width - 200)}px`;
+  tip.style.left = `${Math.max(0, Math.min(ev.clientX - wr.left + 12, r.width - tip.offsetWidth - 4))}px`;
   tip.style.top = `${ev.clientY - wr.top + 14}px`;
 });
 canvas.addEventListener("mouseleave", () => { hover = null; document.getElementById("tooltip").hidden = true; });
@@ -336,6 +445,7 @@ const NEED_COLOR = { hunger: "#f0a04b", energy: "#6cb6ff", social: "#f08ab4", fu
 function select(id) {
   selected = id;
   detail = null;
+  detailKey = "";
   document.querySelector('#tabs button[data-tab="people"]').click();
   send({ type: "get_agent", agent_id: id });
   renderPeople();
@@ -360,11 +470,12 @@ function renderPeople() {
   roster.hidden = false;
   box.hidden = true;
   roster.innerHTML = state.agents.map(a => `
-    <li data-id="${a.id}" class="${a.alive ? "" : "dead"}">
+    <li data-id="${a.id}" class="${a.alive ? "" : "dead"}${a.id === selected ? " sel" : ""}">
       <span class="swatch" style="background:${shirt(a.id)}"></span>
       <span class="grow"><b>${esc(a.name)}</b> <span class="small">${a.alive ? esc(pretty(a.activity)) : "died"}</span></span>
-      <span class="small" title="Luck">☘ ${a.luck}</span>
-      <span class="small" title="${a.controller ? "Played by " + esc(a.controller) : "Running on profile defaults"}">${a.controller ? "🤖" : "·"}</span>
+      <span class="where small">${a.alive ? esc(a.inside ? placeName(a.inside) : "outside") : ""}</span>
+      <span class="luckchip" title="Luck">☘ ${a.luck}</span>
+      ${a.controller ? `<span class="small" title="Played by ${esc(a.controller)}">🤖</span>` : ""}
     </li>`).join("");
 }
 document.getElementById("roster").addEventListener("click", ev => {
@@ -373,15 +484,27 @@ document.getElementById("roster").addEventListener("click", ev => {
 });
 
 let editingProfile = false;
+let detailKey = "";
+// Everything in the panel except the live numbers; when it is unchanged we only refresh the numbers,
+// so scrolling, hovering and half-dragged sliders are never clobbered by the 800 ms refresh.
+function staticKey(a) {
+  return JSON.stringify([a.id, a.alive, a.controller, a.job, a.profile, a.possessions, a.relationships,
+    a.memory, a.forks.map(f => [f.id, f.choice, f.happened])]);
+}
 function renderDetail(box) {
   const a = detail;
   const active = document.activeElement;
-  if (box.contains(active) && (active.tagName === "TEXTAREA" || active.type === "range") || editingProfile) {
+  const key = staticKey(a);
+  const same = key === detailKey && box.querySelector("#live");
+  if (same || box.contains(active) && (active.tagName === "TEXTAREA" || active.type === "range") || editingProfile) {
     // Keep the God's edits; only refresh the live numbers.
     const live = box.querySelector("#live");
     if (live) live.innerHTML = liveHtml(a);
+    const luck = box.querySelector("#luck");
+    if (luck && active !== luck) { luck.value = a.luck; box.querySelector("#luckv").textContent = Math.round(a.luck); }
     return;
   }
+  detailKey = key;
   const traits = Object.entries(a.profile.traits).map(([k, v]) => `
       <label for="t-${k}">${k}</label><input id="t-${k}" data-trait="${k}" type="range" min="0" max="1" step="0.05" value="${v}"><span>${v.toFixed(2)}</span>`).join("");
   const forksHtml = a.forks.slice().reverse().map(forkHtml).join("") || '<li class="small">No decisions yet.</li>';
@@ -409,14 +532,14 @@ function renderDetail(box) {
       <li>${a.possessions.car ? "A car" : "No car"}</li>
       <li>Phone <span class="small">${a.possessions.phone.condition}</span></li>
       <li>${a.possessions.groceries_at_home} meals in the fridge</li>
-      ${a.possessions.savings_goal ? `<li>Saving for ${esc(a.possessions.savings_goal.name)} <span class="small">$${a.possessions.savings_goal.saved} of $${a.possessions.savings_goal.target}</span></li>` : ""}
+      ${a.possessions.savings_goal ? `<li>Saving for ${esc(a.possessions.savings_goal.name)} <span class="small">$${Math.round(a.possessions.savings_goal.saved)} of $${a.possessions.savings_goal.target}</span></li>` : ""}
     </ul>
     <h3>People</h3><ul class="list">${rels || '<li class="small">Nobody yet.</li>'}</ul>
     <h3>Memory</h3><ul class="list">${a.memory.slice().reverse().map(m => `<li>${esc(m)}</li>`).join("") || '<li class="small">Nothing yet.</li>'}</ul>`;
-  box.querySelector("#back").onclick = () => { selected = null; detail = null; renderPeople(); };
+  box.querySelector("#back").onclick = () => { selected = null; detail = null; detailKey = ""; renderPeople(); };
   const luck = box.querySelector("#luck");
   luck.oninput = () => { box.querySelector("#luckv").textContent = luck.value; };
-  luck.onchange = () => send({ type: "set_luck", agent_id: a.id, luck: Number(luck.value) });
+  luck.onchange = () => { send({ type: "set_luck", agent_id: a.id, luck: Number(luck.value) }); luck.blur(); };
   for (const r of box.querySelectorAll("[data-trait]")) {
     r.oninput = () => { editingProfile = true; r.nextElementSibling.textContent = Number(r.value).toFixed(2); };
   }
@@ -492,7 +615,12 @@ function connect() {
       if (selected && now - lastDetailAsk > 800) { lastDetailAsk = now; send({ type: "get_agent", agent_id: selected }); }
       if (!selected && now - lastRoster > 1000) { lastRoster = now; renderPeople(); }
     } else if (msg.type === "agent") {
-      if (msg.agent.id === selected) { detail = msg.agent; renderPeople(); }
+      if (msg.agent.id === selected) {
+        const first = !detail;
+        detail = msg.agent; renderPeople();
+        // On narrow screens the panel sits below the map: bring the character into view.
+        if (first && window.matchMedia("(max-width: 900px)").matches) document.querySelector("aside").scrollIntoView({ behavior: "smooth", block: "start" });
+      }
     } else if (msg.type === "speed") {
       speed = msg.speed; if (state) renderHeader();
     } else if (msg.type === "demoted") {
