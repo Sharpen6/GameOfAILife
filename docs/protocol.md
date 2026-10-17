@@ -65,7 +65,11 @@ Two roles share the endpoint. The first message you send picks yours:
   included. That covers the `welcome` and the errors before `hello` too. Only
   `messages must be JSON` and `messages must be JSON objects` never carry one,
   since the server could not read the message. Pushes never carry a `req_id`.
-  Use it to match replies to requests.
+  Use it to match replies to requests. The one exception: a `req_id` nested
+  too deeply for the server to write back (on Python 3.11, a few levels short
+  of the roughly 1000 it can read) is left out, and the reply arrives without
+  it. A reply that echoes another field nested that deeply is replaced by
+  `{"type": "error", "error": "bad message: nested too deeply to echo back"}`.
 - A message whose fields have the wrong type usually gets
   `{"type": "error", "error": "bad message: <detail>"}` (the server catches
   `ValueError`, `TypeError`, `KeyError`, `AttributeError` and `OverflowError`,
@@ -88,21 +92,17 @@ Two roles share the endpoint. The first message you send picks yours:
   meanwhile, so your other requests, `choose` included, queue behind it. For
   example, 140 texts sent at once get their first 100 replies right away and the
   other 40 over the next 2 seconds.
-- **Slow clients are dropped.** A slow client never holds up the city or other
-  clients. The server hands each push to the connection at once while the
-  network buffers (the operating system's socket buffers and the server's own
-  write buffer) have room, whether or not the client is reading. Once they are
-  full, it has to wait for the client to read. When a push has waited more than
-  5 seconds without being handed over (the client stopped reading, or reads too
-  slowly to keep up), the client is dropped at its next push: the server closes
-  its end without a close frame. Data already in the operating system's buffers
-  may still reach the client, followed by an EOF, so a client that starts
-  reading again first gets frames that are already old. A client that stops
-  reading is therefore dropped only once its buffers have filled and 5 more
-  seconds have passed, which can take minutes for a God view at 1x (less at
-  higher speeds) and much longer for a controller, whose pushes are small. As
-  with any disconnect, a dropped controller's characters are released, and if
-  the dropped view was God, the city has no God until the next God `hello`.
+- **Slow clients.** A slow client never holds up the city or other clients.
+  The server hands each push to the connection while the network buffers have
+  room, whether or not the client is reading, and keeps the rest queued for
+  that client. Texts (`message` pushes) that wait too long are skipped and
+  reported with `messages_skipped`; a client is disconnected only when a push
+  that matters (a state frame, fork, `invite_answer` or `demoted`) has waited
+  more than 5 seconds. See [Slow clients](#slow-clients). A disconnected client
+  gets no close frame: the server closes its end, and data already in the
+  operating system's buffers may still arrive, followed by an EOF. As with any
+  disconnect, a dropped controller's characters are released, and if the
+  dropped view was God, the city has no God until the next God `hello`.
 
 ## Hello and welcome
 
@@ -299,9 +299,7 @@ Any other `type` gets `{"type": "error", "error": "unknown message type <type>"}
 where `<type>` is the server's `repr` of the value: quoted for a string
 (`unknown message type 'hello'`) and `None` for a message with no `type`.
 Controller messages (`choose`, `claim`, `query`, ...) sent on a God connection
-get this error too. On a [watching](#one-god-per-city) view, a `type` that is a
-JSON array or object gets `bad message: unhashable type: 'list'` (or `'dict'`)
-instead.
+get this error too, as does a `type` that is a JSON array or object.
 
 ## Controller messages
 
@@ -420,7 +418,13 @@ with `invite`.
 
 On success the text lands in the recipient's inbox (which keeps 30), both
 characters gain a little social need, an event of kind `"message"` is logged,
-and the recipient's controller, if any, gets a [`message`](#message) push.
+and the recipient's controller, if any, gets a [`message`](#message) push,
+unless that controller is falling behind (see [Slow clients](#slow-clients)).
+
+After a burst of 100, the server handles at most 20 `send_message` and `invite`
+requests a second from one connection. Extra requests are not refused: the
+server waits before handling them, and reads nothing else from that connection
+meanwhile.
 
 ### `invite`
 
@@ -581,6 +585,23 @@ To the controller of the character that received a `send_message`.
 
 `agent_id` (equal to `to`) is the character of yours the push is for.
 
+A controller that falls behind may not get every `message` push; see
+[Slow clients](#slow-clients). The text is in the character's inbox either way.
+
+### `messages_skipped`
+
+To a controller, after `message` pushes for one of its characters were skipped
+because it was falling behind (see [Slow clients](#slow-clients)).
+
+```json
+{"type": "messages_skipped", "agent_id": "tom", "count": 37}
+```
+
+`count` texts to `agent_id` were not pushed since the last report. They are in
+the character's inbox: `query` with `"what": "inbox"` returns the last 20, and
+the inbox keeps the last 30, so with a `count` over 20 some of them can no
+longer be read.
+
 ### `invite_answer`
 
 To the controller of a character whose invite was just answered, including an
@@ -604,6 +625,25 @@ To the God view that has just been replaced by a newer one.
 The connection stays open and keeps receiving state frames. See
 [One God per city](#one-god-per-city).
 
+### Slow clients
+
+Each client's pushes are sent in order, and a slow client only holds up itself.
+A client that falls behind is treated like this:
+
+- A `message` push is skipped instead of sent once it has waited 2.5 s, or
+  0.5 s with a push that matters (such as a fork) waiting behind it, so a fork
+  does not wait behind a flood of texts. While the client is still taking a
+  push queued 5 s ago, new texts are skipped at once. Skipped texts are
+  reported with [`messages_skipped`](#messages_skipped) before the next push,
+  or as soon as nothing else is waiting.
+- Any other push (state frames, forks, `invite_answer`, `demoted`) is never
+  skipped. A client with one of those still unsent after 5 s is disconnected,
+  and a controller's characters are released. `message` pushes alone never get
+  a client disconnected.
+
+A God view gets every text as an event in its state frames, which are never
+skipped, so a view on a slow link can still be disconnected by enough texts.
+
 ### `ack`
 
 The reply to `choose`, described [above](#choose). Listed here because it is
@@ -625,7 +665,8 @@ connection stays open, except after a bad hello role. All error strings:
 | `say hello first` | Any message before `hello`. |
 | `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list, `"all"` nor an empty value (for example `5` or `"dana"`; see [Bad hello](#bad-hello)): `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
 | `role must be god or controller` | Bad hello role; the server closes the connection. |
-| `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. A watching God view whose `type` is a JSON array or object gets `bad message: unhashable type: 'list'` (or `'dict'`). |
+| `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. |
+| `bad message: nested too deeply to echo back` | The reply would echo a field nested too deeply to write (see `req_id` under [Message basics](#message-basics)). |
 | `unknown message type <type>` | The type is not one your role can send. `<type>` is the server's Python `repr` of the value: quoted for a string (`unknown message type 'hello'`), `None` for a missing type or `null`, and bare for a number (`unknown message type 5`). |
 | `unknown character` | `get_agent` or `set_profile` with an unknown id. |
 | `not your character` | `query`, `send_message` or `invite` for a character you do not hold. |

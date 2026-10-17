@@ -17,6 +17,8 @@ import asyncio
 import json
 import math
 import mimetypes
+import socket
+from collections import deque
 from pathlib import Path
 
 from .clock import TICKS_PER_REAL_SECOND
@@ -28,6 +30,8 @@ FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
+AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in the inbox
+UNSENT_BYTES = 16384  # how much the kernel may hold that is not on its way to the client yet
 PACED = ("send_message", "invite")  # what lands on other controllers and in every view's frames
 PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
 
@@ -41,6 +45,8 @@ class GameServer:
         self.controllers: dict[str, WebSocket] = {}
         self._outboxes: dict[WebSocket, asyncio.Queue] = {}  # every session's pushes waiting to be sent
         self._sending: dict[WebSocket, float] = {}  # when the push each sender is on was queued
+        self._urgent: dict[WebSocket, deque[float]] = {}  # when each session's unsent never-skipped pushes were queued
+        self._skipped: dict[WebSocket, dict[str, int]] = {}  # texts skipped for each character, not yet reported
         self._connections: set[asyncio.StreamWriter] = set()
         self._server: asyncio.base_events.Server | None = None
         self._loop_task: asyncio.Task | None = None
@@ -85,7 +91,7 @@ class GameServer:
         for name, msg in outbox:
             ws = self.controllers.get(name)
             if ws:
-                self._push(ws, json.dumps(msg))
+                self._push(ws, json.dumps(msg), inbox=msg["agent_id"] if msg["type"] == "message" else None)
         viewers = [ws for ws in [self.god, *self.observers] if ws]
         if not viewers or not (stepped or events or forks):
             return
@@ -147,34 +153,76 @@ class GameServer:
             pass
 
     async def _reply(self, ws: WebSocket, msg: dict, reply: dict) -> None:
-        """Send the direct reply to msg, with its req_id if it had one."""
+        """Send the direct reply to msg, with its req_id if it had one and it can be written back."""
         if "req_id" in msg:
             reply["req_id"] = msg["req_id"]
-        await self._send(ws, reply)
+        try:
+            text = json.dumps(reply)
+        except (RecursionError, ValueError):  # Python 3.11 can read nesting it cannot write back
+            reply.pop("req_id", None)
+            try:
+                text = json.dumps(reply)  # the reply still arrives, only without its req_id
+            except (RecursionError, ValueError):  # it echoes another field nested that deep
+                text = json.dumps({"type": "error", "error": "bad message: nested too deeply to echo back"})
+        await self._send_raw(ws, text)
 
-    def _push(self, ws: WebSocket, text: str) -> None:
+    def _push(self, ws: WebSocket, text: str, inbox: str | None = None) -> None:
         """Queue a message the client did not ask for, without waiting on the client.
 
-        A client still on a push queued more than STALL_SECONDS ago (it stopped reading,
-        or reads too slowly to keep up) is dropped, so it can never hold up the city or
-        pile up more than that many seconds of pushes. A burst of pushes is not lag.
+        A client with a push that matters still unsent after STALL_SECONDS (it stopped
+        reading, or reads too slowly to keep up) is dropped, so it can never hold up the
+        city or pile up more than that many seconds of pushes. A burst of pushes is not lag.
+        A controller's `message` push names the character whose inbox has its text, and
+        never gets a client dropped: _sender skips it once the client falls behind, and a
+        client still on a push queued STALL_SECONDS ago gets no more texts queued, so it
+        piles up none. Views see every text as an event in their state frames, which
+        are never skipped, so enough flooding controllers can still get a slow view
+        dropped; anyone may take over as God, so that is a nuisance, not a theft.
         """
         outbox = self._outboxes.get(ws)
         if outbox is None or ws.closed:
             return
         now = asyncio.get_running_loop().time()
-        if now - self._sending.get(ws, now) > STALL_SECONDS:
+        urgent, skipped = self._urgent[ws], self._skipped[ws]
+        if urgent and now - urgent[0] > STALL_SECONDS:
             ws.abort()
             return
-        outbox.put_nowait((now, text))
+        if inbox and now - self._sending.get(ws, now) > STALL_SECONDS:
+            if not skipped:
+                outbox.put_nowait((now, None, None))  # so _sender reports it even if nothing else comes
+            skipped[inbox] = skipped.get(inbox, 0) + 1
+            return
+        if not inbox:
+            urgent.append(now)
+        outbox.put_nowait((now, text, inbox))
 
     async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
-        """Send one client's pushes in order, so a slow client only ever holds up itself."""
+        """Send one client's pushes in order, so a slow client only ever holds up itself.
+
+        A text the client is falling behind on is skipped: one that has waited half of
+        STALL_SECONDS, or AHEAD_SECONDS with a push that matters (a fork) waiting behind it.
+        The client is told how many it missed for each character, so it can query the inbox.
+        """
+        loop = asyncio.get_running_loop()
+        urgent, skipped = self._urgent[ws], self._skipped[ws]
         try:
             while True:
-                queued, text = await outbox.get()
+                queued, text, inbox = await outbox.get()
+                waited = loop.time() - queued
+                # Anything still in urgent was queued after this text: earlier pushes are sent.
+                if inbox and (waited > STALL_SECONDS / 2 or waited > AHEAD_SECONDS and urgent):
+                    skipped[inbox] = skipped.get(inbox, 0) + 1
+                    if not outbox.empty():
+                        continue
+                    text = None  # the queue is empty, so report the skipped texts now
                 self._sending[ws] = queued  # everything still queued is newer, so this is the lag
-                await ws.send(text)
+                while skipped:  # _push may skip more meanwhile
+                    aid, n = skipped.popitem()
+                    await ws.send(json.dumps({"type": "messages_skipped", "agent_id": aid, "count": n}))
+                if text is not None:
+                    await ws.send(text)
+                    if not inbox:
+                        urgent.popleft()
                 del self._sending[ws]
         except ConnectionClosed:
             pass  # the connection is gone: the session's recv() sees that too and ends
@@ -195,7 +243,15 @@ class GameServer:
     async def _session(self, ws: WebSocket) -> None:
         role, name = None, None
         paced = 0.0  # when this controller's last PACED message was due
+        try:
+            # Otherwise the kernel takes megabytes a slow client has not read, and the texts among
+            # them can no longer be skipped. Kept in the outbox instead, a fork gets ahead of them.
+            sock = ws.writer.get_extra_info("socket")
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NOTSENT_LOWAT, UNSENT_BYTES)
+        except (AttributeError, OSError):  # not on every system
+            pass
         self._outboxes[ws] = outbox = asyncio.Queue()
+        self._urgent[ws], self._skipped[ws] = deque(), {}
         sender = asyncio.create_task(self._sender(ws, outbox))
         try:
             while True:
@@ -218,7 +274,7 @@ class GameServer:
                     continue
                 watching = role == "god" and ws is not self.god
                 try:
-                    if watching and msg.get("type") in GOD_ONLY:
+                    if watching and isinstance(msg.get("type"), str) and msg["type"] in GOD_ONLY:
                         reply = {"type": "error", "error": "only God can do that; this view is watching"}
                     elif role == "god":
                         reply = self._god(msg)
@@ -236,6 +292,8 @@ class GameServer:
             sender.cancel()
             del self._outboxes[ws]
             self._sending.pop(ws, None)
+            self._urgent.pop(ws, None)
+            self._skipped.pop(ws, None)
             if role == "controller" and self.controllers.get(name) is ws:
                 del self.controllers[name]
                 self.sim.release(name)
@@ -262,22 +320,27 @@ class GameServer:
             while name in self.controllers:
                 name, n = f"{base}-{n}", n + 1
             self.controllers[name] = ws
-            wanted = msg.get("characters") or []
-            if wanted == "all":
-                wanted = [a.id for a in self.sim.living() if not a.controller]
-            if not isinstance(wanted, list):
+            try:
+                wanted = msg.get("characters") or []
+                if wanted == "all":
+                    wanted = [a.id for a in self.sim.living() if not a.controller]
+                if not isinstance(wanted, list):
+                    raise TypeError('characters must be a list of ids or "all"')
+                wanted = [str(w) for w in wanted]
+                claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
+                await self._reply(ws, msg, {
+                    "type": "welcome", "role": "controller", "name": name, "characters": claimed,
+                    "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
+                    "answer_seconds": 5, "time": self.sim.clock.stamp(),
+                    "available": [a.id for a in self.sim.living() if not a.controller],
+                })
+                for aid in claimed:
+                    self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
+            except BaseException:
+                # _session does not know this name yet, so a hello that fails undoes itself here.
                 del self.controllers[name]
-                raise TypeError('characters must be a list of ids or "all"')
-            wanted = [str(w) for w in wanted]
-            claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
-            await self._reply(ws, msg, {
-                "type": "welcome", "role": "controller", "name": name, "characters": claimed,
-                "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
-                "answer_seconds": 5, "time": self.sim.clock.stamp(),
-                "available": [a.id for a in self.sim.living() if not a.controller],
-            })
-            for aid in claimed:
-                self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
+                self.sim.release(name)
+                raise
             return "controller", name
         await self._reply(ws, msg, {"type": "error", "error": "role must be god or controller"})
         await ws.close()
