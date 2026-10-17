@@ -11,7 +11,9 @@
 // and the phone bottom sheet with the inset it gives the map. The "rules" run and the end of the phone run
 // check that arrows used by the tab bar or the sheet grip never pan the map, the debt stub on a positive net
 // worth, that a burst of majors is always shown or counted (and error cards push none out), the phone mood
-// arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent.
+// arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent. Both the rules run and the phone
+// run check the People ranking in its Adults, Everyone and Households segments: richest to poorest, ranks 1..n,
+// a net worth below zero written with a minus and ranked last, each row's 24 h change, one row per household.
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
 // browser it can launch, the test prints SKIP and exits 0. Set DASH_SHOTS=<folder> to also save screenshots,
@@ -121,6 +123,73 @@ async function majorBurst(page, what, slots) {
   const after = await page.evaluate(() => Array.from(document.querySelectorAll("#toasts .dash-toast")).map(c => c.className.replace("dash-toast ", "")));
   check(after.includes("more") && after.includes("error"), `${what}: an error card does not push out the "more" card`, after);
   check(after.filter(k => k === "more" || k === "major").length === res.kinds.length, `${what}: an error card pushes out no major`, [res.kinds, after]);
+}
+
+// The People tab ranks richest to poorest (dashboard.md 6, P3 acceptance). Needs the host paused, nothing
+// selected and window.__lastState / __lastStats captured. It pushes a copy of the last stats with one adult
+// deep in debt (a net worth written with U+2212) and one big 24 h gain, then for Adults, Everyone and
+// Households reads every row: net worths never increase and match the stats, ranks run 1..n, every row shows
+// its 24 h change (worth - worth_24h, summed for a household), and Households has one row per household.
+const MONEY = /^([−-]?)\$([\d,]+)$/;
+const CHANGE = /^(?:([▲▼]) \$([\d,]+)|±\$0)$/;
+const parseMoney = s => { const m = MONEY.exec((s || "").trim()); return m ? (m[1] ? -1 : 1) * Number(m[2].replace(/,/g, "")) : NaN; };
+const parseChange = s => { const m = CHANGE.exec((s || "").trim()); return !m ? NaN : m[1] ? (m[1] === "▼" ? -1 : 1) * Number(m[2].replace(/,/g, "")) : 0; };
+
+async function rankingSegments(page, what) {
+  const ref = await page.evaluate(() => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    const age = {};
+    for (const a of window.__lastState.agents) age[a.id] = a.age;
+    const adults = st.people.filter(p => age[p.id] >= 18);
+    const poor = adults[Math.floor(adults.length / 2)], gainer = adults[1];
+    poor.cash = -4200; poor.savings = 0; poor.home_equity = 0; poor.worth = -4200; poor.worth_24h = -3900;
+    gainer.worth_24h = gainer.worth - 1500;
+    Dash.stats(st);
+    return { people: st.people.map(p => ({ id: p.id, household: p.household, worth: p.worth, worth_24h: p.worth_24h, age: age[p.id] })),
+      households: st.households.map(h => h.id), poor: poor.id };
+  });
+  await page.waitForTimeout(250);
+  check(await page.locator('#dash-people .dash-rankhead [data-sorthead="worth"].on').count() === 1, `${what}: the ranking sorts by net worth`);
+  const expect = {
+    adults: ref.people.filter(p => p.age == null || p.age >= 18).map(p => ({ key: p.id, worth: p.worth, chg: p.worth - p.worth_24h })),
+    everyone: ref.people.map(p => ({ key: p.id, worth: p.worth, chg: p.worth - p.worth_24h })),
+    households: ref.households.map(id => {
+      const ms = ref.people.filter(p => p.household === id);
+      return { key: `hh:${id}`, worth: ms.reduce((s, p) => s + p.worth, 0), chg: ms.reduce((s, p) => s + p.worth - p.worth_24h, 0) };
+    }),
+  };
+  for (const seg of ["adults", "everyone", "households"]) {
+    await page.click(`#dash-people [data-seg="${seg}"]`);
+    await page.waitForTimeout(120);
+    const got = await page.evaluate(() => ({
+      on: Array.from(document.querySelectorAll('#dash-people [data-seg][aria-checked="true"]')).map(b => b.dataset.seg),
+      rows: Array.from(document.querySelectorAll("#dash-people .dash-rank > li")).map(li => {
+        const t = sel => { const e = li.querySelector(`.dash-rrow > ${sel}`); return e ? e.textContent : null; };
+        return { key: li.dataset.key, rk: t(".dash-rk"), worth: t(".dash-worth"), chg: t(".dash-chg") };
+      }),
+    }));
+    const rows = got.rows, want = expect[seg].slice().sort((x, y) => y.worth - x.worth);
+    const worths = rows.map(r => parseMoney(r.worth)), chgs = rows.map(r => parseChange(r.chg));
+    check(got.on.length === 1 && got.on[0] === seg, `${what} ${seg}: the segment is checked`, got.on);
+    check(rows.length === want.length && rows.length > 0, `${what} ${seg}: one row each`, [rows.length, want.length]);
+    check(worths.every(Number.isFinite), `${what} ${seg}: every row shows a net worth`, rows.filter((r, i) => !Number.isFinite(worths[i])));
+    const up = worths.findIndex((w, i) => i > 0 && w > worths[i - 1]);
+    check(up < 0, `${what} ${seg}: net worth never increases down the list`, up < 0 ? "" : rows.slice(up - 1, up + 1));
+    check(JSON.stringify(worths) === JSON.stringify(want.map(w => Math.round(w.worth))), `${what} ${seg}: the worths are the stats' worths, richest first`,
+      [worths.slice(0, 5), want.slice(0, 5).map(w => w.worth)]);
+    check(rows.every((r, i) => r.rk !== null && r.rk.trim() === String(i + 1)), `${what} ${seg}: ranks run 1..n`, rows.map(r => r.rk).join(","));
+    check(chgs.every(Number.isFinite), `${what} ${seg}: every row shows its 24 h change`, rows.filter((r, i) => !Number.isFinite(chgs[i])));
+    const byKey = new Map(expect[seg].map(w => [w.key, w]));
+    const wrong = rows.filter((r, i) => !byKey.has(r.key) || chgs[i] !== Math.round(byKey.get(r.key).chg));
+    check(wrong.length === 0, `${what} ${seg}: each 24 h change is worth - worth_24h`, wrong.slice(0, 3));
+    if (seg !== "households") {
+      const last = rows.findIndex(r => r.key === ref.poor);
+      check(last >= 0 && /^−\$4,200$/.test(rows[last].worth.trim()) && rows.slice(last + 1).every(r => parseMoney(r.worth) <= -4200),
+        `${what} ${seg}: a negative net worth shows a minus and ranks below every positive one`, last >= 0 ? rows[last] : ref.poor);
+    }
+    if (seg === "households") check(rows.length === ref.households.length, `${what}: Households has one row per household in stats`, [rows.length, ref.households.length]);
+  }
+  await page.click('#dash-people [data-seg="adults"]');
 }
 
 async function desktop(browser, base) {
@@ -264,6 +333,7 @@ async function rules(browser, base) {
   check(row && row.indebt && /debt/.test(row.text), "a positive net worth with negative cash shows the debt stub and word", row);
   check(row && row.fill, "the home part still shows next to the debt stub", row);
   await shot(page, "desktop-debt");
+  await rankingSegments(page, "desktop");
 
   await majorBurst(page, "desktop", 3 + 2);
 
@@ -322,7 +392,7 @@ async function phone(browser, base) {
   const { page, errors } = await openPage(browser, base, "?speed=2", { width: 390, height: 844 }, true);
   await page.evaluate(() => {
     const on = devHost.onmessage;
-    devHost.onmessage = m => { if (m.type === "state") window.__lastState = m.state; on(m); };
+    devHost.onmessage = m => { if (m.type === "state") window.__lastState = m.state; if (m.type === "stats") window.__lastStats = m; on(m); };
   });
   let info = await inspect(page);
   check(info.mode === "sheet" && info.phone === true && info.sheet === "peek", "a phone starts with the sheet at peek", info);
@@ -337,6 +407,10 @@ async function phone(browser, base) {
   const last = insets.length ? insets[insets.length - 1][0] : {};
   check(last && last.bottom > 200, "the map inset clears the half sheet", last);
   check(await page.locator("#dash-people .dash-rank > li").count() > 10, "the ranking shows in the sheet");
+  await page.waitForFunction(() => window.__lastState && window.__lastStats, null, { timeout: 10000 });
+  await pause(page);
+  await rankingSegments(page, "phone");
+  await page.evaluate(() => devHost.send({ type: "set_speed", speed: 2 }));
   await noSidewaysScroll(page, "phone half");
   await shot(page, "phone-half");
 
