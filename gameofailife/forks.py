@@ -131,6 +131,8 @@ def invite_fork(sim: Simulation, agent: Agent) -> Fork | None:
     hour = sim.clock.hour
     if hour >= 22 or hour < 6 or _curfew(sim, agent):
         return None  # sleep on it; the invite waits or expires
+    if sim._must_leave_for_work(agent, invite["place"]):
+        return None  # off to work first; the invite waits or expires
     host = sim.agents[invite["from"]]
     place = sim.town.places[invite["place"]]
     rel = ("rel", host.id)

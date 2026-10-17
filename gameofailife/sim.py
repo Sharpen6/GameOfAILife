@@ -26,6 +26,7 @@ PENSION = 400.0  # paid every Friday morning to retirees (65+ with no job)
 BILLS_PER_ADULT = 80.0  # weekly phone, power and transport, charged with the rent
 CAR_BILL = 40.0  # weekly fuel and insurance for a car owner
 HOSPITAL_FEE = 50.0
+GROCERY_COST = 35.0  # ten meals from Fresh Market: the price of 'Buy groceries now' in the groceries fork
 SHIFT_MARGIN = 10  # minutes spare a character keeps before setting off for a shift
 LEISURE = ("idle", "relax_home", "read", "side_project", "text", "rest")  # activities that can be interrupted
 
@@ -212,7 +213,7 @@ class Simulation:
         for agent in self.living():
             # Old age: a small daily chance from 70, which Luck softens.
             if agent.age >= 70:
-                # About 0.5% a month at 74 and 2% at 80, so a death in the first weeks is rare.
+                # About 0.75% a month at 74 and 3.6% at 80 (at Luck 50), so a death in the first weeks is rare.
                 p = luck_odds(0.00001 * (agent.age - 69) ** 2, -1, agent.luck)
                 self._log_roll(agent, "old_age", p, roll := self.rng.random())
                 if roll < p:
@@ -305,7 +306,8 @@ class Simulation:
 
     def _next(self, agent: Agent) -> None:
         """Start the next planned step, or let the Director find the next decision."""
-        if agent.plan and self._must_leave_for_work(agent) and not any(s[0] == "work" for s in agent.plan):
+        if (agent.plan and self._must_leave_for_work(agent, agent.plan[0][1])
+                and not any(s[0] == "work" for s in agent.plan)):
             agent.plan = []  # drop the rest of the plan: it's time to head to work
         if agent.plan:
             self._start_step(agent, *agent.plan.pop(0))
@@ -328,9 +330,18 @@ class Simulation:
             agent.plan = [("idle", None)]
         self._start_step(agent, *agent.plan.pop(0))
 
-    def _must_leave_for_work(self, agent: Agent) -> bool:
+    def _must_leave_for_work(self, agent: Agent, via: str | None = None) -> bool:
+        """True once it's time to set off for today's shift, counting the walk by way of `via` if given."""
         start = self._shift_start_tick(agent)
-        return start is not None and self.clock.tick >= start - self.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN
+        if start is None:
+            return False
+        route = self.walk_minutes(agent, agent.job.place_id)
+        place_id = self._resolve_place(agent, via)
+        if place_id and agent.inside != place_id:
+            entry = self.town.places[place_id].entry
+            route = (len(self.town.path((agent.x, agent.y), entry))
+                     + len(self.town.path(entry, self.town.places[agent.job.place_id].entry)))
+        return self.clock.tick >= start - route - SHIFT_MARGIN
 
     def _resolve_place(self, agent: Agent, where: str | None) -> str | None:
         if where == "home":
@@ -459,6 +470,12 @@ class Simulation:
         agent.plan = []
         agent.path = []
         agent.inside = None
+        fork = self.forks.get(agent.fork_id or "")
+        if fork and fork.status == "asked":
+            fork.status = "decided"  # no longer asked: nothing is played for the dead
+        for inv in self.invites.values():
+            if inv["from"] == agent.id and inv["status"] == "pending":
+                inv["status"] = "expired"
         self.event(f"{agent.name} {how}, aged {agent.age}.", agent, kind="death")
         for other_id, rel in agent.relationships.items():
             other = self.agents.get(other_id)
@@ -519,6 +536,8 @@ class Simulation:
         agent = self.agents[fork.agent_id]
         if controller is not None and agent.controller != controller:
             return {"accepted": False, "error": "not your character"}
+        if not agent.alive:
+            return {"accepted": False, "error": "character is dead"}
         if not isinstance(choice, int) or isinstance(choice, bool) or not 0 <= choice < len(fork.options):
             return {"accepted": False, "error": "choice must be 0 to 3"}
         elapsed = self.now() - self.asked_at.get(fork_id, self.now())
@@ -528,7 +547,8 @@ class Simulation:
             self._learn(agent, fork, choice, reason)
             self._decide(agent, fork, choice, "model", reason)
             return {"accepted": True, "applied": True}
-        if fork.status == "decided" and fork.decided_by == "timeout" and elapsed <= LEARN_SECONDS:
+        if (fork.status == "decided" and fork.decided_by == "timeout" and elapsed <= LEARN_SECONDS
+                and getattr(fork, "late_answer", None) is None):  # only the first late answer teaches
             self._learn(agent, fork, choice, reason)
             fork.late_answer = {"choice": choice, "reason": reason}  # type: ignore[attr-defined]
             return {"accepted": True, "applied": False, "note": "too late to act on; saved to the profile"}
@@ -587,7 +607,12 @@ class Simulation:
         agent.forks.append(summary)
         del agent.forks[:-20]
         self.fork_log.append(summary)
-        self._next(agent)
+        if agent.plan:
+            # The choice is paid for and its outcomes rolled, so it happens even if it's now time to leave
+            # for work: _begin_activity cuts it short, and _next drops any later steps.
+            self._start_step(agent, *agent.plan.pop(0))
+        else:
+            self._next(agent)
 
     def _log_roll(self, agent: Agent, what: str, p: float, roll: float, base: float | None = None) -> None:
         entry = {"tick": self.clock.tick, "agent": agent.id, "luck": round(agent.luck, 1), "what": what,
@@ -641,6 +666,8 @@ class Simulation:
         for summary in agent.forks:
             if summary["id"] == pending["fork"]:
                 summary["happened"].append(out.label)
+                if summary not in self.fork_log:
+                    self.fork_log.append(summary)  # sent again, same id, so viewers see what came of it
 
     def _bump(self, agent: Agent, other_id: str, value: float) -> None:
         other = self.agents.get(other_id)
@@ -692,12 +719,18 @@ class Simulation:
                 self.event(f"{agent.name} saves ${amount:.0f} toward {agent.goal['name']} "
                            f"(${agent.goal['saved']:.0f} of ${agent.goal['target']:.0f}).", agent, kind="money")
         elif "save" in extra:
-            agent.savings = getattr(agent, "savings", 0) + extra["save"]  # type: ignore[attr-defined]
+            amount = min(extra["save"], max(agent.money, 0))
+            agent.money -= amount
+            agent.savings = round(agent.savings + amount, 2)
+            self.event(f"{agent.name} puts ${amount:.0f} into savings (${agent.savings:.0f} saved).", agent, kind="money")
         if "ask_shop" in extra:
             other = self.agents.get(extra["ask_shop"])
-            if other and other.alive and self._interruptible(other):
-                other.plan = [("buy_groceries", "market"), ("relax_home", "home")]
-                other.state = "idle"
+            if (other and other.alive and self._interruptible(other)
+                    and not self._must_leave_for_work(other, "market")):
+                payer = other if other.money >= GROCERY_COST else agent  # the asker covers it if the shopper can't
+                payer.money -= GROCERY_COST
+                other.plan = [("relax_home", "home")]
+                self._start_step(other, "buy_groceries", "market")  # started now so the paid shop happens
                 self.event(f"{other.name} heads to Fresh Market for {agent.name.split()[0]}.", other, kind="social")
         if "call" in extra:
             other = self.agents.get(extra["call"])
@@ -739,7 +772,7 @@ class Simulation:
 
     def invite(self, host: Agent, guest_id: str, place_id: str) -> dict | None:
         guest = self.agents.get(guest_id)
-        if not guest or not guest.alive or place_id not in self.town.places:
+        if not host.alive or not guest or guest is host or not guest.alive or place_id not in self.town.places:
             return None
         self._invite_ids += 1
         inv = {"id": f"i{self._invite_ids}", "from": host.id, "to": guest_id, "place": place_id,
@@ -766,6 +799,8 @@ class Simulation:
         a, b = self.agents.get(from_id), self.agents.get(to_id)
         if not a or not b or not a.alive or not b.alive:
             return {"ok": False, "error": "unknown or dead character"}
+        if a is b:
+            return {"ok": False, "error": "can't message yourself"}
         text = text[:500]
         b.inbox.append({"time": self.clock.stamp(), "from": a.id, "text": text})
         del b.inbox[:-30]
@@ -793,9 +828,10 @@ class Simulation:
         agent = self.agents.get(agent_id)
         if not agent:
             return False
-        for t, v in (traits if isinstance(traits, dict) else {}).items():
-            if t in agent.profile.traits:
-                agent.profile.traits[t] = round(max(0.0, min(1.0, float(v))), 3)
+        # Convert every trait before changing any, so a bad value raises with the profile untouched.
+        new = {t: round(max(0.0, min(1.0, float(v))), 3)
+               for t, v in (traits if isinstance(traits, dict) else {}).items() if t in agent.profile.traits}
+        agent.profile.traits.update(new)
         if isinstance(prompt, str) and prompt.strip():
             agent.profile.prompt = prompt.strip()[:1000]
             agent.profile.prompt_edited = True
