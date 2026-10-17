@@ -8,11 +8,15 @@ messages in character.
     export ANTHROPIC_API_KEY=sk-ant-...
     python3 -m gameofailife &
     python3 examples/claude_controller.py --characters all
-    python3 examples/claude_controller.py --characters a1,a2 --model claude-sonnet-5 --chat
+    python3 examples/claude_controller.py --characters ari,tom --model claude-sonnet-5 --chat
 
 Each fork must be answered within `deadline_seconds` (5s) to be acted on; an
 answer that arrives within 10s still teaches the character's profile. Requests
-run in worker threads, so many forks can be in flight at once.
+run in a pool of worker threads, two per claimed character, so many forks can be
+in flight at once; a fork whose deadline passes before a thread is free is
+skipped and the profile decides. Claude is asked at low effort so it answers in
+time; pick a model that supports the effort setting (Claude Haiku 4.5 and older
+models don't).
 
 The characters believe they are real people. Nothing sent to Claude mentions a
 game, a simulation, controllers or God.
@@ -29,6 +33,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -44,11 +49,12 @@ CHAT_COOLDOWN = 30.0  # real seconds between replies in one conversation, so two
 
 # --- talking to Claude ---------------------------------------------------------
 
-def call_claude(api_key: str, model: str, system: str, user: str, max_tokens: int = 150) -> str:
+def call_claude(api_key: str, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
     """One blocking Messages API call; returns the text of the reply."""
     body = json.dumps({
         "model": model,
-        "max_tokens": max_tokens,
+        "max_tokens": max_tokens,  # thinking counts toward this, so leave room beyond the short answer
+        "output_config": {"effort": "low"},  # think little: the answer is due within 5s
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }).encode()
@@ -63,10 +69,14 @@ def call_claude(api_key: str, model: str, system: str, user: str, max_tokens: in
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")[:300]
         raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return "".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
+    # Read blocks by type: the reply can start with thinking blocks, or hold nothing else.
+    text = "".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
+    if not text.strip() or data.get("stop_reason") == "refusal":
+        raise RuntimeError(f"no reply text (stop_reason {data.get('stop_reason')})")
+    return text
 
 
-def fake_claude(api_key: str, model: str, system: str, user: str, max_tokens: int = 150) -> str:
+def fake_claude(api_key: str, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
     """Offline stand-in for testing without a key: picks the cheapest option."""
     time.sleep(0.3)
     if "Options:" not in user:
@@ -141,6 +151,7 @@ class ClaudeController:
         self.args = args
         self.api_key = api_key
         self.ask = fake_claude if args.fake else call_claude
+        self.pool: ThreadPoolExecutor | None = None  # sized once we know how many characters we play
         self.ws = None
         self.profiles: dict[str, str] = {}
         self.names: dict[str, str] = {}
@@ -174,12 +185,17 @@ class ClaudeController:
         finally:
             for task in list(self.tasks):
                 task.cancel()
+            if self.pool:
+                self.pool.shutdown(wait=False, cancel_futures=True)
 
     def handle(self, msg: dict) -> None:
         t = msg.get("type")
         if t == "welcome":
             self.profiles.update(msg.get("profiles") or {})
             claimed = msg.get("characters") or []
+            # A thread per character for its fork and one for a chat reply, so a burst of forks
+            # never waits behind the small default pool and misses the deadline.
+            self.pool = ThreadPoolExecutor(max_workers=2 * max(len(claimed), 1))
             print(f"Connected as {msg.get('name')} with model {self.args.model}"
                   f"{' (fake)' if self.args.fake else ''}; playing {len(claimed)} characters: {', '.join(claimed) or 'none'}")
             if claimed:  # learn everyone's full name, for texts that arrive before any fork
@@ -206,10 +222,15 @@ class ClaudeController:
             you = {**you, "profile": self.profiles.get(msg["agent_id"], "")}
         options = msg.get("options", [])
         started = time.monotonic()
+        deadline = started + msg.get("deadline_seconds", 5)
         try:
-            text = await asyncio.to_thread(self.ask, self.api_key, self.args.model, persona(you), fork_prompt(msg))
+            text = await asyncio.get_running_loop().run_in_executor(
+                self.pool, self.ask_in_time, deadline, persona(you), fork_prompt(msg))
         except Exception as exc:  # network trouble, timeouts, bad key: the city falls back to the profile
             print(f"{msg.get('time')}  {you.get('name')}: no answer ({exc}); the profile will decide")
+            return
+        if text is None:
+            print(f"{msg.get('time')}  {you.get('name')}: no free worker before the deadline; the profile will decide")
             return
         parsed = parse_choice(text, len(options))
         if parsed is None:
@@ -220,6 +241,12 @@ class ClaudeController:
                                  "reason": reason, "seconds": time.monotonic() - started,
                                  "deadline": msg.get("deadline_seconds", 5)}
         await self.send({"type": "choose", "fork_id": fork_id, "choice": choice, "reason": reason})
+
+    def ask_in_time(self, deadline: float, system: str, user: str) -> str | None:
+        """Runs in a worker thread. Returns None, without calling the API, if the deadline passed while queued."""
+        if time.monotonic() > deadline:
+            return None
+        return self.ask(self.api_key, self.args.model, system, user)
 
     def report(self, ack: dict) -> None:
         info = self.pending.pop(str(ack.get("fork_id")), None)
@@ -243,7 +270,8 @@ class ClaudeController:
         self.last_chat[(me, other)] = now
         you = {"name": self.names.get(me, me), "profile": self.profiles.get(me, "")}
         try:
-            text = await asyncio.to_thread(self.ask, self.api_key, self.args.model, persona(you), chat_prompt(msg))
+            text = await asyncio.get_running_loop().run_in_executor(
+                self.pool, self.ask, self.api_key, self.args.model, persona(you), chat_prompt(msg))
         except Exception as exc:
             print(f"{msg.get('time')}  {you['name']}: could not reply to {msg.get('from_name')} ({exc})")
             return
@@ -271,7 +299,7 @@ def main() -> None:
         asyncio.run(ClaudeController(args, api_key).run())
     except KeyboardInterrupt:
         pass
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # nothing listening there, or not a ws:// URL
         sys.exit(f"Could not reach the city at {args.url}: {exc}")
 
 
