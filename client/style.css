@@ -1,3 +1,7 @@
+/* GameOfAILife: the shared base (colour tokens, header, buttons, feeds, lists) for the God view and the
+   character page, and the God view's page shell (body.godview): the header, then #stage as a grid of #world
+   (the map, with the view's controls and the dashboard's overlays) and #panel. dashboard.css styles what
+   Dash builds and view/view.css the view's own controls; nothing here styles either. */
 :root {
   --bg: #1d2330;
   --panel: #262e3d;
@@ -23,61 +27,26 @@ header {
   padding: 10px 16px; background: var(--panel); border-bottom: 2px solid var(--line);
 }
 h1 { margin: 0; font-size: 18px; letter-spacing: .5px; color: var(--accent); font-family: ui-monospace, monospace; }
-#clock { font-family: ui-monospace, monospace; font-size: 16px; }
+#clock { font-family: ui-monospace, monospace; font-size: 16px; font-variant-numeric: tabular-nums; min-width: 17ch; }
 #weather { color: var(--muted); }
 #role { margin-left: auto; color: var(--muted); font-size: 13px; }
-#speed button, #tabs button, .btn {
+#speed { display: flex; gap: 4px; }
+#speed button, .btn {
   background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
   padding: 4px 9px; border-radius: 4px; cursor: pointer; font: inherit;
 }
-#speed button.on, #tabs button.on { background: var(--accent); color: #222; border-color: var(--accent); }
+#speed button { min-width: 38px; }
+#speed button.on { background: var(--accent); color: #222; border-color: var(--accent); }
 #speed button:disabled, .btn:disabled { opacity: .5; cursor: not-allowed; }
+#speed button:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 body.watching #role {
   color: #ffe1b8; background: #4a3a1c; border: 1px solid #11151d; border-radius: 4px; padding: 2px 8px;
 }
-.watchnote { display: none; margin-top: 4px; }
-body.watching .watchnote { display: block; color: #ffe1b8; }
-#toast {
-  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5;
-  background: #4a3a1c; color: #ffe1b8; border: 2px solid #11151d; border-radius: 4px; padding: 6px 12px;
-  font-size: 13px; box-shadow: 3px 3px 0 #11151d;
-}
-main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
-#world { flex: 1 1 auto; min-width: 0; position: relative; }
-#map {
-  width: 100%; max-width: 1280px; aspect-ratio: 80 / 50; display: block;
-  image-rendering: pixelated; image-rendering: crisp-edges;
-  border: 3px solid #11151d; border-radius: 4px; background: #4a8a3c; cursor: pointer;
-}
-.hint { color: var(--muted); font-size: 13px; margin: 8px 2px; }
-#tooltip {
-  position: absolute; pointer-events: none; background: rgba(15, 18, 26, .92); color: var(--text);
-  border: 1px solid var(--line); padding: 4px 8px; border-radius: 4px; font-size: 12px; max-width: 320px; z-index: 2;
-}
-aside {
-  flex: 0 0 380px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
-  max-height: calc(100vh - 100px); display: flex; flex-direction: column;
-}
-#tabs { display: flex; gap: 6px; padding: 10px; border-bottom: 1px solid var(--line); }
-.tab { overflow-y: auto; padding: 10px 12px; }
-#roster { list-style: none; margin: 0; padding: 0; }
-#roster li {
-  display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px; cursor: pointer;
-}
-#roster li:hover { background: var(--panel-2); }
-#roster li.dead { opacity: .45; }
-#roster li.sel { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
-#roster .where { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.luckchip { flex: none; font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #23402b; color: #a8e2b2; font-variant-numeric: tabular-nums; }
-.swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; box-shadow: inset 0 -3px 0 rgba(0,0,0,.25); }
 .small { color: var(--muted); font-size: 12px; }
 .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .feed { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 .feed li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 .feed .time { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; display: block; }
-.feed .k-death { color: var(--bad); }
-.feed .k-goal { color: var(--good); }
-.feed .k-weather { color: var(--blue); }
 .tag { display: inline-block; font-size: 11px; padding: 0 6px; border-radius: 8px; background: var(--panel-2); color: var(--muted); }
 .tag.model { background: #36507a; color: #d6e6ff; }
 .tag.timeout { background: #6a4b25; color: #ffe1b8; }
@@ -85,49 +54,43 @@ aside {
 .opts { margin: 4px 0 0 0; padding-left: 18px; }
 .opts li { border: none; padding: 1px 0; color: var(--muted); }
 .opts li.chosen { color: var(--text); font-weight: 600; }
-#detail h2 { margin: 4px 0 2px; font-size: 17px; }
-#detail h3 { margin: 14px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); }
-.back { background: none; border: none; color: var(--blue); cursor: pointer; padding: 0; font: inherit; }
-.stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; font-size: 13px; }
-.bar { display: grid; grid-template-columns: 64px 1fr 32px; align-items: center; gap: 8px; font-size: 12px; margin: 3px 0; }
-.bar .track { height: 8px; background: #151a24; border-radius: 4px; overflow: hidden; }
-.bar .track { display: block; }
-.bar .fill { display: block; height: 100%; border-radius: 4px; transition: width .4s; }
-.bar > span:first-child { text-transform: capitalize; color: var(--muted); }
-.bar > span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
-.luck { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 10px; margin-top: 10px; }
-.luck input[type=range] { width: 100%; accent-color: var(--accent); }
-.luck .row { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+.list { list-style: none; padding: 0; margin: 0; font-size: 13px; }
+.list li { padding: 3px 0; border-bottom: 1px dashed var(--line); }
 textarea {
   width: 100%; min-height: 70px; background: #151a24; color: var(--text); border: 1px solid var(--line);
   border-radius: 4px; padding: 6px; font: inherit; font-size: 13px; resize: vertical;
 }
-.traits { display: grid; grid-template-columns: 74px 1fr 30px; gap: 2px 8px; align-items: center; font-size: 12px; margin: 6px 0; }
-.traits input { width: 100%; }
-.list { list-style: none; padding: 0; margin: 0; font-size: 13px; }
-.list li { padding: 3px 0; border-bottom: 1px dashed var(--line); }
-#clock { font-variant-numeric: tabular-nums; min-width: 17ch; }
-#speed { display: flex; gap: 4px; }
-#speed button { min-width: 38px; }
-.stats b { font-variant-numeric: tabular-nums; }
+
+/* --- the God view's shell (index.html) ------------------------------------------------------------------ */
+body.godview {
+  height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden;
+}
+body.godview header {
+  flex: none; gap: 6px 18px; min-height: 48px; padding: 6px 16px; border-bottom-width: 1px;
+}
+body.godview h1 { font-size: 17px; line-height: 1; font-weight: 700; }
+body.godview #clock { font-size: 15px; }
+body.godview #weather { font-size: 13px; }
+body.godview #speed button { font-size: 13px; }
+#stage { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+#world { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--bg); }
+#map { position: absolute; inset: 0; display: block; width: 100%; height: 100%; touch-action: none; }
+#world > .godview-wait {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+  color: var(--muted); font-size: 14px; text-align: center; pointer-events: none;
+}
 @media (max-width: 900px) {
-  main { flex-direction: column; padding: 12px 16px; gap: 12px; }
-  #world { width: 100%; }
-  aside { flex-basis: auto; width: 100%; max-height: none; }
-  .tab { overflow: visible; }
+  #stage { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 520px) {
-  header { padding: 8px 16px; gap: 6px 12px; }
+  header { gap: 6px 12px; padding: 8px 16px; }
   h1 { font-size: 16px; }
-  #clock { font-size: 14px; min-width: 0; }
+  #clock { min-width: 0; font-size: 14px; }
   #weather { font-size: 13px; }
-  #speed { width: 100%; }
+  #speed { order: 5; width: 100%; }
   #speed button { flex: 1; min-width: 0; padding: 6px 0; }
   body:not(.watching) #role { display: none; }
   body.watching #role { margin-left: 0; }
-  #map { border-width: 2px; }
-  .hint { font-size: 12px; }
-  #roster .where { display: none; }
-  #roster li { padding: 7px 6px; }
-  .traits { grid-template-columns: 70px 1fr 30px; }
+  body.godview h1 { font-size: 15px; }
+  body.godview #weather { font-size: 12px; }
 }
