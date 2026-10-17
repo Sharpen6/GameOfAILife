@@ -25,6 +25,10 @@ UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Up
            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 
+def nested(depth: int) -> str:
+    return "[" * depth + "]" * depth
+
+
 def masked_frame(fin: bool, opcode: int, payload: bytes) -> bytes:
     """A client frame, built by hand so it may break the rules on purpose."""
     head = bytearray([(0x80 if fin else 0) | opcode])
@@ -329,6 +333,26 @@ class TestFloods(ServerCase):
         self.assertTrue(kept and not god.closed, "a God view that keeps reading must not be dropped")
         self.assertIs(self.server.god, god)
 
+    async def test_floods_from_several_connections_do_not_drop_a_slow_controller(self):
+        # Round 4: pacing is per connection, so five flooding controllers still got a victim reading
+        # 500 KB/s dropped for lagging, and anyone could then claim its characters.
+        reader, victim = await self.slow_client({"type": "hello", "role": "controller", "name": "victim",
+                                                 "characters": ["tom", "ari"]})
+        await wait_until(lambda: self.sim.agents["tom"].controller == "victim")
+        thief, _ = await self.controller("thief", [])
+        for i, aid in enumerate([a.id for a in self.sim.living() if not a.controller][:5]):
+            self.flood((await self.controller(f"flooder{i}", [aid]))[0], aid, "tom")
+        with mock.patch.object(server_module, "STALL_SECONDS", 1.0):
+            kept = await read_slowly(reader, 500_000, 2.5)
+            self.assertTrue(kept and not victim.closed, "a controller that keeps reading must not be dropped")
+            self.assertEqual([self.sim.agents[a].controller for a in ("tom", "ari")], ["victim", "victim"])
+            r = await thief.reply_to('{"type": "claim", "agent_id": "tom", "req_id": "c"}', "c")
+            self.assertFalse(r["ok"])
+            # Skipped texts are still in tom's inbox. A controller that stops reading is still dropped.
+            self.assertEqual(self.sim.agents["tom"].inbox[-1]["text"], "é" * 500)
+            await wait_until(lambda: victim.closed, 5)
+        await wait_until(lambda: self.sim.agents["tom"].controller is None)
+
 
 class TestWsLayer(unittest.IsolatedAsyncioTestCase):
     async def test_send_os_errors_are_connection_closed(self):
@@ -483,6 +507,68 @@ class TestReqId(ServerCase):
         r = await bad.expect(lambda m: m.get("req_id") == 9)
         self.assertEqual(r["error"], "role must be god or controller")
         await wait_until(lambda: bad.closed)
+
+    def depths_near_the_limit(self) -> range:
+        """req_id depths just under what json.loads takes here, where (on Python 3.11) writing the
+        reply that echoes the req_id can still raise RecursionError."""
+        lo, hi = 1, 100_000
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            try:
+                json.loads('{"req_id": ' + nested(mid) + "}")
+                lo = mid
+            except RecursionError:
+                hi = mid - 1
+        return range(lo - 25, lo + 6)
+
+    async def test_deep_req_id_never_drops_a_controller(self):
+        # Finding 16: on 3.11 a req_id about 980 deep was read, but writing it back raised
+        # RecursionError, so the connection dropped with no reply and tom was released.
+        c, _ = await self.controller("bot", ["tom"])
+        for depth in self.depths_near_the_limit():
+            await c.send('{"type": "nothing", "req_id": ' + nested(depth) + "}")
+            r = await c.expect("error")
+            self.assertTrue(r["error"].startswith(("unknown message type", "messages must be JSON", "bad message")), r)
+            r = await c.reply_to('{"type": "query", "agent_id": "tom", "what": "attributes", "req_id": "ok"}', "ok")
+            self.assertEqual(r["type"], "answer", depth)
+        self.assertEqual(self.sim.agents["tom"].controller, "bot")
+
+    async def test_deep_req_id_on_hello_leaves_no_ghost(self):
+        # Finding 46: on 3.11 the welcome echoing such a req_id raised RecursionError after the hello
+        # had claimed tom. The session died without releasing it, so tom was held until a restart.
+        for depth in self.depths_near_the_limit():
+            c = await self.client()
+            await c.send('{"type": "hello", "role": "controller", "name": "deep", "characters": ["tom"], "req_id": '
+                         + nested(depth) + "}")
+            await c.expect(lambda m: m.get("type") in ("welcome", "error"))
+            await c.close()
+            await wait_until(lambda: self.sim.agents["tom"].controller is None and not self.server.controllers)
+        _, welcome = await self.controller("next", ["tom"])
+        self.assertEqual(welcome["characters"], ["tom"])
+
+    async def test_failed_controller_hello_releases_what_it_claimed(self):
+        # Finding 46: any error in a hello after its claims left them held by a controller no session knew.
+        c = await self.client()
+        with mock.patch.object(self.sim, "living", side_effect=TypeError("no town")):  # breaks the welcome
+            r = await c.reply_to('{"type": "hello", "role": "controller", "name": "bot", "characters": ["tom"], '
+                                 '"req_id": "h"}', "h")
+        self.assertTrue(r["error"].startswith("bad hello"), r)
+        self.assertIsNone(self.sim.agents["tom"].controller)
+        self.assertNotIn("bot", self.server.controllers)
+        r = await c.reply_to('{"type": "hello", "role": "controller", "name": "bot", "characters": ["tom"], '
+                             '"req_id": "h2"}', "h2")
+        self.assertEqual((r["type"], r["name"], r["characters"]), ("welcome", "bot", ["tom"]))
+
+    async def test_reply_that_cannot_be_written_is_an_error(self):
+        # Findings 16 and 46 on any Python: a reply json.dumps cannot write is replaced by an error.
+        writer = FakeWriter()
+        deep: list = []
+        for _ in range(100_000):
+            deep = [deep]
+        await self.server._reply(ws.WebSocket(None, writer, mask=False), {"req_id": deep}, {"type": "answer"})
+        frame = writer.sent[0]
+        payload = frame[2:] if frame[1] < 126 else frame[4:]
+        self.assertEqual(json.loads(payload)["type"], "error")
 
 
 class TestShutdown(ServerCase):

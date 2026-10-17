@@ -85,7 +85,7 @@ class GameServer:
         for name, msg in outbox:
             ws = self.controllers.get(name)
             if ws:
-                self._push(ws, json.dumps(msg))
+                self._push(ws, json.dumps(msg), skippable=msg["type"] == "message")  # its text is in the inbox
         viewers = [ws for ws in [self.god, *self.observers] if ws]
         if not viewers or not (stepped or events or forks):
             return
@@ -150,14 +150,20 @@ class GameServer:
         """Send the direct reply to msg, with its req_id if it had one."""
         if "req_id" in msg:
             reply["req_id"] = msg["req_id"]
-        await self._send(ws, reply)
+        try:
+            text = json.dumps(reply)
+        except (RecursionError, ValueError):  # Python 3.11 can read nesting it cannot write back
+            text = json.dumps({"type": "error", "error": "bad message: nested too deeply to echo back"})
+        await self._send_raw(ws, text)
 
-    def _push(self, ws: WebSocket, text: str) -> None:
+    def _push(self, ws: WebSocket, text: str, skippable: bool = False) -> None:
         """Queue a message the client did not ask for, without waiting on the client.
 
         A client still on a push queued more than STALL_SECONDS ago (it stopped reading,
         or reads too slowly to keep up) is dropped, so it can never hold up the city or
         pile up more than that many seconds of pushes. A burst of pushes is not lag.
+        A skippable push still waiting after half of that is skipped instead, so however
+        many controllers flood a client with messages, they cannot get a reading client dropped.
         """
         outbox = self._outboxes.get(ws)
         if outbox is None or ws.closed:
@@ -166,13 +172,16 @@ class GameServer:
         if now - self._sending.get(ws, now) > STALL_SECONDS:
             ws.abort()
             return
-        outbox.put_nowait((now, text))
+        outbox.put_nowait((now, text, skippable))
 
     async def _sender(self, ws: WebSocket, outbox: asyncio.Queue) -> None:
         """Send one client's pushes in order, so a slow client only ever holds up itself."""
+        loop = asyncio.get_running_loop()
         try:
             while True:
-                queued, text = await outbox.get()
+                queued, text, skippable = await outbox.get()
+                if skippable and loop.time() - queued > STALL_SECONDS / 2:
+                    continue  # it is falling behind
                 self._sending[ws] = queued  # everything still queued is newer, so this is the lag
                 await ws.send(text)
                 del self._sending[ws]
@@ -262,22 +271,27 @@ class GameServer:
             while name in self.controllers:
                 name, n = f"{base}-{n}", n + 1
             self.controllers[name] = ws
-            wanted = msg.get("characters") or []
-            if wanted == "all":
-                wanted = [a.id for a in self.sim.living() if not a.controller]
-            if not isinstance(wanted, list):
+            try:
+                wanted = msg.get("characters") or []
+                if wanted == "all":
+                    wanted = [a.id for a in self.sim.living() if not a.controller]
+                if not isinstance(wanted, list):
+                    raise TypeError('characters must be a list of ids or "all"')
+                wanted = [str(w) for w in wanted]
+                claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
+                await self._reply(ws, msg, {
+                    "type": "welcome", "role": "controller", "name": name, "characters": claimed,
+                    "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
+                    "answer_seconds": 5, "time": self.sim.clock.stamp(),
+                    "available": [a.id for a in self.sim.living() if not a.controller],
+                })
+                for aid in claimed:
+                    self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
+            except BaseException:
+                # _session does not know this name yet, so a hello that fails undoes itself here.
                 del self.controllers[name]
-                raise TypeError('characters must be a list of ids or "all"')
-            wanted = [str(w) for w in wanted]
-            claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
-            await self._reply(ws, msg, {
-                "type": "welcome", "role": "controller", "name": name, "characters": claimed,
-                "profiles": {aid: self.sim.agents[aid].profile.prompt for aid in claimed},
-                "answer_seconds": 5, "time": self.sim.clock.stamp(),
-                "available": [a.id for a in self.sim.living() if not a.controller],
-            })
-            for aid in claimed:
-                self.sim.event(f"{self.sim.agents[aid].name} is now played by {name}.", kind="controller")
+                self.sim.release(name)
+                raise
             return "controller", name
         await self._reply(ws, msg, {"type": "error", "error": "role must be god or controller"})
         await ws.close()
