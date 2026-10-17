@@ -8,8 +8,9 @@
 // dashboard with no console errors, the map is drawn, nothing scrolls sideways, the AI chip says nobody plays (the
 // phone too), a person can be selected from the People ranking (the detail opens with the Owns block and a
 // character page link) and Esc on the map clears the selection (onSelect), the speed buttons reach the server, and
-// a major event makes a News toast. The server is told to make a major event every 2 s while a God view is
-// connected, so the toast does not wait on luck.
+// a major event makes a News toast. The test asks the server for a major event (a line on its stdin) once the
+// page's toasts are cleared, so the toast waits neither on luck nor on how fast the steps before it ran: a timer
+// firing every 2 s filled the phone's one toast slot early and then counted later events on the "more" card.
 // A last run rewrites the welcome to the browser port's (host.kind "browser", no LLM log) on its way to the page:
 // the LLM log shows its empty state and no character page link is rendered.
 //
@@ -25,7 +26,7 @@ const REPO = path.resolve(__dirname, "..", "..");
 const SHOTS = process.env.GOD_SHOTS || "";
 const SIZES = [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 390, height: 844 }, true]];
 
-// The server, with a major event every 2 s while a God view is connected. Prints its port.
+// The server, which makes a major event for each "major" line on its stdin. Prints its port.
 const SERVER = `
 import asyncio, sys
 sys.path.insert(0, sys.argv[1])
@@ -36,10 +37,13 @@ async def main():
     sim = Simulation(seed=1)
     server = GameServer(sim, speed=4)
     print(await server.start("127.0.0.1", 0), flush=True)
+    loop = asyncio.get_running_loop()
     n = 0
     while True:
-        await asyncio.sleep(2.0)
-        if server.god:
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        if not line:
+            return
+        if line.strip() == "major":
             people = sim.living()
             a = people[n % len(people)]
             n += 1
@@ -63,7 +67,7 @@ function findPlaywright() {
 }
 
 function startServer() {
-  const proc = spawn(process.env.PYTHON || "python3", ["-c", SERVER, REPO], { stdio: ["ignore", "pipe", "inherit"] });
+  const proc = spawn(process.env.PYTHON || "python3", ["-c", SERVER, REPO], { stdio: ["pipe", "pipe", "inherit"] });
   return new Promise((resolve, reject) => {
     let out = "";
     const timer = setTimeout(() => { proc.kill(); reject(new Error("the server did not start in 30 s")); }, 30000);
@@ -93,7 +97,7 @@ async function waitFor(page, fn, arg, ms, what) {
   }
 }
 
-async function run(browser, base, name, size, touch) {
+async function run(browser, base, server, name, size, touch) {
   console.log(`${name} ${size.width}x${size.height}`);
   const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1, hasTouch: touch, isMobile: touch });
   const errors = [];
@@ -161,11 +165,19 @@ async function run(browser, base, name, size, touch) {
   await page.click('#speed button[data-speed="4"]');
   await waitFor(page, () => document.querySelector('#speed button[data-speed="4"]').classList.contains("on"), null, 3000, "speed 4x");
 
-  // A major event makes a News toast in #toasts, inside the window.
-  await waitFor(page, () => Dash.inspect().toasts.includes("major") && document.querySelector("#toasts .dash-toast.major"),
-    null, 8000, "a News toast");
+  // A major event makes a News toast in #toasts, inside the window. Toasts already up are dismissed first (the
+  // phone has one slot), and the event is asked for again if another major event took the slot meanwhile.
+  const raffleToast = () => [...document.querySelectorAll("#toasts .dash-toast.major")].some(t => /raffle/.test(t.textContent));
+  let toasted = false;
+  for (let attempt = 0; attempt < 3 && !toasted; attempt++) {
+    await page.evaluate(() => { for (const x of document.querySelectorAll("#toasts .dash-tx")) x.click(); });
+    await waitFor(page, () => !document.querySelector("#toasts .dash-toast"), null, 3000, "the toasts are dismissed");
+    server.proc.stdin.write("major\n");
+    try { await page.waitForFunction(raffleToast, null, { timeout: 8000 }); toasted = true; } catch (e) { /* again */ }
+  }
+  check(toasted, "a News toast");
   const toast = await page.evaluate(() => {
-    const t = document.querySelector("#toasts .dash-toast.major");
+    const t = [...document.querySelectorAll("#toasts .dash-toast.major")].find(x => /raffle/.test(x.textContent));
     if (!t) return null;
     const r = t.getBoundingClientRect();
     return { text: t.textContent.trim().slice(0, 80), inside: r.left >= 0 && r.right <= window.innerWidth + 1 && r.top >= 0 && r.bottom <= window.innerHeight + 1 };
@@ -226,7 +238,7 @@ async function runBrowserHost(browser, base) {
   try {
     server = await startServer();
     const base = `http://127.0.0.1:${server.port}`;
-    for (const [name, size, touch] of SIZES) await run(browser, base, name, size, touch);
+    for (const [name, size, touch] of SIZES) await run(browser, base, server, name, size, touch);
     await runBrowserHost(browser, base);
   } catch (e) {
     check(false, "the run", String(e && e.stack || e));
