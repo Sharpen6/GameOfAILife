@@ -428,12 +428,12 @@ class TestController(ServerCase):
 
 class TestRobustness(ServerCase):
     async def test_oversized_frame_drops_connection(self):
-        # A frame declaring more than MAX_MESSAGE is refused and the socket is dropped.
+        # A frame declaring more than the server's SERVER_MAX_MESSAGE is refused and the socket is dropped.
         reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.port), TIMEOUT)
         try:
             writer.write(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
-            writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.MAX_MESSAGE + 1) + os.urandom(4))
+            writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.SERVER_MAX_MESSAGE + 1) + os.urandom(4))
             await writer.drain()
             await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), TIMEOUT)
             rest = await asyncio.wait_for(reader.read(), TIMEOUT)  # reaching EOF is the point
@@ -471,11 +471,14 @@ class TestRobustness(ServerCase):
 
     async def test_large_message_extended_length(self):
         god, _ = await self.god()
-        pad = "x" * 100_000  # > 64KB: needs the 8-byte extended payload length
+        # The most the server takes, 64 KiB (> 65535 bytes: needs the 8-byte extended payload length).
+        # request() adds an 8-digit req_id.
+        size = len(json.dumps({"type": "get_agent", "agent_id": "tom", "pad": "", "req_id": "0" * 8}))
+        pad = "x" * (ws.SERVER_MAX_MESSAGE - size)
         r = await god.request({"type": "get_agent", "agent_id": "tom", "pad": pad}, "agent")
         self.assertEqual(r["agent"]["id"], "tom")
         # A long prompt round-trips through set_profile (truncated by the sim to 1000 chars).
-        r = await god.request({"type": "set_profile", "agent_id": "tom", "prompt": "y" * 70_000}, "agent")
+        r = await god.request({"type": "set_profile", "agent_id": "tom", "prompt": "y" * 60_000}, "agent")
         self.assertEqual(len(r["agent"]["profile"]["prompt"]), 1000)
 
     async def test_ping_gets_pong(self):
@@ -512,7 +515,8 @@ class TestWsFraming(unittest.IsolatedAsyncioTestCase):
                     break
                 k, _, v = line.partition(":")
                 headers[k.strip().lower()] = v.strip()
-            sock = await ws.server_handshake(reader, writer, headers)
+            # An echo server for every length class, so it takes what a client takes, not the game's 64 KiB.
+            sock = await ws.server_handshake(reader, writer, headers, max_message=ws.MAX_MESSAGE)
             self.server_sockets.append(sock)
             try:
                 while True:

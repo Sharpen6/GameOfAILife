@@ -528,7 +528,7 @@ class TestBadInput(ServerCase):
     async def test_unreadable_json_gets_error_and_keeps_characters(self):
         # Finding 16: a 5000-digit integer (ValueError) and deep nesting (RecursionError).
         c, _ = await self.controller("bot", ["tom"])
-        for text in ('{"type": "query", "n": ' + "1" * 5000 + "}", "[" * 100_000):
+        for text in ('{"type": "query", "n": ' + "1" * 5000 + "}", "[" * 60_000):  # under the 64 KiB limit
             await c.send(text)
             r = await c.expect("error")
             self.assertEqual(r["error"], "messages must be JSON")
@@ -736,7 +736,7 @@ class TestSocketsClosed(ServerCase):
         await wait_until(lambda: mine.writer.transport.is_closing())
 
     async def test_oversized_frame_closes_the_socket(self):
-        reader, writer = await self.raw_ws(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.MAX_MESSAGE + 1)
+        reader, writer = await self.raw_ws(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.SERVER_MAX_MESSAGE + 1)
                                            + os.urandom(4))
         rest = await asyncio.wait_for(reader.read(), TIMEOUT)  # reaching EOF is the point
         self.assertLessEqual(len(rest), 4)

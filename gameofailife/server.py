@@ -14,13 +14,17 @@ See `docs/protocol.md` for every message.
 from __future__ import annotations
 
 import asyncio
+import errno
+import ipaddress
 import json
 import math
 import mimetypes
+import os
 import socket
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import transit
 from .clock import TICKS_PER_REAL_SECOND
@@ -40,6 +44,8 @@ PACED = ("send_message", "invite")  # what lands on other controllers and in eve
 PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
 STATS_SECONDS = 3.0  # a stats push this often while the city runs ...
 STATS_MAJOR_SECONDS = 0.5  # ... and this soon after the last one when a major event happened
+HEADER_SECONDS = 10.0  # how long a client may take to send its request line and headers; a session has no limit
+HEADER_LINES, HEADER_BYTES = 100, 16384  # the most header lines, and bytes of them, one request may carry
 
 
 class Encoded(str):
@@ -54,6 +60,38 @@ def encoded(kind: str, msg: dict) -> Encoded:
     text = Encoded(json.dumps(msg))
     text.kind, text.msg = kind, msg
     return text
+
+
+def local_host(host: str) -> bool:
+    """True when a Host header names `localhost` or an IP address (with or without a port): never a DNS name, which
+    whoever runs that name's DNS could point at this machine (DNS rebinding)."""
+    try:
+        name = urlsplit(f"//{host}").hostname or ""
+    except ValueError:  # an unclosed "[" and the like
+        return False
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def origin_allowed(headers: dict[str, str]) -> bool:
+    """Whether a WebSocket upgrade may go ahead (docs/protocol.md, Connecting). A browser always sends `Origin` on
+    one: it must be this server's own address (the page God loaded from here), and that address must be
+    `localhost` or an IP. Without `Origin` the client is not a browser (the Python and Node controllers), so no web
+    page is behind it, and it could send any Host it liked."""
+    origin = headers.get("origin")
+    if origin is None:
+        return True
+    host = headers.get("host", "").lower()
+    try:
+        netloc = urlsplit(origin).netloc.lower()
+    except ValueError:
+        return False
+    return netloc == host and local_host(host)
 
 
 def merge_state(old: dict, new: dict) -> dict:
@@ -289,19 +327,19 @@ class GameServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._connections.add(writer)
         try:
-            request = await reader.readline()
-            parts = request.decode(errors="replace").split()
+            # The request line and headers get HEADER_SECONDS (a TimeoutError is an OSError); the session after
+            # an upgrade has no time limit.
+            parts, headers = await asyncio.wait_for(self._preamble(reader), HEADER_SECONDS)
             if len(parts) < 2:
                 return
-            headers = {}
-            while True:
-                line = (await reader.readline()).decode(errors="replace").strip()
-                if not line:
-                    break
-                k, _, v = line.partition(":")
-                headers[k.strip().lower()] = v.strip()
+            if headers is None:
+                await self._refuse(writer, "431 Request Header Fields Too Large")
+                return
             path = parts[1].split("?")[0]
             if path == "/ws" and headers.get("upgrade", "").lower() == "websocket":
+                if not origin_allowed(headers):  # another site's page, or a DNS name pointed here
+                    await self._refuse(writer, "403 Forbidden")
+                    return
                 ws = await server_handshake(reader, writer, headers)
                 await self._session(ws)
                 return
@@ -311,6 +349,29 @@ class GameServer:
         finally:
             self._connections.discard(writer)
             writer.close()  # after a session too: before Python 3.13 nothing else closes the socket
+
+    async def _preamble(self, reader: asyncio.StreamReader) -> tuple[list[str], dict[str, str] | None]:
+        """The request line's words and the headers (names lowercased). The headers are None when there are more
+        than HEADER_LINES of them or more than HEADER_BYTES in all; the rest is then left unread."""
+        parts = (await reader.readline()).decode(errors="replace").split()
+        headers: dict[str, str] = {}
+        if len(parts) < 2:
+            return parts, headers
+        lines = size = 0
+        while True:
+            raw = await reader.readline()
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                return parts, headers
+            lines, size = lines + 1, size + len(raw)
+            if lines > HEADER_LINES or size > HEADER_BYTES:
+                return parts, None
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+
+    async def _refuse(self, writer: asyncio.StreamWriter, status: str) -> None:
+        writer.write(f"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode())
+        await writer.drain()
 
     async def _static(self, writer: asyncio.StreamWriter, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -520,7 +581,7 @@ class GameServer:
                     wanted = [a.id for a in self.sim.living() if not a.controller]
                 if not isinstance(wanted, list):
                     raise TypeError('characters must be a list of ids or "all"')
-                wanted = [str(w) for w in wanted]
+                wanted = list(dict.fromkeys(str(w) for w in wanted))  # a repeated id is claimed, and announced, once
                 claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
                 welcome = {
                     "type": "welcome", "role": "controller", "name": name, "characters": claimed,
@@ -626,7 +687,14 @@ class GameServer:
 
 async def serve(sim: Simulation, host: str, port: int, speed: int = 1) -> None:
     server = GameServer(sim, speed)
-    actual = await server.start(host, port)
+    try:
+        actual = await server.start(host, port)
+    except OSError as exc:  # only here, at startup: the port is taken, or --host is not an address of this machine
+        if exc.errno == errno.EADDRINUSE:
+            raise SystemExit(f"Port {port} is already in use on {host} (is GameOfAILife already running?). "
+                             "Try --port 0 for any free port, or another --port.") from None
+        why = os.strerror(exc.errno) if exc.errno and exc.errno > 0 else exc.strerror or str(exc)  # gaierror: < 0
+        raise SystemExit(f"Could not listen on {host}:{port}: {why}. Check --host and --port.") from None
     print(f"GameOfAILife is running. Open http://{host if host != '0.0.0.0' else 'localhost'}:{actual} to watch as God.")
     print(f"Controllers connect to ws://{host if host != '0.0.0.0' else 'localhost'}:{actual}/ws")
     try:

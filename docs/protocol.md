@@ -36,10 +36,24 @@ The same port serves two things:
 - `ws://host:port/ws` is the WebSocket endpoint. Any path other than `/ws`, or a
   request without `Upgrade: websocket`, is treated as a static file request.
 
-The WebSocket is plain RFC 6455 with no subprotocol, no authentication and no
-origin check. Only `ws://` is served (no TLS). `gameofailife/ws.py` has a small
-stdlib client, `connect("ws://127.0.0.1:8000/ws")`, that tests and example
-controllers can use.
+The WebSocket is plain RFC 6455 with no subprotocol and no authentication:
+anyone who can reach the port can be God or play characters. Only `ws://` is
+served (no TLS). `gameofailife/ws.py` has a small stdlib client,
+`connect("ws://127.0.0.1:8000/ws")`, that tests and example controllers can use.
+
+The upgrade has an origin check. An upgrade with an `Origin` header (browsers
+always send one) gets `403 Forbidden` and is closed unless the origin's host and
+port are exactly the request's `Host`, and that host is `localhost` or an IP
+address. So the God page served from this port connects, and so does a friend's
+browser that opens it by IP. A page from another site cannot connect, and
+neither can a page reached through a DNS name pointed at this machine (DNS
+rebinding). Clients that send no `Origin`, such as the Python and Node
+controllers, are not checked.
+
+The request line and headers must arrive within 10 seconds, with at most 100
+header lines and 16 KiB of them. A slower request is closed. A longer one gets
+`431 Request Header Fields Too Large` and is closed. Once the upgrade is done,
+the WebSocket session has no time limit.
 
 Two roles share the endpoint. The first message you send picks yours:
 
@@ -52,12 +66,16 @@ Two roles share the endpoint. The first message you send picks yours:
 
 - Every message in both directions is one JSON object in one text frame.
   Binary and fragmented frames are accepted and decoded as UTF-8. The largest
-  accepted frame or message is 4 MiB: a bigger one gets a close frame with code
-  1000 and the server closes the connection. A single frame over 4 MiB is
-  refused from its header, so the rest of it is never read, and closing with
-  that data unread may reset the connection after the close frame. A client
-  still sending the frame may see only the reset; one that reads while it sends
-  gets the close frame first.
+  frame or message the server accepts from a client is 64 KiB (65,536 bytes):
+  a bigger one gets a close frame with code 1000 and the server closes the
+  connection. A single frame over 64 KiB is refused from its header, so the
+  rest of it is never read, and closing with that data unread may reset the
+  connection after the close frame. A client still sending the frame may see
+  only the reset; one that reads while it sends gets the close frame first.
+  No client message needs more than a few KB, since the server keeps at most
+  1000 characters of a prompt, 500 of a text and 300 of a reason. The server's
+  own messages can be bigger: God's welcome passes 100 KB after a few game
+  days. The `gameofailife/ws.py` client accepts up to 4 MiB.
 - Pings get a pong with the same payload. Control frames (ping, pong, close)
   carry at most 125 bytes and are never fragmented (RFC 6455 5.5): a longer or
   fragmented one fails the connection with close code 1002.
@@ -169,7 +187,7 @@ If another God view is already connected, it is demoted (see
 |--------------|----------|---------|
 | `name`       | no       | Your controller name, cut to 40 characters. Default `"controller"`. If the name is taken by a connected controller, the server appends `-2`, `-3`, ... until it is free. The final name is in the welcome. |
 | `model`      | no       | The model behind the controller (any value, turned into a string and cut to 60 characters). Shown to God only: in `stats.llm.controllers` and in the `model` field of the forks this controller is asked. Characters never see it. A later `claim` keeps it. |
-| `characters` | no       | A list of character ids to claim, or the string `"all"` to claim every living character no other controller holds. Default: claim nothing. Characters that are dead, unknown, or held by another controller are skipped without an error. |
+| `characters` | no       | A list of character ids to claim, or the string `"all"` to claim every living character no other controller holds. Default: claim nothing. Characters that are dead, unknown, or held by another controller are skipped without an error. A repeated id counts once. |
 
 Reply:
 

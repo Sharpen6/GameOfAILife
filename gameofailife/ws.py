@@ -16,7 +16,11 @@ from urllib.parse import urlsplit
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
-MAX_MESSAGE = 4 * 1024 * 1024
+MAX_MESSAGE = 4 * 1024 * 1024  # the most a client reads in one frame or message (God's welcome is the biggest)
+# The most the server reads from one client in one frame or message. The biggest message a client needs is a few KB
+# (the server cuts prompts to 1000 characters, texts to 500, reasons to 300), and a flood of big frames would only
+# tie up the event loop.
+SERVER_MAX_MESSAGE = 64 * 1024
 CLOSE_SECONDS = 2.0  # how long close() waits for a peer to take the close frame
 
 
@@ -28,11 +32,20 @@ def accept_key(key: str) -> str:
     return base64.b64encode(hashlib.sha1((key + GUID).encode()).digest()).decode()
 
 
+def apply_mask(data: bytes, key: bytes) -> bytes:
+    """XOR data with the 4-byte masking key repeated (RFC 6455 5.3), which masks and unmasks alike. One big-integer
+    XOR, not a loop over the bytes: a 4 MiB frame takes milliseconds instead of half a second of the event loop."""
+    n = len(data)
+    return (int.from_bytes(data, "little") ^ int.from_bytes((key * (n // 4 + 1))[:n], "little")).to_bytes(n, "little")
+
+
 class WebSocket:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, mask: bool):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, mask: bool,
+                 max_message: int = MAX_MESSAGE):
         self.reader = reader
         self.writer = writer
         self.mask = mask  # clients must mask their frames, servers must not
+        self.max_message = max_message  # the largest frame or message recv() takes; a bigger one ends the connection
         self.closed = False
         self._send_lock = asyncio.Lock()
 
@@ -51,7 +64,7 @@ class WebSocket:
         if self.mask:
             key = os.urandom(4)
             header += key
-            payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+            payload = apply_mask(payload, key)
         async with self._send_lock:
             self.writer.write(bytes(header) + payload)
             await self.writer.drain()
@@ -77,12 +90,12 @@ class WebSocket:
             # RFC 6455 5.5: control frames carry at most 125 bytes and are never fragmented.
             await self.close(1002)
             raise ConnectionClosed("bad control frame")
-        if n > MAX_MESSAGE:
+        if n > self.max_message:
             raise ConnectionClosed("frame too large")
         key = await self.reader.readexactly(4) if masked else b""
         data = await self.reader.readexactly(n)
         if masked:
-            data = bytes(b ^ key[i % 4] for i, b in enumerate(data))
+            data = apply_mask(data, key)
         return fin, opcode, data
 
     async def recv(self) -> str:
@@ -104,7 +117,7 @@ class WebSocket:
                 if opcode in (OP_TEXT, OP_BINARY, OP_CONT):
                     parts.append(data)
                     size += len(data)
-                    if size > MAX_MESSAGE:
+                    if size > self.max_message:
                         raise ConnectionClosed("message too large")
                     if fin:
                         return b"".join(parts).decode()
@@ -118,7 +131,7 @@ class WebSocket:
         if self.mask:
             key = os.urandom(4)
             header += key
-            payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+            payload = apply_mask(payload, key)
         self.writer.write(bytes(header) + payload)
         await self.writer.drain()
 
@@ -144,7 +157,8 @@ class WebSocket:
 
 
 async def server_handshake(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str]
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, headers: dict[str, str],
+    max_message: int = SERVER_MAX_MESSAGE,
 ) -> WebSocket:
     key = headers.get("sec-websocket-key")
     if not key:
@@ -157,7 +171,7 @@ async def server_handshake(
         ).encode()
     )
     await writer.drain()
-    return WebSocket(reader, writer, mask=False)
+    return WebSocket(reader, writer, mask=False, max_message=max_message)
 
 
 async def connect(url: str) -> WebSocket:
