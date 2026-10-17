@@ -43,7 +43,11 @@ Two roles share the endpoint. The first message you send picks yours:
 - Every message in both directions is one JSON object in one text frame.
   Binary and fragmented frames are accepted and decoded as UTF-8. The largest
   accepted frame or message is 4 MiB: a bigger one gets a close frame with code
-  1000 and the server closes the connection.
+  1000 and the server closes the connection. A single frame over 4 MiB is
+  refused from its header, so the rest of it is never read, and closing with
+  that data unread may reset the connection after the close frame. A client
+  still sending the frame may see only the reset; one that reads while it sends
+  gets the close frame first.
 - Pings get a pong with the same payload. Control frames (ping, pong, close)
   carry at most 125 bytes and are never fragmented (RFC 6455 5.5): a longer or
   fragmented one fails the connection with close code 1002.
@@ -65,11 +69,11 @@ Two roles share the endpoint. The first message you send picks yours:
 - A message whose fields have the wrong type usually gets
   `{"type": "error", "error": "bad message: <detail>"}` (the server catches
   `ValueError`, `TypeError`, `KeyError`, `AttributeError` and `OverflowError`,
-  so a number too big to use gets this too). A controller
-  `hello` whose `characters` is neither a list nor `"all"` gets
-  `{"type": "error", "error": "bad hello: ..."}` and may say hello again. A
-  `set_profile` `prompt` that is not a string, or `traits` that is not an
-  object, is ignored.
+  so a number too big to use gets this too). A controller `hello` whose
+  `characters` is neither a list, `"all"` nor an empty value (for example `5`
+  or `"dana"`) gets `{"type": "error", "error": "bad hello: ..."}` and may say
+  hello again (see [Bad hello](#bad-hello)). A `set_profile` `prompt` that is
+  not a string, or `traits` that is not an object, is ignored.
 - Each request gets at most one direct reply, sent right away (paced
   `send_message` and `invite` requests wait their turn first, see below).
   Pushes (state frames, forks, messages) are queued by the server's frame loop,
@@ -85,11 +89,18 @@ Two roles share the endpoint. The first message you send picks yours:
   example, 140 texts sent at once get their first 100 replies right away and the
   other 40 over the next 2 seconds.
 - **Slow clients are dropped.** A slow client never holds up the city or other
-  clients. But a client still waiting to receive a push that was queued more
-  than 5 seconds ago (it stopped reading, or reads too slowly to keep up) is
-  dropped at its next push: the connection is cut with no close frame. As with
-  any disconnect, a dropped controller's characters are released, and if the
-  dropped view was God, the city has no God until the next God `hello`.
+  clients. The server hands each push to the connection at once while the
+  network buffers (the operating system's socket buffers and the server's own
+  write buffer) have room, whether or not the client is reading. Once they are
+  full, it has to wait for the client to read. When a push has waited more than
+  5 seconds without being handed over (the client stopped reading, or reads too
+  slowly to keep up), the client is dropped at its next push: the connection is
+  cut with no close frame. So a client that stops reading is dropped only once
+  its buffers have filled and 5 more seconds have passed, which can take tens of
+  seconds for a God view and much longer for a controller, whose pushes are
+  small. As with any disconnect, a dropped controller's characters are
+  released, and if the dropped view was God, the city has no God until the next
+  God `hello`.
 
 ## Hello and welcome
 
@@ -169,9 +180,13 @@ Any other `role` gets `{"type": "error", "error": "role must be god or controlle
 and the server closes the connection (close code 1000). Open a new connection
 to try again.
 
-A controller `hello` whose `characters` is neither a list nor `"all"` gets
+A controller `hello` whose `characters` is not a list or `"all"` and not an
+empty value (a number other than 0, a string other than `"all"`, `true`, or a
+non-empty object) gets
 `{"type": "error", "error": "bad hello: characters must be a list of ids or \"all\""}`
-instead. The connection stays open and you may say `hello` again.
+instead. The connection stays open and you may say `hello` again. A missing
+`characters`, or one that is `null`, `0`, `false`, `""` or `{}`, claims
+nothing, like an empty list: the `welcome` has `"characters": []`.
 
 Sending `hello` again after the welcome does not change your role; it gets
 `unknown message type 'hello'`.
@@ -278,7 +293,9 @@ Unknown id: `{"type": "error", "error": "unknown character"}`.
 
 ### Errors
 
-Any other `type` gets `{"type": "error", "error": "unknown message type '<type>'"}`.
+Any other `type` gets `{"type": "error", "error": "unknown message type <type>"}`,
+where `<type>` is the server's `repr` of the value: quoted for a string
+(`unknown message type 'hello'`) and `None` for a message with no `type`.
 Controller messages (`choose`, `claim`, `query`, ...) sent on a God connection
 get this error too.
 
@@ -448,7 +465,9 @@ expires as soon as the host stops hanging out at the cafe.
 
 ### Errors
 
-Any other `type` gets `{"type": "error", "error": "unknown message type '<type>'"}`.
+Any other `type` gets `{"type": "error", "error": "unknown message type <type>"}`,
+where `<type>` is the server's `repr` of the value: quoted for a string
+(`unknown message type 'hello'`) and `None` for a message with no `type`.
 God messages (`set_luck`, `get_agent`, ...) sent on a controller connection get
 this error too.
 
@@ -600,10 +619,10 @@ connection stays open, except after a bad hello role. All error strings:
 | `messages must be JSON` | A frame was not valid JSON: also bad UTF-8, a number too long to parse, or nesting too deep. Never carries a `req_id`. |
 | `messages must be JSON objects` | Valid JSON that is not an object (an array, a number, a string, `null`). Never carries a `req_id`. |
 | `say hello first` | Any message before `hello`. |
-| `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list nor `"all"`: `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
+| `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list, `"all"` nor an empty value (for example `5` or `"dana"`; see [Bad hello](#bad-hello)): `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
 | `role must be god or controller` | Bad hello role; the server closes the connection. |
 | `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. |
-| `unknown message type '<type>'` | The type is not one your role can send. |
+| `unknown message type <type>` | The type is not one your role can send. `<type>` is the server's Python `repr` of the value: quoted for a string (`unknown message type 'hello'`), `None` for a missing type or `null`, and bare for a number (`unknown message type 5`). |
 | `unknown character` | `get_agent` or `set_profile` with an unknown id. |
 | `not your character` | `query`, `send_message` or `invite` for a character you do not hold. |
 | `what must be one of [...]` | `query` with an unknown `what`. |
@@ -626,8 +645,8 @@ Some refusals are not `error` messages but come in the normal reply, with
 `claimed` (from `claim`) and `invited` (from `invite`) report a refusal with
 `ok: false` only, and no `error` field. The frame-level failures in
 [Message basics](#message-basics) (a frame over 4 MiB, a bad control frame,
-falling more than 5 seconds behind) close the connection instead of sending an
-error.
+a push left waiting more than 5 seconds once the network buffers are full)
+close the connection instead of sending an error.
 
 ## Answer windows: 5 seconds and 10 seconds
 
@@ -803,7 +822,7 @@ server to client. State frames to God are trimmed.
 > {"type": "query", "agent_id": "ari", "what": "possessions", "req_id": "q1"}
 < {"type": "answer", "agent_id": "ari", "what": "possessions",
    "data": {"home": {"place": "home_bendavid", "name": "Ari's flat", "tenure": "rented", "weekly_rent": 260},
-            "car": false, "phone": {"condition": "cracked"}, "money": 412.0,
+            "car": false, "phone": {"condition": "cracked"}, "money": 412.0, "savings": 0.0,
             "savings_goal": {"name": "a new phone", "target": 300, "saved": 0.0}, "groceries_at_home": 8},
    "req_id": "q1"}
 
