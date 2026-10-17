@@ -22,6 +22,17 @@ ANSWER_SECONDS = 5.0  # a controller's answer applies if it arrives within this
 LEARN_SECONDS = 10.0  # a later answer is still saved and teaches the profile
 INVITE_MINUTES = 120  # an unanswered invite expires after this
 SPEEDS = {"walk": 1, "run": 2, "car": 3}
+PENSION = 400.0  # paid every Friday morning to retirees (65+ with no job)
+BILLS_PER_ADULT = 80.0  # weekly phone, power and transport, charged with the rent
+CAR_BILL = 40.0  # weekly fuel and insurance for a car owner
+HOSPITAL_FEE = 50.0
+SHIFT_MARGIN = 10  # minutes spare a character keeps before setting off for a shift
+LEISURE = ("idle", "relax_home", "read", "side_project", "text", "rest")  # activities that can be interrupted
+
+
+def income_tax(hourly_wage: float) -> float:
+    """Share of pay withheld: about 22% for a cashier, 43% for a doctor."""
+    return min(0.45, 0.15 + 0.004 * hourly_wage)
 
 
 @dataclass
@@ -53,7 +64,7 @@ ACTIVITIES = {
     "walk_park": Activity(60, {"fun": 30, "social": 4}, inside=False),
     "side_project": Activity(90, {"fun": 20}),
     "idle": Activity(20, {}),
-    "hospital": Activity(180, {}),
+    "hospital": Activity(180, {"hunger": 40}),  # the ward feeds its patients
 }
 
 # How fast needs drop during some activities (default 1.0).
@@ -101,6 +112,7 @@ class Simulation:
         self.luck_log: list[dict] = []  # hidden: odds and rolls, never sent to anyone
         self.luck_log_path = luck_log_path
         self._invite_ids = 0
+        self._host_hold: dict[str, int] = {}  # host id -> tick they wait at an invite place until
         self._bus_pos = 0
         self._bus_wait = 0
         self._roll_weather()
@@ -123,6 +135,28 @@ class Simulation:
         job = agent.job
         return bool(job and job.on_shift(self.clock.weekday, self.clock.hour) and agent.worked_today == self.clock.day
                     and agent.activity == "work")
+
+    def walk_minutes(self, agent: Agent, place_id: str) -> int:
+        """Minutes on foot from where the character is to a place."""
+        if agent.inside == place_id:
+            return 0
+        return len(self.town.path((agent.x, agent.y), self.town.places[place_id].entry))
+
+    def _shift_start_tick(self, agent: Agent) -> int | None:
+        """Tick today's shift starts, if the character still has one ahead of them."""
+        job = agent.job
+        if (not job or agent.worked_today == self.clock.day or self.clock.weekday not in job.workdays
+                or self.clock.minute_of_day >= job.start_hour * 60):
+            return None
+        return self.clock.tick - self.clock.minute_of_day + job.start_hour * 60
+
+    def _payer_for(self, agent: Agent, cost: float) -> Agent:
+        """Children's costs they can't cover are paid by an adult in the household."""
+        if agent.is_adult or cost <= max(agent.money, 0):
+            return agent
+        adults = [self.agents[m] for m in self.household(agent).member_ids
+                  if self.agents[m].alive and self.agents[m].is_adult]
+        return max(adults, key=lambda a: a.money) if adults else agent
 
     def living(self) -> list[Agent]:
         return [a for a in self.agents.values() if a.alive]
@@ -154,6 +188,8 @@ class Simulation:
             self._new_day()
         if self.clock.weekday == 6 and m == 23 * 60:
             self._charge_rent()
+        if self.clock.weekday == 4 and m == 9 * 60:
+            self._pay_pensions()
         self._move_bus()
         self._check_timeouts()
         self._expire_invites()
@@ -176,7 +212,8 @@ class Simulation:
         for agent in self.living():
             # Old age: a small daily chance from 70, which Luck softens.
             if agent.age >= 70:
-                p = luck_odds(0.00005 * (agent.age - 69) ** 2, -1, agent.luck)
+                # About 0.5% a month at 74 and 2% at 80, so a death in the first weeks is rare.
+                p = luck_odds(0.00001 * (agent.age - 69) ** 2, -1, agent.luck)
                 self._log_roll(agent, "old_age", p, roll := self.rng.random())
                 if roll < p:
                     self._die(agent, "passed away peacefully in their sleep")
@@ -190,13 +227,22 @@ class Simulation:
             if not payers:
                 continue
             share = hh.weekly_rent / len(payers)
+            bills = 0.0
             for a in payers:
-                a.money -= share
+                bill = BILLS_PER_ADULT + (CAR_BILL if a.owns_car else 0.0)
+                a.money -= share + bill
+                bills += bill
             names = " and ".join(a.name.split()[0] for a in payers)
-            self.event(f"{names} paid ${hh.weekly_rent:.0f} rent.", kind="money")
+            self.event(f"{names} paid ${hh.weekly_rent:.0f} rent and ${bills:.0f} in bills.", kind="money")
             for a in payers:
                 if a.money < 0:
                     self.event(f"{a.name} is behind on money after rent.", a, kind="money")
+
+    def _pay_pensions(self) -> None:
+        for a in self.living():
+            if a.job is None and a.age >= 65:
+                a.money += PENSION
+                self.event(f"{a.name} receives a ${PENSION:.0f} pension.", a, kind="money")
 
     def lights(self) -> dict:
         """Traffic light phase for north-south traffic; east-west is the opposite."""
@@ -259,6 +305,8 @@ class Simulation:
 
     def _next(self, agent: Agent) -> None:
         """Start the next planned step, or let the Director find the next decision."""
+        if agent.plan and self._must_leave_for_work(agent) and not any(s[0] == "work" for s in agent.plan):
+            agent.plan = []  # drop the rest of the plan: it's time to head to work
         if agent.plan:
             self._start_step(agent, *agent.plan.pop(0))
             return
@@ -279,6 +327,10 @@ class Simulation:
         else:
             agent.plan = [("idle", None)]
         self._start_step(agent, *agent.plan.pop(0))
+
+    def _must_leave_for_work(self, agent: Agent) -> bool:
+        start = self._shift_start_tick(agent)
+        return start is not None and self.clock.tick >= start - self.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN
 
     def _resolve_place(self, agent: Agent, where: str | None) -> str | None:
         if where == "home":
@@ -328,9 +380,12 @@ class Simulation:
             end = agent.job.end_hour * 60 if agent.job else self.clock.minute_of_day + 60
             minutes = max(30, end - self.clock.minute_of_day)
             agent.busy_until = tick + minutes
-            agent.work_started = tick  # type: ignore[attr-defined]
+            # Paid from the shift start, not for turning up early.
+            start = tick - self.clock.minute_of_day + agent.job.start_hour * 60 if agent.job else tick
+            agent.work_started = max(tick, min(start, agent.busy_until - 30))  # type: ignore[attr-defined]
         elif agent.activity == "sleep":
-            wake = 6 * 60 if agent.job and agent.job.start_hour <= 8 else 7 * 60
+            # Up with time for breakfast before the shift: 7:00 starters at about 5:30.
+            wake = min(7 * 60, agent.job.start_hour * 60 - 90) if agent.job else 7 * 60
             wake += self.rng.randrange(0, 25)
             m = self.clock.minute_of_day
             minutes = (wake - m) % MINUTES_PER_DAY
@@ -339,6 +394,14 @@ class Simulation:
             agent.busy_until = tick + minutes
         else:
             agent.busy_until = tick + act.minutes
+        if agent.activity == "hang_out" and self._host_hold.get(agent.id, 0) > tick:
+            agent.busy_until = max(agent.busy_until, self._host_hold.pop(agent.id))
+        # Nothing runs into today's shift (a coffee on the way to work is the player's own risk).
+        start = self._shift_start_tick(agent)
+        if (agent.activity not in ("work", "hospital") and start is not None
+                and not any(s[0] == "work" for s in agent.plan)):
+            leave = start - self.walk_minutes(agent, agent.job.place_id) - SHIFT_MARGIN
+            agent.busy_until = max(tick + 1, min(agent.busy_until, leave))
         agent.activity_minutes = max(1, agent.busy_until - tick)  # type: ignore[attr-defined]
         if agent.activity == "eat_home":
             hh = self.household(agent)
@@ -355,6 +418,9 @@ class Simulation:
             agent.health = min(100.0, agent.health + 0.15)
         elif agent.activity == "walk_park" and self.clock.tick % 3 == 0:
             self._wander_park(agent)
+        place = self.town.places.get(agent.activity_place or "")
+        if place and place.hours and agent.activity != "work" and not place.is_open(self.clock.hour):
+            agent.busy_until = self.clock.tick  # closing time: everyone out
         if self.clock.tick >= agent.busy_until:
             self._end_activity(agent)
 
@@ -367,7 +433,7 @@ class Simulation:
     def _end_activity(self, agent: Agent) -> None:
         if agent.activity == "work" and agent.job:
             hours = (self.clock.tick - getattr(agent, "work_started", self.clock.tick)) / 60
-            pay = round(agent.job.hourly_wage * hours, 2)
+            pay = round(agent.job.hourly_wage * max(0.0, hours) * (1 - income_tax(agent.job.hourly_wage)), 2)
             if pay:
                 agent.money += pay
                 agent.week_earnings += pay
@@ -375,8 +441,11 @@ class Simulation:
         elif agent.activity == "buy_groceries":
             self.household(agent).groceries += 10
         elif agent.activity == "hospital":
-            agent.money -= 50
-            self.event(f"{agent.name} leaves City Hospital feeling better (paid $50).", agent, kind="health")
+            payer = self._payer_for(agent, HOSPITAL_FEE)
+            payer.money -= HOSPITAL_FEE
+            by = "" if payer is agent else f" by {payer.name.split()[0]}"
+            self.event(f"{agent.name} leaves City Hospital feeling better (paid ${HOSPITAL_FEE:.0f}{by}).",
+                       agent, kind="health")
         elif agent.activity == "walk_park":
             park = self.town.places["park"]
             agent.x, agent.y = park.entry
@@ -488,7 +557,7 @@ class Simulation:
             self.forks.pop(fork.id, None)
         if not agent.alive:
             return
-        agent.money -= opt.cost
+        self._payer_for(agent, opt.cost).money -= opt.cost
         agent.vehicle = opt.vehicle if opt.vehicle in SPEEDS else "walk"
         agent.speed = SPEEDS[agent.vehicle]
         agent.plan = list(opt.steps)
@@ -603,8 +672,12 @@ class Simulation:
                 self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent, kind="social")
                 self._deliver(host, {"type": "invite_answer", "invite_id": inv["id"], "from": agent.id,
                                      "answer": extra["answer"]})
+                if extra["answer"] == "accept":
+                    self._host_waits(host, agent, inv["place"])
         if "invite_to" in extra:
-            self.invite(agent, extra["invite_to"], extra["place"])
+            inv = self.invite(agent, extra["invite_to"], extra["place"])
+            if inv:
+                inv["host_goes"] = True  # the host is on the way; the invite lapses once they leave
         if "save" in extra and agent.goal:
             amount = min(extra["save"], max(agent.money, 0))
             agent.money -= amount
@@ -620,7 +693,7 @@ class Simulation:
             agent.savings = getattr(agent, "savings", 0) + extra["save"]  # type: ignore[attr-defined]
         if "ask_shop" in extra:
             other = self.agents.get(extra["ask_shop"])
-            if other and other.alive and other.state == "busy" and other.activity in ("idle", "relax_home", "read"):
+            if other and other.alive and self._interruptible(other):
                 other.plan = [("buy_groceries", "market"), ("relax_home", "home")]
                 other.state = "idle"
                 self.event(f"{other.name} heads to Fresh Market for {agent.name.split()[0]}.", other, kind="social")
@@ -632,10 +705,33 @@ class Simulation:
         if extra.get("family"):
             for m in self.household(agent).member_ids:
                 other = self.agents[m]
-                if other is not agent and other.state == "busy" and other.activity in ("idle", "relax_home", "read"):
+                if other is not agent and other.alive and self._interruptible(other):
                     other.plan = [("family_dinner", "cafe")]
                     other.state = "idle"
             self.event(f"{agent.name} takes the family out to dinner.", agent, kind="social")
+
+    def _interruptible(self, other: Agent) -> bool:
+        """Free to be asked along: idle or doing something leisurely, not asleep, working or deciding."""
+        if other.state == "idle":
+            return not other.plan
+        return other.state == "busy" and other.activity in LEISURE and not self.on_shift_now(other)
+
+    def _host_waits(self, host: Agent, guest: Agent, place_id: str) -> None:
+        """An accepted invite: keep the host at the place until the guest has arrived and had some time."""
+        if not host.alive:
+            return
+        hold = self.clock.tick + self.walk_minutes(guest, place_id) + 60
+        if host.activity == "hang_out" and host.activity_place == place_id:
+            if host.state == "busy":
+                host.busy_until = max(host.busy_until, hold)
+            else:
+                self._host_hold[host.id] = hold
+        elif self._interruptible(host):
+            host.plan = [("hang_out", place_id)]
+            host.state = "idle"
+            self._host_hold[host.id] = hold + self.walk_minutes(host, place_id)
+            self.event(f"{host.name} heads to {self.town.places[place_id].name} to meet {guest.name.split()[0]}.",
+                       host, kind="social")
 
     # --- invites and messages ---------------------------------------------------
 
@@ -656,6 +752,10 @@ class Simulation:
         for inv in list(self.invites.values()):
             if inv["status"] == "pending" and self.clock.tick - inv["tick"] > INVITE_MINUTES:
                 inv["status"] = "expired"
+            elif inv["status"] == "pending" and inv.get("host_goes"):
+                host = self.agents[inv["from"]]
+                if not host.alive or host.activity != "hang_out" or host.activity_place != inv["place"]:
+                    inv["status"] = "expired"  # the host has already left
             if inv["status"] != "pending" and self.clock.tick - inv["tick"] > INVITE_MINUTES * 2:
                 del self.invites[inv["id"]]
 
