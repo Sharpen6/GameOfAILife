@@ -29,6 +29,7 @@ HANG_OUT_MINUTES = 90  # how long hanging out at a cafe takes (sim.ACTIVITIES["h
 COFFEE_MINUTES = 15  # how long a coffee takes (sim.ACTIVITIES["coffee"])
 COFFEE_DETOUR = 15  # minutes a cafe may add to the walk to work and still be on the way (PLAN decision 55)
 COFFEE_LATE = 0.15  # the cafe's "Arrives late" odds when the cup still gets them in on time (a queue at the counter)
+SNACK_MINUTES = 5  # how long a snack takes (sim.ACTIVITIES["snack"])
 EAT_OUT_MINUTES = 40  # how long a meal out takes (sim.ACTIVITIES["eat_out"])
 GROCERY_MINUTES = 20  # how long the grocery shopping takes (sim.ACTIVITIES["buy_groceries"])
 DINNER_MINUTES = 90  # how long a family dinner out takes (sim.ACTIVITIES["family_dinner"])
@@ -337,6 +338,21 @@ def invite_fork(sim: Simulation, agent: Agent) -> Fork | None:
     return Fork(agent.id, "invite", f"{host.name} invites you to {place.name}. What do you do?", opts, sim.clock.tick)
 
 
+def _bite_first(usual: Option, late: float) -> Option:
+    """The work fork's third option when no cup of coffee fits before the shift: a bite to eat where they are, then
+    the usual way (its mode and fare; `late` is its own "Arrives late" odds)."""
+    return Option("Grab a bite to eat, then go", [("snack", None), *usual.steps], cost=usual.cost,
+                  vehicle=usual.vehicle, charge=usual.charge, base=0.3,
+                  tags={"health": 0.2, "thrift": 0.2, "diligence": -0.1}, gains={"hunger": 25},
+                  outcomes=[_late(late), Outcome("crumbs", "Gets crumbs all down their front", 0.1, -1, {"fun": -3})])
+
+
+def work_lead(sim: Simulation, agent: Agent) -> int:
+    """Minutes before the shift that the work fork opens, from where the character is: WORK_LEAD, or the walk and 15
+    more when that is longer (walking is the slowest way: always in time to walk, or to have a cup at home first)."""
+    return max(WORK_LEAD, sim.walk_minutes(agent, agent.job.place_id) + 15)
+
+
 def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     job = agent.job
     if not job or agent.worked_today == sim.clock.day:
@@ -345,7 +361,7 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if not job.workdays.count(sim.clock.weekday) or not -WORK_LATE <= minutes_to_start <= 180:
         return None
     walk_minutes = sim.walk_minutes(agent, job.place_id)
-    if minutes_to_start > max(WORK_LEAD, walk_minutes + 15):  # walking is the slowest way: always in time to walk
+    if minutes_to_start > work_lead(sim, agent):
         return None
     place = sim.town.places[job.place_id]
     school = job.hourly_wage == 0
@@ -354,17 +370,19 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     # 1. The usual way: on foot, or the bus when the walk is long and a bus leaving now saves time.
     bus = travel.bus_trip(sim, agent, job.place_id) if walk_minutes > travel.BUS_MIN_WALK else None
     if bus:
+        usual_late = 0.06
         usual = Option(f"Take the No. {bus[1]} bus to {where}", [("work", "job")], cost=transit.fare(agent.age),
                        vehicle="bus", base=0.6, charge=False,  # the fare is paid on boarding
                        tags={"diligence": 0.5, "thrift": 0.3, "social": 0.2},
-                       outcomes=[_late(0.06), Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
-                                                      {"social": 8}),
+                       outcomes=[_late(usual_late), Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
+                                                            {"social": 8}),
                                  Outcome("packed", "The bus is packed and stuffy", 0.15, -1, {"fun": -5})])
         usual_trip = bus[0]
     else:
+        usual_late = 0.12
         usual = Option(f"Walk to {where}", [("work", "job")], vehicle="walk", base=0.6,
                        tags={"diligence": 0.5, "health": 0.4, "thrift": 0.3},
-                       outcomes=[_late(0.12), Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, {"social": 8}),
+                       outcomes=[_late(usual_late), Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, {"social": 8}),
                                  Outcome("soaked", "Gets soaked in the rain", rain * 0.8, -1, {"fun": -8})])
         usual_trip = walk_minutes
     # 2. The fast way: the car, else running (always for a child), else a taxi for a walk too long to run.
@@ -386,28 +404,34 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     fast_trip = sim.travel_minutes(agent, job.place_id, fast.vehicle)
     if fast.vehicle == "taxi" and usual_trip <= minutes_to_start:  # decision 63 again: no need to pay for speed
         fast.base = round(fast.base - TAXI_NO_HURRY, 3)
-    # 3. Coffee first (PLAN decision 55, city.md 7.7): at the cafe open for the cup that adds least to the way to
-    # work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a cup there is still quicker than one
-    # at home; otherwise (an early shift, with the only open cafes across town) a cup at home first. Either way the
-    # timing sets the defaults and the late odds (_on_time below).
+    # 3. Coffee first (PLAN decision 55, city.md 7.7), only while the cup fits before the shift: at the cafe open for
+    # the cup that adds least to the way to work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a
+    # cup there is still quicker than one at home; at their own cafe a cafe worker has a coffee at work (the
+    # simulation ends it as the shift starts, so it holds nothing up). Otherwise (an early shift, with the only open
+    # cafes across town) a cup at home first, and with no time for either a bite to eat on the way out (_bite_first).
     coffee_tags = {"social": 0.4, "diligence": -0.5, "thrift": -0.3}
     spill = Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})
     home = sim.home_of(agent)
-    coffee_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
-                   + sim.town.walk_minutes(sim.town.places[home].entry, job.place_id))
+    home_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
+                 + sim.town.walk_minutes(sim.town.places[home].entry, job.place_id))
     cafe = sim.nearest(agent, ("cafe",), meet=place, stay=COFFEE_MINUTES)
-    way = (sim.walk_minutes(agent, cafe.id) + (0 if cafe.id == job.place_id
-                                               else sim.town.walk_minutes(cafe.entry, job.place_id))) if cafe else None
-    if cafe and (way <= walk_minutes + COFFEE_DETOUR or way + COFFEE_MINUTES <= coffee_trip):
-        coffee = Option(f"Grab a coffee at {cafe.name} first", [("coffee", cafe.id), ("work", "job")], cost=4,
+    at_work = cafe is not None and cafe.id == job.place_id
+    way = (sim.walk_minutes(agent, cafe.id) + (0 if at_work else sim.town.walk_minutes(cafe.entry, job.place_id))
+           if cafe else None)
+    if (cafe and (way <= walk_minutes + COFFEE_DETOUR or way + COFFEE_MINUTES <= home_trip)
+            and (way if at_work else way + COFFEE_MINUTES) <= minutes_to_start):
+        coffee = Option("Have a coffee at work" if at_work else f"Grab a coffee at {cafe.name} first",
+                        [("coffee", cafe.id), ("work", "job")], cost=4,
                         vehicle="walk", base=0.35, tags=coffee_tags, gains={"energy": 10, "social": 5},
                         outcomes=[_late(COFFEE_LATE), _meet_new(0.12),
                                   Outcome("barista", "Friendly chat at the counter", 0.3, +1, {"social": 6}), spill])
-        # A cup at their own workplace never holds up the shift (the simulation ends it as the shift starts).
-        coffee_trip = way if cafe.id == job.place_id else way + COFFEE_MINUTES
-    else:
+        coffee_trip = way if at_work else way + COFFEE_MINUTES
+    elif home_trip <= minutes_to_start:
         coffee = Option("Make a coffee at home, then go", [("coffee", "home"), ("work", "job")], vehicle="walk",
                         base=0.35, tags=coffee_tags, gains={"energy": 10}, outcomes=[_late(0.0), spill])
+        coffee_trip = home_trip
+    else:
+        coffee, coffee_trip = _bite_first(usual, usual_late), usual_trip + SNACK_MINUTES
     # 4. Skip it.
     skip = Option(f"Call in sick and stay home" if not school else "Pretend to be sick and stay home",
                   [("rest", "home")], tags={"diligence": -1.0, "health": 0.3, "adventure": 0.2}, base=-0.4,

@@ -87,7 +87,7 @@
   const BUS_GIVE_UP = 26; // minutes at a stop (two headways, which the exact timetable never allows) before walking instead
   const FLIGHT_MINUTES = 12; // the daily planes (transit.FLIGHTS) take this long to cross the sky
   const WANDER = ["walk_park", "play"]; // activities that stroll around their park
-  const WANDER_EVERY = 2; // minutes per tile of a stroll in the park
+  const WANDER_EVERY = 1; // minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
   const MEET = ["hang_out", "play"]; // activities an invite meets at: the host waits doing it, the guest comes to do it
   const NEWS_EVERY = { fender: 30 * G.clock.MINUTES_PER_DAY }; // outcome id -> the least time between two of one person's in the news
 
@@ -610,12 +610,16 @@
         agent.busy_until = Math.max(agent.busy_until, this._host_hold.get(agent.id));
         this._host_hold.delete(agent.id);
       }
-      // Nothing runs into today's shift (a coffee on the way to work is the player's own risk).
+      // Nothing runs into today's shift (the work fork offers a coffee on the way only while it fits before it).
       const start = this._shift_start_tick(agent);
       if (agent.activity !== "work" && agent.activity !== "hospital" && start !== null
         && !agent.plan.some(s => s[0] === "work")) {
         const leave = start - this.commute_minutes(agent) - SHIFT_MARGIN; // as _must_leave_for_work counts it
         agent.busy_until = Math.max(tick + 1, Math.min(agent.busy_until, leave));
+        if (agent.activity === "idle") { // with nothing to do, the work fork comes as soon as it opens
+          const opens = start - G.forks.work_lead(this, agent);
+          if (opens > tick) agent.busy_until = Math.min(agent.busy_until, opens);
+        }
       }
       agent.activity_minutes = Math.max(1, agent.busy_until - tick);
       if (agent.activity === "eat_home") {
@@ -822,7 +826,7 @@
       const options = [];
       fork.options.forEach((opt, i) => {
         let minutes = null;
-        const first = opt.steps.length ? opt.steps[0][1] : null;
+        const first = opt.steps.find(s => (s[1] ?? null) !== null)?.[1] ?? null; // the first trip's place
         const place_id = this._resolve_place(agent, first);
         let mode;
         if (opt.vehicle === G.travel.USUAL) { // the way the plan will go: by car, bus or on foot (travel.trip_mode)

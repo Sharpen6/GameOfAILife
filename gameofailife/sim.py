@@ -22,7 +22,7 @@ from . import chronicle, housing, stats, transit, travel
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
-                    default_scores, luck_odds)
+                    default_scores, luck_odds, work_lead)
 from .rng import r2
 from .town import PARK, TownMap, build_map
 from .transit import BUS_FARE, FLIGHTS
@@ -101,7 +101,7 @@ ONE_WAY = ("taxi", "ambulance")  # vehicles that take a character to one place: 
 BUS_GIVE_UP = 26  # minutes at a stop (two headways, which the exact timetable never allows) before walking instead
 FLIGHT_MINUTES = 12  # the daily planes (transit.FLIGHTS) take this long to cross the sky
 WANDER = ("walk_park", "play")  # activities that stroll around their park
-WANDER_EVERY = 2  # minutes per tile of a stroll in the park
+WANDER_EVERY = 1  # minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
 MEET = ("hang_out", "play")  # activities an invite meets at: the host waits doing it, the guest comes to do it
 NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
 
@@ -592,12 +592,16 @@ class Simulation:
             agent.busy_until = max(tick, min(agent.busy_until, start))
         if agent.activity in MEET and self._host_hold.get(agent.id, 0) > tick:
             agent.busy_until = max(agent.busy_until, self._host_hold.pop(agent.id))
-        # Nothing runs into today's shift (a coffee on the way to work is the player's own risk).
+        # Nothing runs into today's shift (the work fork offers a coffee on the way only while it fits before it).
         start = self._shift_start_tick(agent)
         if (agent.activity not in ("work", "hospital") and start is not None
                 and not any(s[0] == "work" for s in agent.plan)):
             leave = start - self.commute_minutes(agent) - SHIFT_MARGIN  # as _must_leave_for_work counts it
             agent.busy_until = max(tick + 1, min(agent.busy_until, leave))
+            if agent.activity == "idle":  # with nothing to do, the work fork comes as soon as it opens
+                opens = start - work_lead(self, agent)
+                if opens > tick:
+                    agent.busy_until = min(agent.busy_until, opens)
         agent.activity_minutes = max(1, agent.busy_until - tick)  # type: ignore[attr-defined]
         if agent.activity == "eat_home":
             hh = self.household(agent)
@@ -777,7 +781,7 @@ class Simulation:
         options = []
         for i, opt in enumerate(fork.options):
             minutes = None
-            first = opt.steps[0][1] if opt.steps else None
+            first = next((where for _, where in opt.steps if where is not None), None)  # the first trip's place
             place_id = self._resolve_place(agent, first)
             if opt.vehicle == USUAL:  # the way the plan will go: by car, bus or on foot (travel.trip_mode)
                 mode = travel.trip_mode(self, agent, place_id) if place_id else "walk"

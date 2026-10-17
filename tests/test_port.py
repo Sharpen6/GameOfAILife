@@ -539,8 +539,12 @@ class LockstepRun(unittest.TestCase):
     @slow
     def test_eight_days_of_friendships_and_rifts(self):
         # Every acquaintance and coworker starts one point short of a friendship, every friend and partner one
-        # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts.
-        js, py = self.assertLockstep(1, 8, 3, "bonds")  # dice 4 lost its only falling-out to the city fixes
+        # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts. A rift is
+        # rare enough that any one dice may have none, so the run is on the first dice from 4 whose Python days have
+        # one, whatever the rest of the city does to them.
+        dice = next((d for d in range(4, 14) if self.tags(python_trace(1, 8, d, "bonds"))["falling_out"]), None)
+        self.assertIsNotNone(dice, "no falling-out in 8 days on dice 4 to 13")
+        js, py = self.assertLockstep(1, 8, dice, "bonds")
         tags = self.tags(py)
         self.assertGreater(tags["new_friend"], 0)
         self.assertGreater(tags["falling_out"], 0)

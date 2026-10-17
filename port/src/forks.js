@@ -23,6 +23,7 @@
   const COFFEE_MINUTES = 15; // how long a coffee takes (sim.ACTIVITIES["coffee"])
   const COFFEE_DETOUR = 15; // minutes a cafe may add to the walk to work and still be on the way (PLAN decision 55)
   const COFFEE_LATE = 0.15; // the cafe's "Arrives late" odds when the cup still gets them in on time (a queue at the counter)
+  const SNACK_MINUTES = 5; // how long a snack takes (sim.ACTIVITIES["snack"])
   const EAT_OUT_MINUTES = 40; // how long a meal out takes (sim.ACTIVITIES["eat_out"])
   const GROCERY_MINUTES = 20; // how long the grocery shopping takes (sim.ACTIVITIES["buy_groceries"])
   const DINNER_MINUTES = 90; // how long a family dinner out takes (sim.ACTIVITIES["family_dinner"])
@@ -321,32 +322,49 @@
     return new Fork(agent.id, "invite", `${host.name} invites you to ${place.name}. What do you do?`, opts, sim.clock.tick);
   }
 
+  // The work fork's third option when no cup of coffee fits before the shift: a bite to eat where they are, then
+  // the usual way (its mode and fare; `late` is its own "Arrives late" odds).
+  function _bite_first(usual, late) {
+    return new Option("Grab a bite to eat, then go", [["snack", null], ...usual.steps.map((step) => [...step])], {
+      cost: usual.cost, vehicle: usual.vehicle, charge: usual.charge, base: 0.3,
+      tags: { health: 0.2, thrift: 0.2, diligence: -0.1 }, gains: { hunger: 25 },
+      outcomes: [_late(late), new Outcome("crumbs", "Gets crumbs all down their front", 0.1, -1, { fun: -3 })] });
+  }
+
+  // Minutes before the shift that the work fork opens, from where the character is: WORK_LEAD, or the walk and 15
+  // more when that is longer (walking is the slowest way: always in time to walk, or to have a cup at home first).
+  function work_lead(sim, agent) {
+    return Math.max(WORK_LEAD, sim.walk_minutes(agent, agent.job.place_id) + 15);
+  }
+
   function work_fork(sim, agent) {
     const job = agent.job;
     if (!job || agent.worked_today === sim.clock.day) return null;
     const minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day;
     if (!job.workdays.includes(sim.clock.weekday) || !(-WORK_LATE <= minutes_to_start && minutes_to_start <= 180)) return null;
     const walk_minutes = sim.walk_minutes(agent, job.place_id);
-    if (minutes_to_start > Math.max(WORK_LEAD, walk_minutes + 15)) return null; // walking is the slowest way: always in time to walk
+    if (minutes_to_start > work_lead(sim, agent)) return null;
     const place = sim.town.places.get(job.place_id);
     const school = job.hourly_wage === 0;
     const where = school ? "school" : "work";
     const rain = sim.weather === "rain" ? RAIN_CHANCE[sim.clock.season] : 0.0;
     // 1. The usual way: on foot, or the bus when the walk is long and a bus leaving now saves time.
     const bus = walk_minutes > G.travel.BUS_MIN_WALK ? G.travel.bus_trip(sim, agent, job.place_id) : null;
-    let usual, usual_trip;
+    let usual, usual_trip, usual_late;
     if (bus) {
+      usual_late = 0.06;
       usual = new Option(`Take the No. ${bus[1]} bus to ${where}`, [["work", "job"]], { cost: G.transit.fare(agent.age),
         vehicle: "bus", base: 0.6, charge: false, // the fare is paid on boarding
         tags: { diligence: 0.5, thrift: 0.3, social: 0.2 },
-        outcomes: [_late(0.06), new Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
+        outcomes: [_late(usual_late), new Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
           { social: 8 }),
         new Outcome("packed", "The bus is packed and stuffy", 0.15, -1, { fun: -5 })] });
       usual_trip = bus[0];
     } else {
+      usual_late = 0.12;
       usual = new Option(`Walk to ${where}`, [["work", "job"]], { vehicle: "walk", base: 0.6,
         tags: { diligence: 0.5, health: 0.4, thrift: 0.3 },
-        outcomes: [_late(0.12), new Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, { social: 8 }),
+        outcomes: [_late(usual_late), new Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, { social: 8 }),
           new Outcome("soaked", "Gets soaked in the rain", rain * 0.8, -1, { fun: -8 })] });
       usual_trip = walk_minutes;
     }
@@ -372,29 +390,36 @@
     if (fast.vehicle === "taxi" && usual_trip <= minutes_to_start) { // decision 63 again: no need to pay for speed
       fast.base = pyRound(fast.base - TAXI_NO_HURRY, 3);
     }
-    // 3. Coffee first (PLAN decision 55, city.md 7.7): at the cafe open for the cup that adds least to the way to
-    // work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a cup there is still quicker than one
-    // at home; otherwise (an early shift, with the only open cafes across town) a cup at home first. Either way the
-    // timing sets the defaults and the late odds (_on_time below).
+    // 3. Coffee first (PLAN decision 55, city.md 7.7), only while the cup fits before the shift: at the cafe open for
+    // the cup that adds least to the way to work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a
+    // cup there is still quicker than one at home; at their own cafe a cafe worker has a coffee at work (the
+    // simulation ends it as the shift starts, so it holds nothing up). Otherwise (an early shift, with the only open
+    // cafes across town) a cup at home first, and with no time for either a bite to eat on the way out (_bite_first).
     const coffee_tags = { social: 0.4, diligence: -0.5, thrift: -0.3 };
     const spill = new Outcome("spill", "Spills coffee on their shirt", 0.05, -1, { fun: -5 });
     const home = sim.home_of(agent);
-    let coffee_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
+    const home_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
       + sim.town.walk_minutes(sim.town.places.get(home).entry, job.place_id));
     const cafe = sim.nearest(agent, ["cafe"], null, place, COFFEE_MINUTES);
-    const way = cafe ? (sim.walk_minutes(agent, cafe.id) + (cafe.id === job.place_id ? 0
+    const at_work = Boolean(cafe) && cafe.id === job.place_id;
+    const way = cafe ? (sim.walk_minutes(agent, cafe.id) + (at_work ? 0
       : sim.town.walk_minutes(cafe.entry, job.place_id))) : null;
-    let coffee;
-    if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= coffee_trip)) {
-      coffee = new Option(`Grab a coffee at ${cafe.name} first`, [["coffee", cafe.id], ["work", "job"]], { cost: 4,
-        vehicle: "walk", base: 0.35, tags: coffee_tags, gains: { energy: 10, social: 5 },
-        outcomes: [_late(COFFEE_LATE), _meet_new(0.12),
-          new Outcome("barista", "Friendly chat at the counter", 0.3, +1, { social: 6 }), spill] });
-      // A cup at their own workplace never holds up the shift (the simulation ends it as the shift starts).
-      coffee_trip = cafe.id === job.place_id ? way : way + COFFEE_MINUTES;
-    } else {
+    let coffee, coffee_trip;
+    if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= home_trip)
+      && (at_work ? way : way + COFFEE_MINUTES) <= minutes_to_start) {
+      coffee = new Option(at_work ? "Have a coffee at work" : `Grab a coffee at ${cafe.name} first`,
+        [["coffee", cafe.id], ["work", "job"]], { cost: 4,
+          vehicle: "walk", base: 0.35, tags: coffee_tags, gains: { energy: 10, social: 5 },
+          outcomes: [_late(COFFEE_LATE), _meet_new(0.12),
+            new Outcome("barista", "Friendly chat at the counter", 0.3, +1, { social: 6 }), spill] });
+      coffee_trip = at_work ? way : way + COFFEE_MINUTES;
+    } else if (home_trip <= minutes_to_start) {
       coffee = new Option("Make a coffee at home, then go", [["coffee", "home"], ["work", "job"]], { vehicle: "walk",
         base: 0.35, tags: coffee_tags, gains: { energy: 10 }, outcomes: [_late(0.0), spill] });
+      coffee_trip = home_trip;
+    } else {
+      coffee = _bite_first(usual, usual_late);
+      coffee_trip = usual_trip + SNACK_MINUTES;
     }
     // 4. Skip it.
     const skip = new Option(!school ? "Call in sick and stay home" : "Pretend to be sick and stay home",
@@ -693,12 +718,12 @@
 
   G.forks = {
     RAIN_CHANCE, OBVIOUS_MARGIN, MAJOR_MARGIN, LUCK_STRENGTH, KID_CURFEW, WORK_LEAD, WORK_LATE, SHOP_MINUTES,
-    HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
+    HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, SNACK_MINUTES, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
     LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, WOKE_GAP, SHIFT_SOON, MAX_OUTING_MINUTES, TRAVEL_KINDS, TRAVEL_COST,
     NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, COOPED_KINDS, COOPED_UP, COOPED_HOURS, Outcome, Option, Fork, luck_odds,
     urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, _curfew,
     _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,
-    work_fork, sleep_fork, hunger_fork,
+    work_lead, work_fork, sleep_fork, hunger_fork,
     payday_fork, groceries_fork, lonely_fork, free_time_fork, BUILDERS, COOLDOWN, builders, build_fork,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

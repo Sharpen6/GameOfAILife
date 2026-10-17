@@ -107,9 +107,10 @@ class Run:
             hh.groceries, agent.worked_today, agent.last_payday = keep[1:4]
 
 
-def coffee_slot(sim: Simulation, agent, fork: forks.Fork) -> tuple[str, int, int | None]:
-    """The work fork's coffee slot: its place ("home" or a cafe), its trip from here to the job (the walk there, the
-    cup and the walk on) and the trip by way of the open cafe adding least to the way (None when none is open)."""
+def coffee_slot(sim: Simulation, agent, fork: forks.Fork) -> tuple[str | None, int | None, int | None]:
+    """The work fork's coffee slot: its place ("home" or a cafe; None for the bite to eat that takes its place when no
+    cup fits before the shift), its trip from here to the job (the walk there, the cup and the walk on) and the trip
+    by way of the open cafe adding least to the way (None when none is open)."""
     job = agent.job.place_id
 
     def trip(place_id: str) -> int:
@@ -119,7 +120,8 @@ def coffee_slot(sim: Simulation, agent, fork: forks.Fork) -> tuple[str, int, int
 
     cafe = sim.nearest(agent, ("cafe",), meet=sim.town.places[job], stay=forks.COFFEE_MINUTES)
     place = fork.options[2].steps[0][1]
-    return place, trip(sim.home_of(agent) if place == "home" else place), trip(cafe.id) if cafe else None
+    mine = None if place is None else trip(sim.home_of(agent) if place == "home" else place)
+    return place, mine, trip(cafe.id) if cafe else None
 
 
 class RunningCityTest(unittest.TestCase):
@@ -153,13 +155,15 @@ class RunningCityTest(unittest.TestCase):
             self.assertGreater(offered, 0, seed)
             self.assertLess(picked, 0.1 * offered, (seed, picked, offered))
 
-    def test_most_work_forks_offer_a_cafe_and_never_a_slower_cup_at_home(self):
+    def test_many_work_forks_offer_a_cafe_and_never_a_slower_cup_at_home(self):
         """PLAN decision 55: the coffee slot is the cafe on the way; the cup at home only when none is (an early shift,
-        a job far from every cafe), and never when the open cafe adding least to the way is the quicker trip."""
+        a job far from every cafe) or the cafe's cup would not fit before the shift (F10 of the v2 review: before, 6
+        in 10 work forks offered a cafe, most of them a cup that made the character late), and never when the open
+        cafe adding least to the way is the quicker trip."""
         for seed, run in self.runs.items():
             with self.subTest(seed=seed):
-                cafes = [c for c in run.coffee if c[0] != "home"]
-                self.assertGreater(len(cafes), 0.6 * len(run.coffee))
+                cafes = [c for c in run.coffee if c[0] not in ("home", None)]  # None: no time for a cup
+                self.assertGreater(len(cafes), 0.2 * len(run.coffee))
                 self.assertLess(len(cafes), len(run.coffee))
                 slower = [c for c in run.coffee if c[0] == "home" and c[2] is not None and c[2] < c[1]]
                 self.assertEqual(slower, [])
@@ -177,7 +181,7 @@ class RunningCityTest(unittest.TestCase):
                 usual, fast, coffee, skip = fork.options
                 self.assertIn(usual.vehicle, ("walk", "bus"), seed)
                 self.assertIn(fast.vehicle, ("car", "run", "taxi"), seed)
-                self.assertEqual(coffee.steps[0][0], "coffee", seed)
+                self.assertIn(coffee.steps[0][0], ("coffee", "snack"), seed)  # a bite to eat when no cup fits
                 self.assertEqual(coffee.steps[1:], [("work", "job")], seed)
                 self.assertTrue(skip.extra.get("skip_work"), seed)
 
@@ -433,7 +437,8 @@ class BusRiderTest(unittest.TestCase):
 class CoffeeFirstTest(unittest.TestCase):
     """PLAN decision 55: the third work option is a coffee at the cafe open for the cup that adds least to the way to
     work, whenever it is on the way (at most COFFEE_DETOUR minutes out of it) or quicker than a cup at home, and
-    otherwise a coffee at home first; city.md 7.7's timing sets the defaults and the late odds of both."""
+    otherwise a coffee at home first; either only while the cup fits before the shift (F10 of the v2 review), and a
+    bite to eat on the way out when neither does."""
 
     @classmethod
     def setUpClass(cls):
@@ -484,41 +489,50 @@ class CoffeeFirstTest(unittest.TestCase):
         self.assertGreater(self.sim.walk_minutes(agent, cafe.id), 45)
         self.assertGreater(self.way(agent, cafe), self.home_walk(agent) + forks.COFFEE_DETOUR)
 
-    def test_the_cafe_on_the_way_whatever_the_timing(self):
-        cafes, late = 0, set()
+    def test_the_cafe_on_the_way_while_the_cup_fits(self):
+        cafes, slots = 0, set()
         for agent, left, coffee, cafe in self.coffees:
+            home_fits = forks.COFFEE_MINUTES + self.home_walk(agent) <= left
             if cafe is None or self.way(agent, cafe) > self.home_walk(agent) + forks.COFFEE_DETOUR:
-                self.assertEqual(coffee.steps[0], ("coffee", "home"), (agent.id, left))
+                self.assertEqual(coffee.steps[0], ("coffee", "home") if home_fits else ("snack", None), (agent.id, left))
+                slots.add(coffee.steps[0][0])
+                continue
+            at_work = cafe.id == agent.job.place_id
+            cup = 0 if at_work else forks.COFFEE_MINUTES  # a cup at work holds nothing up
+            if self.way(agent, cafe) + cup > left:  # no time for it: the cup at home if that fits, else a bite
+                self.assertEqual(coffee.steps[0], ("coffee", "home") if home_fits else ("snack", None), (agent.id, left))
+                slots.add(coffee.steps[0][0])
                 continue
             cafes += 1
-            self.assertEqual(coffee.label, f"Grab a coffee at {cafe.name} first")
+            self.assertEqual(coffee.label, "Have a coffee at work" if at_work else f"Grab a coffee at {cafe.name} first")
             self.assertEqual((coffee.cost, coffee.steps), (4, [("coffee", cafe.id), ("work", "job")]))
             self.assertIn("meet_new", [o.id for o in coffee.outcomes])
-            cup = 0 if cafe.id == agent.job.place_id else forks.COFFEE_MINUTES  # a cup at work holds nothing up
-            late_by = max(0, self.way(agent, cafe) + cup - left)
-            self.assertAlmostEqual({o.id: o.p for o in coffee.outcomes}["late"],
-                                   forks.COFFEE_LATE + min(0.5, late_by / 40))
-            self.assertEqual(coffee.base, round(0.35 - min(1.0, late_by / 20), 3) if late_by else 0.35)
-            late.add(late_by > 0)
-        self.assertGreater(cafes, 0.5 * len(self.coffees))
+            self.assertAlmostEqual({o.id: o.p for o in coffee.outcomes}["late"], forks.COFFEE_LATE)  # in on time
+            self.assertEqual(coffee.base, 0.35)
+        self.assertGreater(cafes, 100)
         self.assertGreater(len(self.coffees) - cafes, 20)
-        self.assertEqual(late, {False, True})  # offered on time and late alike
+        self.assertEqual(slots, {"coffee", "snack"})  # a cup at home, or a bite when not even that fits
 
     def test_standing_in_an_open_cafe_never_offers_the_cup_at_home(self):
         """However far it is from home and the job, a cafe the character stands in (open for the cup) is on the way:
-        Tom the barista, inside Maple Bakery 26 minutes before his 07:00 shift, is offered the bakery's coffee."""
+        Tom the barista, inside Maple Bakery as his work fork opens 45 minutes before his 07:00 shift, is offered the
+        bakery's coffee. (Earlier than that, now that a cup comes only when it fits before the shift.)"""
         sim, seen = self.sim, 0
         for agent in sim.living():
             if not agent.job:
                 continue
             for cafe in [p for p in sim.town.places.values() if p.kind == "cafe"]:
-                minute = agent.job.start_hour * 60 - 26
+                minute = agent.job.start_hour * 60 - forks.WORK_LEAD
                 self.fork_at(agent, minute)
                 agent.inside, (agent.x, agent.y) = cafe.id, cafe.entry
                 if not (cafe.is_open(minute / 60) and cafe.is_open((minute + forks.COFFEE_MINUTES) / 60)):
                     continue
                 coffee = forks.work_fork(sim, agent).options[2]
                 self.assertNotEqual(coffee.steps[0][1], "home", (agent.id, cafe.id))
+                if coffee.steps[0][0] == "snack":  # no time for a cup before the shift, here or anywhere
+                    self.assertGreater(sim.walk_minutes(agent, agent.job.place_id) + forks.COFFEE_MINUTES,
+                                       forks.WORK_LEAD)
+                    continue
                 trip = sim.walk_minutes(agent, agent.job.place_id) + forks.COFFEE_MINUTES
                 self.assertEqual(sim.walk_minutes(agent, coffee.steps[0][1]) + forks.COFFEE_MINUTES
                                  + sim.town.walk_minutes(sim.town.places[coffee.steps[0][1]].entry, agent.job.place_id),
@@ -529,7 +543,7 @@ class CoffeeFirstTest(unittest.TestCase):
         self.assertGreater(seen, 100)
 
     def test_the_coffee_at_home_has_the_cafes_tags_and_lateness_by_timing(self):
-        tags = {tuple(sorted(c.tags.items())) for _, _, c, _ in self.coffees}
+        tags = {tuple(sorted(c.tags.items())) for _, _, c, _ in self.coffees if c.steps[0][0] == "coffee"}
         self.assertEqual(len(tags), 1)  # one set of tags for the cafe and the cup at home
         seen = set()
         for agent, left, coffee, _ in self.coffees:
@@ -542,7 +556,7 @@ class CoffeeFirstTest(unittest.TestCase):
             self.assertEqual(late, max(0.0, min(0.5, late_by / 40)), (agent.id, left))
             self.assertEqual(coffee.base, round(0.35 - max(0.0, min(1.0, late_by / 20)), 3))
             seen.add(late > 0)
-        self.assertEqual(seen, {False, True})
+        self.assertEqual(seen, {False})  # offered only while it gets them in on time (F10 of the v2 review)
 
 
 class TimingTest(unittest.TestCase):

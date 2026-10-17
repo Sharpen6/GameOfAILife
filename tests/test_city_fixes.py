@@ -3,8 +3,9 @@
 F1 savings and the household pay for what cash can't (no money trap), F2 the sleep fork only for the tired, F3 no far
 or shift-breaking errands and a travel cost in the scores, F4 a trip there and back the usual way (the car goes
 where its owner drives it), F5 one fender bender a month in the news, F6 free play for children who can't pay and a
-pull outdoors after a day in, F7 strolls across the whole park, F9 the world starts on Monday at 05:00, F10 a cafe
-worker's cup at work never holds up the shift, F11 no fork offers the same thing twice.
+pull outdoors after a day in, F7 strolls across the whole park, F9 the world starts on Monday at 05:00, F10 a cup of
+coffee only when it fits before the shift (a cafe worker's cup at work never holds it up), F11 no fork offers the
+same thing twice.
 """
 
 from __future__ import annotations
@@ -444,11 +445,40 @@ class ParkStrollTest(unittest.TestCase):
         for x, y in seen:
             self.assertTrue(park.x <= x < park.x + park.w and park.y <= y < park.y + park.h and sim.town.walkable(x, y))
         self.assertGreater(len(seen), 60)
-        self.assertGreaterEqual(max(x for x, _ in seen), 33)  # the east half too (before: never past x 34 in 180 days)
+        self.assertGreaterEqual(max(x for x, _ in seen), 38)  # the east end too (before: never past x 34 in 180 days)
         self.assertLessEqual(abs(last[0] - park.entry[0]) + abs(last[1] - park.entry[1]), 2)  # walked back to the gate
         self.assertEqual((agent.x, agent.y), tuple(park.entry))
         lawns = sim._lawns_of(park)
         self.assertTrue(lawns and all(sim.town.tiles[y][x] == PARK for x, y in lawns))
+
+    def test_hour_long_strolls_reach_the_far_end(self):
+        """An ordinary hour in the park, 20 times from the gate at the west end: the strolls reach the east end
+        (x 36 and on; before, a tile every 2 minutes and the walk back to the gate kept them west of x 38, and in
+        30 days 34 of its 40 lawn tiles went unvisited), between them cover most of the lawn, and each ends at
+        the gate."""
+        sim = Simulation(seed=SEED)
+        park = sim.town.places["park"]
+        agent = sim.agents["ari"]
+        self.assertEqual(ACTIVITIES["walk_park"].minutes, 60)
+        seen, far = set(), 0
+        for day in range(20):
+            at(sim, 7 * day + 6, 9 * 60)  # Sundays: no shift to cut it short
+            at_home(sim, agent)
+            agent.inside, (agent.x, agent.y) = None, park.entry
+            sim.start_plan(agent, [("walk_park", park.id)], "walk")
+            stroll = set()
+            with mock.patch.object(sim_module, "build_fork", lambda sim, agent: None):
+                while agent.activity == "walk_park":
+                    stroll.add((agent.x, agent.y))
+                    sim.clock.advance()
+                    sim._tick_agent(agent)
+            self.assertEqual((agent.x, agent.y), tuple(park.entry))
+            seen |= stroll
+            far += any(x >= 36 for x, _ in stroll)
+        self.assertGreaterEqual(far, 3)
+        lawns = sim._lawns_of(park)
+        self.assertGreater(len(seen & set(lawns)), 0.7 * len(lawns))
+        self.assertGreater(len([t for t in lawns if t in seen and t[0] >= 36]), 5)
 
 
 # --- F9 ---------------------------------------------------------------------------------------------------------------
@@ -486,20 +516,20 @@ class OwnCafeCoffeeTest(unittest.TestCase):
         self.tom = self.sim.agents["tom"]  # Corner Cafe's barista, at 07:00
         self.assertEqual((self.tom.job.place_id, self.tom.job.start_hour), ("cafe", 7))
 
-    def coffee_fork(self, minute: int):
+    def work_fork(self, minute: int):
         sim, tom = self.sim, self.tom
         at(sim, min(tom.job.workdays), minute)
         at_home(sim, tom)
         tom.worked_today = -1
-        fork = forks.work_fork(sim, tom)
-        self.assertEqual(fork.options[2].steps, [("coffee", "cafe"), ("work", "job")])
-        return fork
+        return forks.work_fork(sim, tom)
 
     def test_a_cup_at_work_starts_the_shift_on_time(self):
         sim, tom = self.sim, self.tom
         walk = sim.walk_minutes(tom, "cafe")
-        fork = self.coffee_fork(7 * 60 - walk - SHIFT_MARGIN)  # when he must set off
+        fork = self.work_fork(7 * 60 - walk - SHIFT_MARGIN)  # when he must set off
         coffee = fork.options[2]
+        self.assertEqual(coffee.label, "Have a coffee at work")
+        self.assertEqual(coffee.steps, [("coffee", "cafe"), ("work", "job")])
         self.assertEqual(coffee.base, 0.35)  # the cup itself makes him no later
         self.assertEqual({o.id: o.p for o in coffee.outcomes}["late"], forks.COFFEE_LATE)
         sim._decide(tom, fork, 2, "model", "")
@@ -508,15 +538,119 @@ class OwnCafeCoffeeTest(unittest.TestCase):
         step_one(sim, tom, lambda: tom.activity == "work" and tom.state == "busy")
         self.assertEqual(sim.clock.minute_of_day, 7 * 60)
 
-    def test_running_late_the_cup_takes_no_time(self):
+    def test_running_late_there_is_no_cup_to_be_had(self):
         sim, tom = self.sim, self.tom
         walk = sim.walk_minutes(tom, "cafe")
-        fork = self.coffee_fork(7 * 60 - walk + 5)  # he can only get there 5 minutes late
-        late_by = walk - (7 * 60 - sim.clock.minute_of_day)
-        self.assertEqual(fork.options[2].base, round(0.35 - late_by / forks.LATE_BASE_DROP, 3))  # the walk's lateness only
-        sim._decide(tom, fork, 2, "model", "")
-        step_one(sim, tom, lambda: tom.activity == "work" and tom.state == "busy")
-        self.assertEqual(sim.clock.minute_of_day, 7 * 60 + late_by)  # straight to work on arrival
+        self.assertEqual(self.work_fork(7 * 60 - walk).options[2].label, "Have a coffee at work")  # the last minute
+        fork = self.work_fork(7 * 60 - walk + 5)  # he can only get there 5 minutes late
+        bite = fork.options[2]
+        self.assertEqual(bite.label, "Grab a bite to eat, then go")
+        self.assertEqual((bite.steps, bite.vehicle), ([("snack", None), ("work", "job")], fork.options[0].vehicle))
+        self.assertNotIn("coffee", [step[0] for opt in fork.options for step in opt.steps])
+        self.assertEqual(len({o.label for o in fork.options}), 4)
+
+
+def cup_minutes(sim: Simulation, agent, opt: Option) -> int | None:
+    """The minutes a work fork's coffee option takes from here to the job, the cup included (none for a cup at the
+    workplace, which ends as the shift starts); None for an option with no coffee in it."""
+    if opt.steps[0][0] != "coffee":
+        return None
+    cafe, job = sim._resolve_place(agent, opt.steps[0][1]), agent.job.place_id
+    if cafe == job:
+        return sim.walk_minutes(agent, job)
+    return (sim.walk_minutes(agent, cafe) + forks.COFFEE_MINUTES
+            + sim.town.walk_minutes(sim.town.places[cafe].entry, job))
+
+
+class CoffeeFitsTest(unittest.TestCase):
+    """F10: a work fork offers a cup of coffee (at a cafe, at work or at home) only while it fits before the shift,
+    so no offered cup has any lateness in it; with no time for one the third option is a bite to eat on the way out."""
+
+    def check(self, sim: Simulation, agent, fork) -> None:
+        left = agent.job.start_hour * 60 - sim.clock.minute_of_day
+        coffee = fork.options[2]
+        minutes = cup_minutes(sim, agent, coffee)
+        where = (agent.id, sim.clock.stamp(), coffee.label)
+        if minutes is None:
+            self.assertEqual(coffee.label, "Grab a bite to eat, then go", where)
+            home = sim.home_of(agent)
+            self.assertGreater(sim.walk_minutes(agent, home) + forks.COFFEE_MINUTES
+                               + sim.town.walk_minutes(sim.town.places[home].entry, agent.job.place_id), left, where)
+        else:
+            self.assertLessEqual(minutes, left, where)  # late_by <= 0
+            self.assertEqual(coffee.base, 0.35, where)
+            late = forks.COFFEE_LATE if coffee.steps[0][1] != "home" else 0.0
+            self.assertEqual({o.id: o.p for o in coffee.outcomes}["late"], late, where)
+        self.assertEqual(sum(cup_minutes(sim, agent, o) is not None for o in fork.options), int(minutes is not None))
+        self.assertEqual(len({o.label for o in fork.options}), 4, where)
+        self.seen[minutes is None] += 1
+
+    def test_every_minute_of_every_work_window(self):
+        """Each worker and pupil of seed 1, at home and at the door of each cafe, every minute the fork can open."""
+        sim, self.seen = Simulation(seed=SEED), [0, 0]
+        for agent in [a for a in sim.living() if a.job]:
+            start = agent.job.start_hour * 60
+            for where in [sim.home_of(agent)] + [p.id for p in sim.town.places.values() if p.kind == "cafe"]:
+                for minute in range(start - 180, start + forks.WORK_LATE + 1, 3):
+                    at(sim, min(agent.job.workdays), minute)
+                    at_home(sim, agent)
+                    if where != sim.home_of(agent):
+                        agent.inside, (agent.x, agent.y) = None, sim.town.places[where].entry
+                    agent.worked_today = -1
+                    fork = forks.work_fork(sim, agent)
+                    if fork is not None:
+                        self.check(sim, agent, fork)
+        self.assertGreater(self.seen[False], 500)  # a cup that fits
+        self.assertGreater(self.seen[True], 500)  # no time for one
+
+    def test_every_work_fork_of_a_running_city(self):
+        """Seeds 1 and 4 (whose late starts after a coffee rose with the money fix) for 4 days of default plays."""
+        for seed in (1, 4):
+            sim, self.seen = Simulation(seed=seed), [0, 0]
+            build = sim_module.build_fork
+
+            def on_build(sim, agent):
+                fork = build(sim, agent)
+                if fork is not None and fork.kind == "work":
+                    self.check(sim, agent, fork)
+                return fork
+
+            with mock.patch.object(sim_module, "build_fork", on_build):
+                for _ in range(4 * MINUTES_PER_DAY):
+                    sim.step()
+                    sim.drain()
+            self.assertGreater(self.seen[False], self.seen[True], seed)  # most have time for a cup
+
+    def test_with_nothing_to_do_the_work_fork_comes_as_it_opens(self):
+        """Idling at home (the Director's 20-minute wait), a worker gets the work fork the minute it opens, in time
+        for a cup at home, not up to 19 minutes later or when it is time to go (before, a long walk to work
+        always brought it then, with no time for a cup)."""
+        sim = Simulation(seed=SEED)
+        for agent in [a for a in sim.living() if a.job and a.job.hourly_wage][:20]:
+            with self.subTest(agent=agent.id):
+                start = agent.job.start_hour * 60
+                at(sim, min(agent.job.workdays), start - 100)
+                at_home(sim, agent)
+                agent.worked_today, agent.woke_tick = -1, None
+                sim.start_plan(agent, [("idle", None)])
+                self.assertEqual(agent.activity, "idle")
+                built = []
+                build = sim_module.build_fork
+
+                def on_build(sim, who):
+                    fork = build(sim, who)
+                    if fork is not None and who is agent:
+                        built.append((sim.clock.minute_of_day, fork))
+                    return fork
+
+                with mock.patch.object(sim_module, "build_fork", on_build), \
+                        mock.patch.object(Simulation, "director", lambda sim, who, fork: None):
+                    while not any(f.kind == "work" for _, f in built):
+                        sim.clock.advance()
+                        sim._tick_agent(agent)
+                minute, fork = next((m, f) for m, f in built if f.kind == "work")
+                self.assertEqual(start - minute, forks.work_lead(sim, agent))
+                self.assertEqual(fork.options[2].steps[0][0], "coffee")  # at home there is always time for one
 
 
 # --- F11 --------------------------------------------------------------------------------------------------------------
