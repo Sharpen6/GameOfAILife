@@ -160,7 +160,11 @@
       const q = v.includes("'") && !v.includes('"') ? '"' : "'";
       return q + v.replace(/\\/g, "\\\\").replace(new RegExp(q, "g"), "\\" + q).replace(/\n/g, "\\n") + q;
     }
-    if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(v);
+    if (typeof v === "number") {
+      if (Number.isNaN(v)) return "nan";
+      if (!Number.isFinite(v)) return v < 0 ? "-inf" : "inf";
+      return String(v);
+    }
     if (Array.isArray(v)) return "[" + v.map(pyRepr).join(", ") + "]";
     return "{" + Object.entries(v).map(([k, x]) => pyRepr(k) + ": " + pyRepr(x)).join(", ") + "}";
   }
@@ -198,6 +202,88 @@
     throw new PyError("TypeError", `int() argument must be a string, a bytes-like object or a real number, not '${pyTypeName(v)}'`);
   }
 
+  // max(lo, min(hi, x)) as Python reads it: a comparison with NaN is false, so min(hi, nan) keeps hi where
+  // Math.min would give NaN.
+  function pyClamp(x, lo, hi) {
+    const m = x < hi ? x : hi;
+    return m > lo ? m : lo;
+  }
+
+  // json.loads(text): JSON as Python's json module reads it, which also takes the bare NaN, Infinity and
+  // -Infinity that JSON.parse refuses. Throws a SyntaxError (a RangeError when nested too deep) on anything else.
+  const JSON_CONSTANTS = [["null", null], ["true", true], ["false", false], ["NaN", NaN], ["Infinity", Infinity],
+    ["-Infinity", -Infinity]];
+  const JSON_STRING = /"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/y;
+  const JSON_NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][-+]?\d+)?/y;
+  function pyJsonLoads(text) {
+    try {
+      return JSON.parse(text);
+    } catch (err) {
+      if (typeof text !== "string" || !/NaN|Infinity/.test(text)) throw err;
+    }
+    let i = 0;
+    const fail = () => { throw new SyntaxError(`not JSON at position ${i}`); };
+    const space = () => { while (i < text.length && " \t\n\r".includes(text[i])) i++; };
+    const take = re => {
+      re.lastIndex = i;
+      const m = re.exec(text);
+      if (m) i = re.lastIndex;
+      return m ? m[0] : null;
+    };
+    const expect = c => {
+      space();
+      if (text[i] !== c) fail();
+      i++;
+    };
+    function items(close, each) {
+      i++;
+      space();
+      if (text[i] === close) { i++; return; }
+      for (;;) {
+        each();
+        space();
+        if (text[i] !== ",") break;
+        i++;
+      }
+      expect(close);
+    }
+    function value() {
+      space();
+      if (text[i] === "{") {
+        const obj = {};
+        items("}", () => {
+          space();
+          const key = take(JSON_STRING);
+          if (key === null) fail();
+          expect(":");
+          // defineProperty, as JSON.parse does: a "__proto__" key is a plain key, and the last one wins.
+          Object.defineProperty(obj, JSON.parse(key), { value: value(), writable: true, enumerable: true, configurable: true });
+        });
+        return obj;
+      }
+      if (text[i] === "[") {
+        const arr = [];
+        items("]", () => arr.push(value()));
+        return arr;
+      }
+      const s = take(JSON_STRING);
+      if (s !== null) return JSON.parse(s);
+      const n = take(JSON_NUMBER);
+      if (n !== null) return Number(n);
+      for (const [word, v] of JSON_CONSTANTS) {
+        if (text.startsWith(word, i)) {
+          i += word.length;
+          return v;
+        }
+      }
+      return fail();
+    }
+    const out = value();
+    space();
+    if (i < text.length) fail();
+    return out;
+  }
+
   // Python's ("rel", id) effect key: the string "rel:<id>" in this port.
   const relKey = id => `rel:${id}`;
   const REL = "rel:";
@@ -205,6 +291,6 @@
   G.py = {
     hasOwn, getd, pyMod, floorDiv, sum, pyRound, fmt, fmtc, commas, pad2, firstName, lastName, capitalize, title,
     cut, keepLast, pyStrip, cmp, sortedBy, minBy, maxBy, argmax, count, PyError, pyTypeName, pyRepr, pyStr,
-    pyTruthy, pyFloat, pyInt, relKey, REL,
+    pyTruthy, pyFloat, pyInt, pyClamp, pyJsonLoads, relKey, REL,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

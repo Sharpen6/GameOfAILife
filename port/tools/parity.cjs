@@ -4,6 +4,7 @@
 //   node port/tools/parity.cjs dice SEED            each Rng helper's draws, in a fixed order
 //   node port/tools/parity.cjs golden SEED          the golden city (tests/fixtures/city_seed1.json's data)
 //   node port/tools/parity.cjs messages SEED DAYS   LocalHost's messages for a God view, after DAYS game days
+//   node port/tools/parity.cjs god SEED TEXTS       LocalHost's replies to a God view's raw messages (a JSON list)
 //   node port/tools/parity.cjs run SEED DAYS DICE   a run through LocalHost, with every fork checked
 //   node port/tools/parity.cjs trace SEED DAYS DICE [LUCK|-] [hard]  every event, fork and hourly agent row
 "use strict";
@@ -72,6 +73,25 @@ function messages(seed, days) {
     protocol: protocol(host),
     agent_ids: Array.from(sim.agents.keys()),
   };
+}
+
+// A God view's raw messages, one reply each, then the luck sim.set_luck("dana", "nan") leaves: the odd values
+// a hand-written message can carry (NaN, Infinity, numbers as strings) answered as GameServer answers them.
+function god(seed, texts) {
+  const sim = new G.sim.Simulation(seed, null, null, seed);
+  const { host } = hostFor(sim, 16);
+  const view = new Client();
+  host.connect(view);
+  host.receive(view, JSON.stringify({ type: "hello", role: "god" }));
+  view.take("welcome");
+  const out = texts.map(text => {
+    view.got = [];
+    host.receive(view, text);
+    return view.got.pop();
+  });
+  sim.set_luck("dana", "nan");
+  out.push({ direct_luck: sim.agents.get("dana").luck });
+  return out;
 }
 
 // The session rules GameServer keeps: hello first, JSON objects only, one God (the old one watches), no
@@ -210,12 +230,14 @@ function main(argv) {
     out = G.cast.golden(n(0), sha1);
   } else if (cmd === "messages") {
     out = messages(n(0), n(1) || 0);
+  } else if (cmd === "god") {
+    out = god(n(0), JSON.parse(args[1]));
   } else if (cmd === "trace") {
     out = trace(n(0), n(1), n(2), args.length > 3 && args[3] !== "-" ? n(3) : null, args[4] || "");
   } else if (cmd === "run") {
     out = run(n(0), n(1), n(2));
   } else {
-    process.stderr.write("usage: parity.cjs rng|dice|golden|messages|run|trace ...\n");
+    process.stderr.write("usage: parity.cjs rng|dice|golden|messages|god|run|trace ...\n");
     process.exit(2);
   }
   process.stdout.write(JSON.stringify(out) + "\n");

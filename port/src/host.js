@@ -10,7 +10,7 @@
 // window.WebSocket before game.js loads. Methods are in GameServer's order so a server.py diff maps here.
 (function (G) {
   "use strict";
-  const { hasOwn, getd, pyFloat, pyInt, pyStr, pyRepr, PyError } = G.py;
+  const { hasOwn, getd, pyFloat, pyInt, pyStr, pyRepr, pyJsonLoads, PyError } = G.py;
 
   const FRAME_SECONDS = 0.05;
   const SPEEDS = [0, 1, 2, 4, 8, 16];
@@ -158,7 +158,7 @@
       if (!session) return;
       let msg;
       try {
-        msg = JSON.parse(text);
+        msg = pyJsonLoads(text); // json.loads: bare NaN and Infinity read as Python reads them
       } catch (_) {
         this._reply(ws, null, { type: "error", error: "messages must be JSON" });
         return;

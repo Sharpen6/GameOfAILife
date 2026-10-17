@@ -162,6 +162,54 @@ def python_messages(seed: int = 1, days: float = 0) -> dict:
     return json.loads(json.dumps(out))
 
 
+# Hand-written God messages with values the dashboard never sends: numbers as strings, out-of-range traits, and
+# the bare NaN and Infinity that Python's json.loads reads (JSON.parse does not).
+ODD_GOD_TEXTS = [
+    json.dumps({"type": "set_profile", "agent_id": "dana", "traits": {"thrift": "nan"}}),
+    json.dumps({"type": "set_profile", "agent_id": "dana", "traits": {"social": "-inf", "health": "2"}}),
+    '{"type": "set_profile", "agent_id": "dana", "traits": {"family": NaN, "adventure": Infinity, "diligence": -Infinity}}',
+    '{"type": "set_profile", "agent_id": "dana", "traits": {"thrift": 1e999}, "req_id": 3}',
+    '{"type": "set_luck", "agent_id": "dana", "luck": NaN}',
+    '{"type": "set_luck", "agent_id": "dana", "luck": -Infinity}',
+    json.dumps({"type": "set_luck", "agent_id": "dana", "luck": "nan"}),
+    '{"type": "set_speed", "speed": NaN}',
+    '{"type": "set_speed", "speed": Infinity}',
+    '{"type": NaN}',
+    '{"type": "get_agent", "agent_id": NaN}',
+    '[NaN]',
+    'NaN',
+    '{"type": "pause", "x": -NaN}',
+    '{"type": "pause", "x": +Infinity}',
+]
+
+
+def python_god(seed: int, texts: list[str]) -> list:
+    """parity.cjs `god` in Python: GameServer's replies to a God view's raw messages, read and answered the way
+    its message loop does, then the luck sim.set_luck("dana", "nan") leaves."""
+    sim = Simulation(seed=seed)
+    server = GameServer(sim, speed=16)
+    out = []
+    for text in texts:
+        try:
+            msg = json.loads(text)
+        except (ValueError, RecursionError):
+            out.append({"type": "error", "error": "messages must be JSON"})
+            continue
+        if not isinstance(msg, dict):
+            out.append({"type": "error", "error": "messages must be JSON objects"})
+            continue
+        try:
+            reply = server._god(msg)
+        except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as exc:
+            reply = {"type": "error", "error": f"bad message: {exc}"}
+        if "req_id" in msg:
+            reply["req_id"] = msg["req_id"]
+        out.append(json.loads(json.dumps(reply)))  # written when sent, as _reply does: the profile is live
+    sim.set_luck("dana", "nan")
+    out.append({"direct_luck": sim.agents["dana"].luck})
+    return out
+
+
 # --- node parity --------------------------------------------------------------------------------------------
 
 @needs_node
@@ -282,6 +330,24 @@ class MessageSchemas(unittest.TestCase):
         self.assertEqual([js["speed"], js["pause"], js["resume"]],
                          [{"type": "speed", "speed": 4}, {"type": "speed", "speed": 0}, {"type": "speed", "speed": 1}])
         self.assertEqual(js["profile"]["agent"]["profile"]["traits"]["thrift"], 0.9)
+
+    def test_god_replies_to_odd_values(self):
+        # Python clamps with min/max, where min(1.0, nan) is 1.0; Math.min would give NaN and a NaN trait would
+        # make every later fork score of the character NaN.
+        js = node("god", 1, json.dumps(ODD_GOD_TEXTS))
+        py = python_god(1, ODD_GOD_TEXTS)
+        self.assertEqual(len(js), len(py))
+        for text, got, want in zip(ODD_GOD_TEXTS + ['sim.set_luck("dana", "nan")'], js, py):
+            self.assertEqual(got, want, text)
+        profile = js[0]["agent"]["profile"]
+        self.assertEqual(profile["traits"]["thrift"], 1.0)
+        self.assertIn("careful with money", profile["prompt"].lower())
+        traits = js[2]["agent"]["profile"]["traits"]
+        self.assertEqual([traits["family"], traits["adventure"], traits["diligence"]], [1.0, 1.0, 0.0])
+        self.assertEqual(js[4], {"type": "error", "error": "bad message: luck must be a number"})
+        self.assertEqual(js[7], {"type": "error", "error": "bad message: cannot convert float NaN to integer"})
+        self.assertEqual(js[9], {"type": "error", "error": "unknown message type nan"})
+        self.assertEqual(js[-1], {"direct_luck": 100.0})
 
     def test_sessions(self):
         p = self.js["protocol"]

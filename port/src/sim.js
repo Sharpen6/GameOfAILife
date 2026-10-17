@@ -14,7 +14,7 @@
 (function (G) {
   "use strict";
   const { getd, hasOwn, pyMod, pyRound, fmt, firstName, cut, keepLast, argmax, sortedBy, maxBy, pyFloat,
-    pyStrip, pyTruthy, PyError, REL } = G.py;
+    pyClamp, pyStrip, pyTruthy, PyError, REL } = G.py;
 
   const ANSWER_SECONDS = 5.0; // a controller's answer applies if it arrives within this
   const LEARN_SECONDS = 10.0; // a later answer is still saved and teaches the profile
@@ -1062,7 +1062,7 @@
     set_luck(agent_id, luck) {
       const agent = this.agents.get(agent_id);
       if (!agent) return false;
-      agent.luck = Math.max(0.0, Math.min(100.0, pyFloat(luck)));
+      agent.luck = pyClamp(pyFloat(luck), 0.0, 100.0);
       return true;
     }
 
@@ -1073,7 +1073,7 @@
       const isDict = traits !== null && typeof traits === "object" && !Array.isArray(traits);
       const fresh = {};
       for (const [t, v] of Object.entries(isDict ? traits : {})) {
-        if (hasOwn(agent.profile.traits, t)) fresh[t] = pyRound(Math.max(0.0, Math.min(1.0, pyFloat(v))), 3);
+        if (hasOwn(agent.profile.traits, t)) fresh[t] = pyRound(pyClamp(pyFloat(v), 0.0, 1.0), 3);
       }
       Object.assign(agent.profile.traits, fresh);
       if (typeof prompt === "string" && pyStrip(prompt)) {
