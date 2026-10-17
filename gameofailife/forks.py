@@ -105,6 +105,13 @@ def _curfew(sim: Simulation, agent: Agent, hours_ahead: float = 0.0) -> bool:
     return not agent.is_adult and (hour >= KID_CURFEW or sim.clock.hour < 6)
 
 
+def _open_on_arrival(sim: Simulation, agent: Agent, place_id: str, stay: int = 0) -> bool:
+    """True when the place is open by the time the character walks in, and still open `stay` minutes later."""
+    place = sim.town.places[place_id]
+    arrive = sim.clock.hour + sim.walk_minutes(agent, place_id) / 60
+    return place.is_open(arrive) and place.is_open(arrive + stay / 60)
+
+
 def _best_friend(sim: Simulation, agent: Agent, exclude_household: bool = True,
                  adults_only: bool = False) -> Agent | None:
     hh = sim.household(agent).member_ids
@@ -131,6 +138,8 @@ def invite_fork(sim: Simulation, agent: Agent) -> Fork | None:
     hour = sim.clock.hour
     if hour >= 22 or hour < 6 or _curfew(sim, agent):
         return None  # sleep on it; the invite waits or expires
+    if not _open_on_arrival(sim, agent, invite["place"]):
+        return None  # the place is shut by then; the invite waits or expires
     host = sim.agents[invite["from"]]
     place = sim.town.places[invite["place"]]
     rel = ("rel", host.id)
@@ -226,14 +235,12 @@ def hunger_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if agent.needs["hunger"] >= 35:
         return None
     hh = sim.household(agent)
-    cafe_open = sim.town.places["cafe"].is_open(sim.clock.hour)
-    market_open = sim.town.places["market"].is_open(sim.clock.hour)
     if hh.groceries > 0:
         cook = Option("Cook at home", [("eat_home", "home")], tags={"thrift": 0.6, "family": 0.5, "health": 0.4},
                       gains={"hunger": 60},
                       outcomes=[Outcome("tasty", "Makes a really tasty meal", 0.5, +1, {"fun": 6}),
                                 Outcome("burnt", "Burns the food", 0.08, -1, {"fun": -6})])
-    elif market_open and agent.is_adult and agent.money >= 35:
+    elif agent.is_adult and agent.money >= 35 and _open_on_arrival(sim, agent, "market", stay=20):
         cook = Option("Buy groceries, then cook", [("buy_groceries", "market"), ("eat_home", "home")], cost=35,
                       tags={"thrift": 0.4, "family": 0.6, "diligence": 0.3}, gains={"hunger": 60},
                       outcomes=[_meet_new(0.05), Outcome("tasty", "Makes a really tasty meal", 0.5, +1, {"fun": 6})])
@@ -241,7 +248,7 @@ def hunger_fork(sim: Simulation, agent: Agent) -> Fork | None:
         cook = Option("Order food to the house", [("order_food", "home")], cost=25,
                       tags={"thrift": -0.4, "family": 0.3}, gains={"hunger": 50},
                       outcomes=[Outcome("late_delivery", "The delivery is very late", 0.2, -1, {"fun": -6})])
-    if cafe_open and agent.money >= 14 and not _curfew(sim, agent, 0.7):
+    if agent.money >= 14 and not _curfew(sim, agent, 0.7) and _open_on_arrival(sim, agent, "cafe", stay=40):
         out = Option("Eat at Corner Cafe", [("eat_out", "cafe")], cost=14,
                      tags={"thrift": -0.5, "social": 0.5, "adventure": 0.3}, gains={"hunger": 55, "social": 10},
                      outcomes=[_meet_new(0.08), Outcome("friend_there", "Bumps into a friend", 0.15, +1, {"social": 8}),
@@ -288,21 +295,26 @@ def payday_fork(sim: Simulation, agent: Agent) -> Fork | None:
                  tags={"thrift": -1.0, "adventure": 0.5}, gains={"fun": 35},
                  outcomes=[Outcome("love_it", "Loves the purchase", 0.6, +1, {"fun": 15}),
                            Outcome("regret", "Regrets the spending", 0.3, -1, {"fun": -8})])
-    family = Option("Treat the family to dinner at Corner Cafe", [("family_dinner", "cafe")], cost=50,
-                    tags={"family": 1.0, "thrift": -0.4, "social": 0.3}, gains={"hunger": 40, "social": 30},
-                    outcomes=[Outcome("bonding", "A warm family evening", 0.7, +1, {"family_bond": 4, "fun": 8}),
-                              Outcome("argument", "An argument at the table", 0.1, -1, {"family_bond": -3})],
-                    extra={"family": True})
+    if any(m != agent.id for m in sim.household(agent).member_ids):
+        treat = Option("Treat the family to dinner at Corner Cafe", [("family_dinner", "cafe")], cost=50,
+                       tags={"family": 1.0, "thrift": -0.4, "social": 0.3}, gains={"hunger": 40, "social": 30},
+                       outcomes=[Outcome("bonding", "A warm family evening", 0.7, +1, {"family_bond": 4, "fun": 8}),
+                                 Outcome("argument", "An argument at the table", 0.1, -1, {"family_bond": -3})],
+                       extra={"family": True})
+    else:  # nobody at home to treat
+        treat = Option("Treat yourself to a takeaway night in", [("order_food", "home"), ("relax_home", "home")], cost=25,
+                       tags={"thrift": -0.4, "social": -0.4, "adventure": -0.2}, gains={"hunger": 40, "fun": 25},
+                       outcomes=[Outcome("cosy_night", "A cosy night in", 0.6, +1, {"fun": 6}),
+                                 Outcome("late_delivery", "The delivery is very late", 0.2, -1, {"fun": -6})])
     return Fork(agent.id, "payday", f"It's payday and you have ${agent.money:.0f}. What do you do with it?",
-                [save, out, buy, family], sim.clock.tick)
+                [save, out, buy, treat], sim.clock.tick)
 
 
 def groceries_fork(sim: Simulation, agent: Agent) -> Fork | None:
     hh = sim.household(agent)
-    market = sim.town.places["market"]
-    if hh.groceries > 1 or not agent.is_adult or not market.is_open(sim.clock.hour + 0.5) or sim.on_shift_now(agent):
+    if hh.groceries > 1 or not agent.is_adult or sim.on_shift_now(agent):
         return None
-    if agent.money < 35:
+    if agent.money < 35 or not _open_on_arrival(sim, agent, "market", stay=20):
         return None
     other = next((sim.agents[m] for m in hh.member_ids if m != agent.id and sim.agents[m].is_adult), None)
     opts = [
@@ -344,7 +356,8 @@ def lonely_fork(sim: Simulation, agent: Agent) -> Fork | None:
                                      Outcome("argue", "The call turns into an argument", 0.08, -1, {("rel", who.id): -5, "fun": -6})],
                            extra={"call": who.id}))
     else:
-        opts.append(Option("Write in a diary", [("read", "home")], tags={"social": -0.2}, gains={"fun": 10}))
+        opts.append(Option("Write in a diary", [("read", "home")], tags={"social": -0.2}, gains={"fun": 10},
+                           outcomes=[Outcome("clarity", "Writing brings some clarity", 0.5, +1, {"fun": 5})]))
     opts.append(Option("Walk in Riverside Park", [("walk_park", "park")], tags={"health": 0.6, "adventure": 0.4},
                        gains={"fun": 30, "social": 5},
                        outcomes=[_meet_new(0.12), Outcome("rained_out", "Caught in the rain", RAIN_CHANCE[sim.clock.season] * (sim.weather == "rain"), -1, {"fun": -8})]))
@@ -363,7 +376,9 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
         Option("Walk in Riverside Park", [("walk_park", "park")], tags={"health": 0.7, "adventure": 0.3},
                gains={"fun": 35}, outcomes=[_meet_new(0.1)]),
         Option("Relax at home", [("relax_home", "home")], tags={"thrift": 0.4, "family": 0.4, "adventure": -0.4},
-               gains={"fun": 30, "energy": 5}),
+               gains={"fun": 30, "energy": 5},
+               outcomes=[Outcome("unwind", "Properly unwinds", 0.5, +1, {"fun": 6}),
+                         Outcome("restless", "Gets restless and bored", 0.3, -1, {"fun": -6})]),
         Option("Hang out at Corner Cafe", [("hang_out", "cafe")], cost=6, tags={"social": 0.8, "thrift": -0.3},
                gains={"fun": 25, "social": 30}, outcomes=[_meet_new(0.12)]),
         Option("Work on a side project", [("side_project", "home")], tags={"diligence": 0.6, "adventure": 0.5, "social": -0.3},
