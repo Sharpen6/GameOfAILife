@@ -151,6 +151,7 @@
       this.inbox = [];
       this.forks = []; // recent decided forks
       this.llm_forks = []; // the last 30 decided by a model or timed out
+      this.llm_count = 0; // every fork ever decided by a model or timed out (llm_forks keeps only the last 30)
       this.trip = null; // {mode: "bus", line, board, alight, phase, since} while on a bus trip
       this.riding = null; // bus id while on board
       this.died = null; // {tick, time, how}

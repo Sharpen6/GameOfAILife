@@ -24,7 +24,10 @@
 // host.send(msg) answers asynchronously, like a socket; host.onmessage = msg => ... gets every reply and push
 // (a JSON copy); host.start() / host.stop() run the frame loop; host.demote() pushes a "demoted".
 // Options: browser = the browser port's welcome (host.kind "browser", nobody controlled, llm_log empty);
-// slow = the AI player times out on about 40% of asks; fresh = Day 1 Mon 06:00 with no news or samples yet.
+// slow = the AI player times out on about 40% of asks; fresh = Day 1 Mon 06:00 with no news or samples yet;
+// backlog = how many game hours of decided forks happened before the welcome (default 10; the dev page's
+// ?backlog=90 fills the city's 500-fork LLM ring and most characters' rings of 30, for paging the LLM log).
+// Each stats people row also carries `llm`, the person's controller-decided forks since the city began.
 "use strict";
 (function () {
   const TOWN = {
@@ -553,7 +556,7 @@
         luck: LUCK[id] || 50, health: 70 + R() * 28, needs, reputation: ri(40, 75),
         controller: controlled.has(id) ? CONTROLLER : null, alive: true, state: "busy", activity: "relax_home",
         inside: null, x: 0, y: 0, vehicle: "walk", plan: null, nextAt: 0, decide: null, traits,
-        prompt: "", edited: false, learned: 0, rel: {}, memory: [], forks: [], llmForks: [], worthRing: [],
+        prompt: "", edited: false, learned: 0, rel: {}, memory: [], forks: [], llmForks: [], llmCount: 0, worthRing: [],
       };
       a.prompt = describe(a);
       W.agents.push(a);
@@ -886,9 +889,9 @@
     W.headlines = all.filter(e => e.importance === 2).slice(-20);
     for (const a of W.agents) if (a.alive && a.inside) [a.x, a.y] = placeById[a.inside].entry;
 
-    // Decided forks of the last ten hours: the llm_log (model and timeout) and every person's last 10.
+    // Decided forks of the last ten hours (or opt.backlog): the llm_log (model and timeout) and every person's last 10.
     const forks = [];
-    for (let t = now - 600; t < now; t += ri(1, 4)) {
+    for (let t = now - 60 * (opt.backlog > 0 ? opt.backlog : 10); t < now; t += ri(1, 4)) {
       const a = pick(living(W));
       forks.push(makeFork(W, a, t, a.controller && W.R() < 0.85 ? (W.R() < (W.slow ? 0.4 : 0.13) ? "timeout" : "model")
         : (W.R() < 0.4 ? "habit" : "default"), true));
@@ -958,6 +961,7 @@
     a.forks.push(f);
     if (a.forks.length > 10) a.forks.shift();
     if (f.decided_by === "model" || f.decided_by === "timeout") {
+      a.llmCount += 1;
       a.llmForks.push(f);
       if (a.llmForks.length > 30) a.llmForks.shift();
       W.llmRing.push(f);
@@ -1070,7 +1074,8 @@
     const people = alive.map(a => {
       const p = worthParts(W, a);
       return { id: a.id, household: a.hh, worth: round(p.worth), worth_24h: a.worthRing[0], cash: round(p.cash),
-        savings: round(p.savings), home_equity: round(p.home), job: a.job ? a.job.title : null, health: round(a.health) };
+        savings: round(p.savings), home_equity: round(p.home), job: a.job ? a.job.title : null, health: round(a.health),
+        llm: a.llmCount };
     }).sort((x, y) => y.worth - x.worth || cmp(x.id, y.id));
     const districts = [];
     for (const d of TOWN.districts) {
@@ -1158,8 +1163,14 @@
 
   // --- the host --------------------------------------------------------------------------------------
 
+  // An option the dev page's address gives (?backlog=90), for the ones client/dev/dashboard.html does not pass on.
+  function pageOption(name) {
+    try { return new URLSearchParams(window.location.search).get(name); } catch (e) { return null; }
+  }
+
   function createHost(options) {
-    const opt = Object.assign({ browser: false, slow: false, fresh: false, seed: 7, speed: 1, frameMs: 50 }, options || {});
+    const opt = Object.assign({ browser: false, slow: false, fresh: false, seed: 7, speed: 1, frameMs: 50,
+      backlog: Number(pageOption("backlog")) || 10 }, options || {});
     const W = buildWorld(opt);
     const host = { onmessage: null, speed: opt.speed, world: W, sent: [] };
     const plan = opt.fresh ? [] : script(W);

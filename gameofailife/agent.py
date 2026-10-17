@@ -152,6 +152,7 @@ class Agent:
     inbox: list[dict] = field(default_factory=list)
     forks: list[dict] = field(default_factory=list)  # recent decided forks
     llm_forks: list[dict] = field(default_factory=list)  # the last 30 decided by a model or timed out
+    llm_count: int = 0  # every fork ever decided by a model or timed out (llm_forks keeps only the last 30)
     trip: dict | None = None  # {"mode": "bus", "line", "board", "alight", "phase", "since"} while on a bus trip
     riding: str | None = None  # bus id while on board
     died: dict | None = None  # {"tick", "time", "how"}

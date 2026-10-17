@@ -73,7 +73,9 @@
     ["house_hunt", "house hunt"], ["upkeep", "upkeep"], ["repair", "repair"], ["housing_trouble", "housing trouble"]];
   const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const TIER_LABEL = { flat: "flat", house: "house", big_house: "big house" };
-  const KEEP = { notable: 600, routine: 300, forks: 1000, samples: 168 };
+  // forks: habit and profile decisions kept; llm: controller decisions (model, timeout) kept. Forks a
+  // get_decisions reply brought are never dropped (dashboard.md 6.3: a character's history stays complete).
+  const KEEP = { notable: 600, routine: 300, forks: 1000, llm: 1000, samples: 168 };
   const SHOW = { news: 200, llm: 150, headlines: 5 };
   const TOAST_MS = 8000, NOTICE_MS = 6000, TICKER_DIM_MS = 20000, POLL_MS = 800, TIP_TOUCH_MS = 4000;
   const MINUS = "−";
@@ -148,6 +150,10 @@
   const iconOf = e => (e.kind === "death" || e.tag === "death" ? "death" : topicOf(e) || "star");
   const pingTopic = e => (e.kind === "death" || e.tag === "death" ? "death" : PING_OF_TOPIC[topicOf(e)] || "other");
   const isSlow = T => !!(T && T.asked >= 20 && T.timeouts > 0.3 * T.asked);
+  // A percentage of today's asks, never above 100: a late answer to a fork asked before midnight still lands in
+  // the new day's counters.
+  const pctOf = (n, d) => (d ? Math.min(100, round(100 * (n || 0) / d)) : null);
+  const isLlmFork = f => f.decided_by === "model" || f.decided_by === "timeout";
   const idNum = id => { const m = /(\d+)\s*$/.exec(String(id)); return m ? Number(m[1]) : 0; };
   const forkOrder = (a, b) => (b.tick - a.tick) || (idNum(b.id) - idNum(a.id)) || cmp(String(b.id), String(a.id));
   function hexMix(a, b, t) {
@@ -195,9 +201,12 @@
     return {
       town: null, placeById: {}, homeById: {}, unitsOf: {}, districtName: {}, stopById: {},
       state: null, lots: {}, homes: {}, lotsJson: "", homesJson: "", agentById: {}, playing: 0, thinking: 0,
-      stats: null, samples: [], peopleById: {}, hhById: {}, hhWorth: {}, topHousehold: 0,
+      // hudThink: the thinking counts the HUD chip last drew; the controllers' lines draw the same ones
+      thinkingBy: {}, hudThink: { n: 0, by: {} }, stats: null, samples: [], peopleById: {}, hhById: {}, hhWorth: {}, topHousehold: 0,
       ev: new Map(), notable: [], routine: [], maxSeq: 0, seenSeq: 0, unread: 0,
-      forks: new Map(), forkList: [], forkMore: {},
+      // forkPinned: ids a get_decisions reply brought (never dropped); forkCount: the others kept, by KEEP slot;
+      // forkCursor: per filter ("" for everyone), the oldest fork the server has paged to, for "Load older"
+      forks: new Map(), forkList: [], forkMore: {}, forkPinned: new Set(), forkCount: { forks: 0, llm: 0 }, forkCursor: {},
     };
   }
 
@@ -222,8 +231,9 @@
       role: "god", host: { kind: "server", controllers: true }, speed: 1,
       tab: "city", collapsed: storage.get("goal.dash.collapsed") === "1", sheet: "peek", mode: "desktop", phone: false,
       news: { level: "notable", topic: null, person: null, q: "" },
+      // shown: how many decisions the list may hold; every older page loaded raises it by the page's size
       llm: { agent: "", kind: "", against: false, timeouts: false, all: false, expanded: new Set(), topId: null,
-        pending: 0, loading: false },
+        pending: 0, loading: false, shown: SHOW.llm },
       ppl: { seg: "adults", sort: "worth", q: "", expanded: null, press: false },
       selected: null, detail: null, detailKey: "", editingProfile: null, card: null, cardAsk: 0,
       overlay: null, overlayKey: "", inset: { top: 0, right: 0, bottom: 0 }, layoutQueued: false,
@@ -324,6 +334,15 @@
     });
     S.sheetTicker.addEventListener("click", () => { if (S.tickerEvent) focusEvent(S.tickerEvent); });
     listen(P, "transitionend", ev => { if (ev.target === P) layoutSoon(); });
+    // Every "Full page" link (the person, a ranking row, an LLM row): a plain click opens the character page in
+    // this tab, and this view lets go of God as it unloads, so leave that page a one-shot note to skip its takeover
+    // question. A new tab (a modified or middle click) gets no note and asks first.
+    listen(P, "click", ev => {
+      if (!ev.target.closest || !ev.target.closest("a.dash-fullpage")) return;
+      if (S.role === "god" && ev.button === 0 && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey)) {
+        try { sessionStorage.setItem("goal.character.from-city", String(Date.now())); } catch (e) { /* private mode */ }
+      }
+    });
     buildGrip(el(".dash-grip", P));
     buildCity();
     buildNews();
@@ -391,6 +410,20 @@
   function sheetHeights() {
     const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
     return { peek: 92, half: round(vh * (S.phone ? 0.55 : 0.45)), full: round(vh - 64) };
+  }
+  // The one way the dashboard moves the camera (dashboard.md 8.2: the target lands in the visible part of the
+  // map). A full phone sheet leaves no map to see: a "Show on map" (show: true) drops it to half first, and any
+  // focus then uses the half sheet's inset, since layout() measures the new height only once the sheet has moved.
+  function focusMap(target, opts) {
+    if (!S || !target) return;
+    let inset = S.inset;
+    if (S.mode === "sheet" && S.sheet === "full") {
+      if (opts && opts.show) setSheet("half");
+      const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+      const wr = S.world ? S.world.getBoundingClientRect() : { bottom: vh };
+      inset = Object.assign({}, S.inset, { bottom: Math.max(0, round(wr.bottom - (vh - sheetHeights().half))) });
+    }
+    callView("focus", target, { inset });
   }
   function buildGrip(grip) {
     grip.addEventListener("pointerdown", ev => {
@@ -564,7 +597,7 @@
       // dashboard.md 8.2: the phone chip keeps the arrow ("Mood 64▲") and drops only the number
       const arrow = d > 0 ? "▲" : d < 0 ? "▼" : "", num = d === 0 ? "±0" : String(Math.abs(d));
       chips.push(["mood", `Mood <b>${c.mood}</b>${d != null ? `<span class="dash-md ${dirClass(d)}">${arrow}<span class="dash-long">${num}</span></span>` : ""}`,
-        d != null ? `Mood ${c.mood}, ${d >= 0 ? "up" : "down"} ${Math.abs(d)} since yesterday` : `Mood ${c.mood}`]);
+        d != null ? `Mood ${c.mood}, ${d >= 0 ? "up" : "down"} ${Math.abs(d)} in 24 h` : `Mood ${c.mood}`]);
       chips.push(["wealth", `<b>${compact(c.wealth.total)}</b>`, `Total wealth ${money(c.wealth.total)}: open the ranking`]);
       if (c.homes) {
         chips.push(["homes", `${c.homes.for_sale} for sale · ${c.homes.for_rent} to let`, "Homes on the market"]);
@@ -572,31 +605,45 @@
         chips.push(["neglect", `<span class="${ng ? "warn" : ""}">${ng} neglected</span>`, "Buildings at stage neglected or derelict: show condition on the map"]);
       }
     }
+    S.hudThink = { n: S.thinking, by: S.thinkingBy };
     chips.push(aiChip());
     const html = chips.map(([k, h, title, cls]) =>
       `<button type="button" class="dash-chip${cls ? " " + cls : ""}" data-k="${k}" title="${esc(title)}">${h}</button>`).join("");
     if (setHtml(S.hud, html)) layoutSoon();
+    // The controllers' lines count thinking from the same frame as the chip, so they are redrawn with it (the
+    // rest of the City tab waits for the stats push).
+    if (tabVisible("city")) renderCityAi();
+    if (tabVisible("llm") && S.llmList && S.host.kind !== "browser") setHtml(el(".dash-aistrip", S.bodies.llm), aiStripHtml());
   }
   function aiChip() {
     if (S.host.kind === "browser") return ["ai", "AI off", "The browser version has no AI players", "muted"];
     const L = S.stats && S.stats.llm, T = L && L.today;
     if (isSlow(T)) {
-      const pct = round(100 * T.timeouts / T.asked);
+      const pct = pctOf(T.timeouts, T.asked);
       return ["ai", `AI <b>slow</b><span class="dash-long">: ${pct}% timed out today</span>`, `slow: ${pct}% timed out today (${T.timeouts} of ${T.asked} asks)`, "amber"];
     }
     if (!S.playing) return ["ai", "AI: nobody<span class=\"dash-long\"> playing</span>", "No AI model is playing anyone", "muted"];
-    return ["ai", `AI<span class="dash-long">: ${S.playing} playing,</span> <b>${S.thinking}</b> thinking`,
-      `${S.playing} characters played by an AI model, ${S.thinking} thinking now`];
+    // Desktop "AI: 60 playing, 3 thinking"; a phone "AI 60" and a pulsing dot with the count while anyone thinks.
+    const n = S.hudThink.n;
+    const think = n ? `<span class="dash-long">, <b>${n}</b> thinking</span><span class="dash-short"> <i class="dash-thinkdot"></i>${n}</span>` : "";
+    return ["ai", `AI<span class="dash-long">:</span> <b>${S.playing}</b><span class="dash-long"> playing</span>${think}`,
+      `${S.playing} characters played by an AI model${n ? `, ${n} thinking now` : ""}`];
   }
-  function moodDelta() {
-    const c = S.stats && S.stats.city, ss = S.samples;
-    if (!c || ss.length < 2) return null;
-    const last = ss[ss.length - 1], want = last.tick - 1440;
-    let ref = null;
-    for (let i = ss.length - 1; i >= 0; i--) if (ss[i].tick <= want) { ref = ss[i]; break; }
-    if (!ref) return null;
-    return c.mood - ref.mood;
+  // A city number now against 24 game hours ago: the stats push's own value minus the newest hourly sample at
+  // least 24 h older than that push. The HUD, the Mood tile and the trend lines all use it, so they agree.
+  const LIVE = { mood: c => c.mood, wealth: c => c.wealth.total, pop: c => c.population };
+  function liveValue(field) {
+    const c = S.stats && S.stats.city;
+    return c && LIVE[field] ? LIVE[field](c) : null;
   }
+  function vs24h(field) {
+    const now = liveValue(field), ss = S.samples;
+    if (now == null || !ss.length) return null;
+    const want = S.stats.tick - 1440;
+    for (let i = ss.length - 1; i >= 0; i--) if (ss[i].tick <= want) return now - ss[i][field];
+    return null;
+  }
+  const moodDelta = () => vs24h("mood");
 
   function setTicker(e, live) {
     S.tickerEvent = e;
@@ -721,12 +768,17 @@
     }
     S.agentById = {};
     let playing = 0, thinking = 0;
+    const by = {};   // controller name -> its characters thinking now
     for (const a of st.agents || []) {
       S.agentById[a.id] = a;
-      if (a.alive && a.controller) { playing += 1; if (a.state === "deciding") thinking += 1; }
+      if (a.alive && a.controller) {
+        playing += 1;
+        if (a.state === "deciding") { thinking += 1; by[a.controller] = (by[a.controller] || 0) + 1; }
+      }
     }
     S.playing = playing;
     S.thinking = thinking;
+    S.thinkingBy = by;
     if (S.tabBtn) {
       const dot = el(".dash-dot", S.tabBtn.llm);
       if (dot) dot.hidden = thinking === 0;
@@ -748,9 +800,16 @@
     if (e.seq > S.maxSeq) S.maxSeq = e.seq;
     return true;
   }
-  function storeFork(f) {
+  // Upserts a decided fork by id, newest first. pin: it came in a get_decisions reply, so it is never dropped
+  // (and stays pinned when a frame sends it again). The others are dropped oldest first, each kind against its own
+  // KEEP slot, so a busy city's habit and profile decisions never push out what a controller decided.
+  const forkSlot = f => (isLlmFork(f) ? "llm" : "forks");
+  function storeFork(f, pin) {
     if (!f || f.id == null) return false;
     const old = S.forks.get(f.id);
+    if (old && !S.forkPinned.has(f.id)) S.forkCount[forkSlot(old)] -= 1;
+    if (pin) S.forkPinned.add(f.id);
+    if (!S.forkPinned.has(f.id)) S.forkCount[forkSlot(f)] += 1;
     S.forks.set(f.id, f);
     const L = S.forkList;
     if (old) { const i = L.indexOf(old); if (i >= 0) { L[i] = f; return true; } }
@@ -760,7 +819,14 @@
       while (i < L.length && forkOrder(L[i], f) <= 0) i++;
       L.splice(i, 0, f);
     }
-    while (L.length > KEEP.forks) S.forks.delete(L.pop().id);
+    const C = S.forkCount;
+    for (let i = L.length - 1; i >= 0 && (C.forks > KEEP.forks || C.llm > KEEP.llm); i--) {
+      const x = L[i], slot = forkSlot(x);
+      if (S.forkPinned.has(x.id) || C[slot] <= KEEP[slot]) continue;
+      L.splice(i, 1);
+      S.forks.delete(x.id);
+      C[slot] -= 1;
+    }
     return true;
   }
   function takeSamples(samples, full) {
@@ -799,6 +865,8 @@
     S.unread = 0;
     if (S.notable.length) setTicker(S.notable[S.notable.length - 1], false);
     for (const f of msg.llm_log || []) storeFork(f);
+    if (msg.llm_log && msg.llm_log.length) S.forkCursor[""] = msg.llm_log[0].id;   // oldest first
+    S.llm.shown = SHOW.llm;
     if (msg.stats) takeStats(msg.stats);
     // A reconnect starts the lists again from the welcome, as a fresh page would.
     for (const box of [S.rankList, S.stream, S.llmList]) if (box) box.innerHTML = "";
@@ -877,8 +945,12 @@
         return true;
       }
       case "decisions": {
-        for (const f of msg.forks || []) storeFork(f);
-        S.forkMore[msg.agent_id || ""] = !!msg.more;
+        const forks = msg.forks || [], key = msg.agent_id || "";
+        for (const f of forks) storeFork(f, true);
+        if (forks.length) S.forkCursor[key] = forks[forks.length - 1].id;   // newest first
+        // An older page makes room for itself: the list grows by what it brought (F.shown).
+        if (ctx && ctx.older && (ctx.agent || "") === S.llm.agent) S.llm.shown += forks.length;
+        S.forkMore[key] = !!msg.more;
         S.llm.loading = false;
         S.dirty.llm = true;
         if (tabVisible("llm")) renderLlm();
@@ -941,7 +1013,7 @@
     S.selected = id;
     S.card = null;
     if (!o.fromView) callView("select", id, { follow: !!o.follow });
-    if (o.focus) callView("focus", { agent: id }, { inset: S.inset });
+    if (o.focus) focusMap({ agent: id });
     openTab("people");
     askAgent();
     renderPeople();
@@ -1097,7 +1169,7 @@
   }
   function focusEvent(e) {
     const t = eventTarget(e);
-    if (t) callView("focus", t, { inset: S.inset });
+    if (t) focusMap(t, { show: true });
     highlightFor(e.agents || (e.agent ? [e.agent] : []), e.place ? [e.place] : [], 4000);
   }
   function highlightFor(agents, places, ms) {
@@ -1265,7 +1337,7 @@
       const home = t.closest("[data-home]");
       if (home) { openHome(home.dataset.home, { focus: true }); return; }
       const dist = t.closest("[data-district]");
-      if (dist) { callView("focus", { district: dist.dataset.district }, { inset: S.inset }); return; }
+      if (dist) { focusMap({ district: dist.dataset.district }, { show: true }); return; }
     });
     box.addEventListener("mouseover", ev => {
       const h = ev.target.closest("[data-home]");
@@ -1292,7 +1364,7 @@
     setHtml(S.citySec.wealth, wealthHtml());
     setHtml(S.citySec.homes, homesHtml());
     setHtml(S.citySec.districts, districtsHtml());
-    setHtml(S.citySec.ai, `<h3>AI players</h3>${aiStripHtml()}<button type="button" class="dash-btn" data-go="llm">Open the LLM log</button>`);
+    renderCityAi();
     setHtml(S.citySec.trends, trendsHtml());
     setHtml(S.citySec.map, mapSectionHtml());
   }
@@ -1306,7 +1378,7 @@
     const tiles = [];
     const born = c.births ? ` · ${c.births} born` : "";
     tiles.push(kpi("Population", c.population, `${c.deaths ? plural(c.deaths, "death") : "no deaths"}${born} · health ${c.health}`, "people"));
-    tiles.push(kpi("Mood", c.mood, d != null ? `<span class="${dirClass(d)}">${deltaNum(d)}</span> vs yesterday` : "the mean of everyone's needs", "city:needs"));
+    tiles.push(kpi("Mood", c.mood, d != null ? `<span class="${dirClass(d)}">${deltaNum(d)}</span> in 24 h` : "the mean of everyone's needs", "city:needs"));
     tiles.push(kpi("Wealth", compact(c.wealth.total), `top 10% hold ${c.wealth.top10_share}%`, "people"));
     if (c.homes) {
       const ng = (c.homes.lots_by_stage[3] || 0) + (c.homes.lots_by_stage[4] || 0);
@@ -1316,9 +1388,9 @@
     if (S.host.kind === "browser") tiles.push(kpi("AI", "Off", "habit and profiles only", "llm", "muted"));
     else {
       const T = L && L.today;
-      const pctIn = T && T.asked ? round(100 * T.in_time / T.asked) : null;
+      const pctIn = T ? pctOf(T.in_time, T.asked) : null;
       const slow = isSlow(T);
-      tiles.push(kpi("AI", `${L ? L.playing : 0}<small>playing</small>`, slow ? `slow: ${round(100 * T.timeouts / T.asked)}% timed out today`
+      tiles.push(kpi("AI", `${L ? L.playing : 0}<small>playing</small>`, slow ? `slow: ${pctOf(T.timeouts, T.asked)}% timed out today`
         : pctIn != null ? `${pctIn}% answered in time today` : "nothing asked yet today", "llm", slow ? "amber" : ""));
     }
     return `<div class="dash-kpis">${tiles.join("")}</div>`;
@@ -1401,16 +1473,26 @@
     return `<h3>Neighbourhoods</h3><table class="dash-table"><thead><tr><th>District</th><th>People</th><th>Mood</th><th>Median worth</th><th>Free homes</th><th>Shabby+</th></tr></thead>
       <tbody>${ds.map(d => `<tr data-district="${esc(d.id)}" tabindex="0"><td>${esc(d.name)}</td><td>${d.people}</td><td>${d.mood}</td><td>${money(d.median_worth)}</td><td>${d.vacant} of ${d.homes}</td><td>${d.shabby_plus}</td></tr>`).join("")}</tbody></table>`;
   }
+  // The City tab's AI players section: the heading and the button stay put while the lines are redrawn.
+  function renderCityAi() {
+    const sec = S.citySec && S.citySec.ai;
+    if (!sec || !S.stats || !S.state) return;
+    if (!el(".dash-ai-lines", sec)) {
+      setHtml(sec, '<h3>AI players</h3><div class="dash-ai-lines"></div><button type="button" class="dash-btn" data-go="llm">Open the LLM log</button>');
+    }
+    setHtml(el(".dash-ai-lines", sec), aiStripHtml());
+  }
   function aiStripHtml() {
     if (S.host.kind === "browser") return '<div class="dash-ai"><div class="dash-muted">This browser version has no AI players: everyone decides by habit and profile.</div></div>';
     const L = S.stats && S.stats.llm;
     if (!L) return "";
     const T = L.today || {};
+    // Each controller's line counts its own characters thinking now (from the frame the HUD chip drew), not the city's.
     const who = (L.controllers || []).length
-      ? L.controllers.map(c => `<div><b>${esc(c.name)}</b> · ${c.model ? esc(c.model) : "no model declared"} · plays ${c.characters}${S.thinking ? ` · <b>${S.thinking}</b> thinking now` : ""}</div>`).join("")
+      ? L.controllers.map(c => { const n = S.hudThink.by[c.name] || 0; return `<div class="dash-ctl" data-controller="${esc(c.name)}"><b>${esc(c.name)}</b> · ${c.model ? esc(c.model) : "no model declared"} · plays ${c.characters}${n ? ` · <b>${n}</b> thinking now` : ""}</div>`; }).join("")
       : '<div class="dash-muted">No AI model is playing anyone right now.</div>';
-    const pct = T.asked ? ` (${round(100 * T.in_time / T.asked)}%)` : "";
-    const slow = isSlow(T) ? `<div class="dash-slow">${icon("alert")}slow: ${round(100 * T.timeouts / T.asked)}% timed out today</div>` : "";
+    const pct = T.asked ? ` (${pctOf(T.in_time, T.asked)}%)` : "";
+    const slow = isSlow(T) ? `<div class="dash-slow">${icon("alert")}slow: ${pctOf(T.timeouts, T.asked)}% timed out today</div>` : "";
     return `<div class="dash-ai${isSlow(T) ? " amber" : ""}">${who}${slow}
       <div class="dash-ai-today">Today: asked ${T.asked || 0} · in time ${T.in_time || 0}${pct} · timed out ${T.timeouts || 0} · answered late ${T.late || 0} · against habit ${T.against_habit || 0}${T.avg_seconds != null ? ` · avg ${T.avg_seconds} s` : ""}</div>
       <div class="dash-muted">Nobody asked today: ${L.habit_today || 0} by habit, ${L.default_today || 0} by profile defaults.</div></div>`;
@@ -1431,7 +1513,9 @@
     const d = vals.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)} ${Y(v).toFixed(1)}`).join("");
     S.sparks[key] = { ticks: ss.map(s => s.tick), vals, y0, y1, fmt, label };
     const pt = (i, v, cls) => `<i class="dash-spark-pt ${cls}" style="left:${(X(i) / W * 100).toFixed(2)}%;top:${(Y(v) / H * 100).toFixed(2)}%"></i>`;
-    const now = vals[n - 1], ref = vals[Math.max(0, n - 25)];
+    // The head and the 24 h change are the live numbers (vs24h), as on the HUD; the line is the hourly samples.
+    const live = liveValue(field), now = live != null ? live : vals[n - 1], dd = vs24h(field);
+    const change = dd == null ? "" : dd !== 0 ? `${dd > 0 ? "▲" : "▼"} ${fmt(Math.abs(dd))} in 24 h` : "same as 24 h ago";
     return `<div class="dash-spark" data-spark="${key}">
       <div class="dash-spark-head"><span class="dash-spark-label">${label}</span><b>${fmt(now)}</b>
         <span class="dash-spark-read">high ${fmt(hi)} · low ${fmt(lo)}</span></div>
@@ -1439,7 +1523,7 @@
         <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" vector-effect="non-scaling-stroke"/></svg>
         ${pt(iHi, hi, "hi")}${pt(iLo, lo, "lo")}<i class="dash-spark-x" hidden></i><i class="dash-spark-dot" hidden></i>
       </div>
-      <div class="dash-spark-axis"><span>${dayLabel(Math.floor(ss[0].tick / 1440))}</span><span>${now !== ref ? `${now > ref ? "▲" : "▼"} ${fmt(Math.abs(now - ref))} in 24 h` : "same as 24 h ago"}</span><span>now</span></div>
+      <div class="dash-spark-axis"><span>${dayLabel(Math.floor(ss[0].tick / 1440))}</span><span class="dash-spark-chg">${change}</span><span>now</span></div>
     </div>`;
   }
   function sparkHover(ev) {
@@ -1578,18 +1662,23 @@
           <div class="dash-hpeople">${personChips(e)}<button type="button" class="dash-link" data-seq="${e.seq}">${icon("pin")}Show on map</button></div></div>
       </article>`).join("")
       : '<div class="dash-empty">No major events yet. Deaths, moves, new friendships and big money show up here.</div>');
-    // stream, grouped by day
+    // stream, grouped by day. First meetings (about half of all notable news) are folded into their day's
+    // digest line ("6 first meetings") unless God is looking for someone or something with the person chip or
+    // the search box.
     const majors = {};
     for (const e of S.notable) if (e.importance >= 2) { const d = Math.floor(e.tick / 1440); majors[d] = (majors[d] || 0) + 1; }
+    const fold = !f.person && !q;
     const it = newestFirst(f.level), items = [];
-    let day = null, n = 0;
+    let head = null, n = 0;
     for (let e = it.next(); e && n < SHOW.news; e = it.next()) {
       if (!newsMatch(e, f, q)) continue;
       const d = Math.floor(e.tick / 1440);
-      if (d !== day) { day = d; items.push({ day: d, text: digest(d, majors) }); }
+      if (!head || head.day !== d) { head = { day: d, met: 0 }; items.push(head); }
+      if (fold && e.tag === "first_meet") { head.met += 1; continue; }
       items.push({ e });
       n += 1;
     }
+    for (const x of items) if (!x.e) x.text = digest(x.day, majors) + (x.met ? ` · ${plural(x.met, "first meeting")}` : "");
     syncList(S.stream, items,
       x => (x.e ? `e${x.e.seq}` : `d${x.day}`),
       x => (x.e ? `${x.e.seq}|${x.e.importance}` : x.text),
@@ -1597,8 +1686,8 @@
         : `<span>${esc(x.text)}</span>`),
       x => (x.e ? `dash-ev imp${x.e.importance} t-${topicOf(x.e) || "other"}` : "dash-day"));
     for (const li of S.stream.children) if (li.classList.contains("dash-ev") && !li.dataset.seq) li.dataset.seq = li.dataset.key.slice(1);
-    S.streamEmpty.hidden = n > 0;
-    if (!n) S.streamEmpty.textContent = S.ev.size ? "Nothing matches these filters." : "Nothing has happened yet.";
+    S.streamEmpty.hidden = items.length > 0;
+    if (!items.length) S.streamEmpty.textContent = S.ev.size ? "Nothing matches these filters." : "Nothing has happened yet.";
   }
   function ago(tick) {
     if (!S.state) return "";
@@ -1633,18 +1722,20 @@
     S.llmPill = el(".dash-pill", box);
     S.llmOlder = el(".dash-older", box);
     el(".dash-llm-agent", box).addEventListener("change", ev => setLlmAgent(ev.target.value));
-    el(".dash-llm-kind", box).addEventListener("change", ev => { S.llm.kind = ev.target.value; renderLlm(); });
-    for (const c of box.querySelectorAll("[data-f]")) c.addEventListener("change", () => { S.llm[c.dataset.f] = c.checked; renderLlm(); });
-    S.llmPill.addEventListener("click", () => { box.scrollTop = 0; S.llm.topId = null; renderLlm(); });
+    el(".dash-llm-kind", box).addEventListener("change", ev => { S.llm.kind = ev.target.value; S.llm.shown = SHOW.llm; renderLlm(); });
+    for (const c of box.querySelectorAll("[data-f]")) c.addEventListener("change", () => { S.llm[c.dataset.f] = c.checked; S.llm.shown = SHOW.llm; renderLlm(); });
+    S.llmPill.addEventListener("click", () => { box.scrollTop = 0; S.llm.topId = null; S.llm.shown = SHOW.llm; renderLlm(); });
     S.llmOlder.addEventListener("click", () => {
+      // The next page starts where the server's last page (or the welcome's llm_log) ended, else at the oldest
+      // decision held for this filter.
       const F = S.llm;
-      const mine = S.forkList.filter(f => (f.decided_by === "model" || f.decided_by === "timeout") && (!F.agent || f.agent === F.agent));
-      const oldest = mine[mine.length - 1];
+      const mine = S.forkList.filter(f => isLlmFork(f) && (!F.agent || f.agent === F.agent));
+      const oldest = S.forkCursor[F.agent] || (mine.length ? mine[mine.length - 1].id : null);
       const msg = { type: "get_decisions", limit: 30 };
       if (F.agent) msg.agent_id = F.agent;
-      if (oldest) msg.before = oldest.id;
+      if (oldest) msg.before = oldest;
       S.llm.loading = true;
-      request(msg, { what: "decisions", agent: F.agent });
+      request(msg, { what: "decisions", agent: F.agent, older: true });
       renderLlm();
     });
     box.addEventListener("scroll", () => { if (box.scrollTop <= 60 && S.llm.pending) renderLlm(); }, { passive: true });
@@ -1657,7 +1748,7 @@
       if (act && f) {
         if (act.dataset.act === "map") {
           const target = f.place ? { place: f.place } : { agent: f.agent };
-          callView("focus", target, { inset: S.inset });
+          focusMap(target, { show: true });
           highlightFor([f.agent], f.place ? [f.place] : [], 4000);
         } else if (act.dataset.act === "open") selectAgent(f.agent, { follow: true, focus: true });
         return;
@@ -1693,6 +1784,7 @@
     const sel = el(".dash-llm-agent", S.bodies.llm);
     if (sel && sel.value !== S.llm.agent) sel.value = S.llm.agent;
     S.llm.topId = null;
+    S.llm.shown = SHOW.llm;
     if (S.llm.agent) {
       S.llm.loading = true;
       request({ type: "get_decisions", agent_id: S.llm.agent, limit: 30 }, { what: "decisions", agent: S.llm.agent });
@@ -1714,7 +1806,24 @@
     if (F.against && !(by === "model" && f.profile_choice != null && f.choice !== f.profile_choice)) return false;
     return true;
   }
-  const llmCount = id => S.forkList.reduce((n, f) => n + (f.agent === id && (f.decided_by === "model" || f.decided_by === "timeout") ? 1 : 0), 0);
+  // "LLM decisions (n)": the server's count (the stats people row's `llm`, every one since the city began), else
+  // what this page holds (a person who died has no row).
+  function llmCount(id) {
+    const p = S.peopleById[id];
+    if (p && typeof p.llm === "number") return p.llm;
+    return S.forkList.reduce((n, f) => n + (f.agent === id && isLlmFork(f) ? 1 : 0), 0);
+  }
+  const dayOf = tick => Math.floor(tick / 1440);
+  const todayNum = () => (S.state ? dayOf(S.state.tick) : null);
+  // A row's time: "15:00" today, "Fri 15:00" on another day (the list's day separators say which).
+  function forkTime(f) {
+    const d = dayOf(f.tick), today = todayNum();
+    return today == null || d === today ? hm(f.tick) : `${DAY_NAMES[((d % 7) + 7) % 7]} ${hm(f.tick)}`;
+  }
+  function llmDayLabel(d) {
+    const today = todayNum();
+    return d === today ? `Today · ${dayLabel(d)}` : d === today - 1 ? `Yesterday · ${dayLabel(d)}` : dayLabel(d);
+  }
   function forkHtml(f, full) {
     const a = S.agentById[f.agent] || { name: f.agent };
     const by = f.decided_by, opt = i => esc((f.options || [])[i] ?? "?");
@@ -1740,10 +1849,10 @@
         ${against ? `<div class="dash-muted">Profile would: ${opt(f.profile_choice)}</div>` : ""}
         <div class="dash-muted">${f.controller ? `Asked ${esc(f.controller)} · ${f.model ? esc(f.model) : "no model declared"}` : by === "habit" ? "Decided by habit: nobody was asked" : "Decided by the profile's defaults: nobody was asked"}${f.place ? ` · at ${esc(placeName(f.place))}` : ""} · ${esc(f.time)}</div>
         ${f.happened && f.happened.length ? `<div class="dash-then">Then: ${esc(f.happened.join("; "))}</div>` : ""}
-        <div class="dash-acts"><button type="button" class="dash-btn" data-act="map">Show on map</button><button type="button" class="dash-btn" data-act="open">Open ${esc(first(a.name))}</button>${href ? `<a class="dash-btn" href="${esc(href)}">Full page</a>` : ""}</div></div>`;
+        <div class="dash-acts"><button type="button" class="dash-btn" data-act="map">Show on map</button><button type="button" class="dash-btn" data-act="open">Open ${esc(first(a.name))}</button>${href ? `<a class="dash-btn dash-fullpage" href="${esc(href)}">Full page</a>` : ""}</div></div>`;
     }
     return `<div class="dash-fhead"><span class="dash-sw" style="background:${shirt(f.agent)}"></span><b class="dash-fname">${esc(a.name)}</b>
-      <span class="dash-kind">${esc(pretty(f.kind))}</span>${tags.join("")}<span class="dash-ftime">${hm(f.tick)}${when ? ` · ${when}` : ""}</span></div>${line2}${more}`;
+      <span class="dash-kind">${esc(pretty(f.kind))}</span>${tags.join("")}<span class="dash-ftime">${forkTime(f)}${when ? ` · ${when}` : ""}</span></div>${line2}${more}`;
   }
   function llmEmptyText() {
     const F = S.llm, L = S.stats && S.stats.llm;
@@ -1787,11 +1896,19 @@
       const i = items.findIndex(f => f.id === F.topId);
       if (i > 0) { F.pending = i; items = items.slice(i); } else F.pending = 0;
     } else { F.pending = 0; F.topId = items.length ? items[0].id : null; }
-    items = items.slice(0, SHOW.llm);
-    syncList(S.llmList, items, f => f.id,
-      f => `${f.id}|${f.choice}|${(f.happened || []).length}|${f.late ? 1 : 0}|${F.expanded.has(f.id) ? 1 : 0}|${S.host.kind}`,
-      f => forkHtml(f, F.expanded.has(f.id)),
-      f => `dash-fork by-${f.decided_by}${F.expanded.has(f.id) ? " open" : ""}`);
+    items = items.slice(0, F.shown);
+    // Day separators, newest day first, as in the News stream.
+    const rows = [], today = todayNum();
+    let day = null;
+    for (const f of items) {
+      const d = dayOf(f.tick);
+      if (d !== day) { day = d; rows.push({ sep: d, text: llmDayLabel(d) }); }
+      rows.push(f);
+    }
+    syncList(S.llmList, rows, x => (x.sep != null ? `day:${x.sep}` : x.id),
+      x => (x.sep != null ? x.text : `${x.id}|${x.choice}|${(x.happened || []).length}|${x.late ? 1 : 0}|${F.expanded.has(x.id) ? 1 : 0}|${S.host.kind}|${dayOf(x.tick) === today ? "" : today}`),
+      x => (x.sep != null ? `<span>${esc(x.text)}</span>` : forkHtml(x, F.expanded.has(x.id))),
+      x => (x.sep != null ? "dash-llmday" : `dash-fork by-${x.decided_by}${F.expanded.has(x.id) ? " open" : ""}`));
     S.llmPill.hidden = !F.pending;
     if (F.pending) S.llmPill.textContent = `${F.pending} new · back to top`;
     S.llmEmpty.hidden = items.length > 0;
@@ -1866,7 +1983,7 @@
       const act = t.closest("[data-act]");
       if (!act) return;
       const id = S.selected;
-      if (act.dataset.act === "map") { callView("select", id, { follow: true }); callView("focus", { agent: id }, { inset: S.inset }); }
+      if (act.dataset.act === "map") { callView("select", id, { follow: true }); focusMap({ agent: id }, { show: true }); }
       else if (act.dataset.act === "llm") openLlmFor(id);
       else if (act.dataset.act === "news") { S.news.person = id; openTab("news"); }
       else if (act.dataset.act === "home") openHome(act.dataset.home, { fromDetail: true });
@@ -1883,7 +2000,7 @@
       if (act && act.dataset.act === "map" && S.card) {
         const spec = S.homeById[S.card.id];
         const place = S.card.block ? S.card.id : spec ? spec.place : S.card.id;
-        callView("focus", { place }, { inset: S.inset });
+        focusMap({ place }, { show: true });
         highlightFor([], [place], 4000);
       }
       if (act && act.dataset.act === "block" && S.card) { const spec = S.homeById[S.card.id]; if (spec) openHome(spec.place, { fromCard: true }); }
@@ -1892,7 +2009,7 @@
   function rankAction(act) {
     const id = act.dataset.id;
     if (act.dataset.act === "open") selectAgent(id, { follow: false });
-    else if (act.dataset.act === "map") { callView("select", id, { follow: true }); callView("focus", { agent: id }, { inset: S.inset }); highlightFor([id], [], 3000); }
+    else if (act.dataset.act === "map") { callView("select", id, { follow: true }); focusMap({ agent: id }, { show: true }); highlightFor([id], [], 3000); }
     else if (act.dataset.act === "llm") openLlmFor(id);
     else if (act.dataset.act === "home") openHome(act.dataset.home);
   }
@@ -2008,7 +2125,7 @@
       <div class="dash-acts"><button type="button" class="dash-btn" data-act="open" data-id="${esc(r.id)}">Open</button>
         <button type="button" class="dash-btn" data-act="map" data-id="${esc(r.id)}">Show on map</button>
         <button type="button" class="dash-btn" data-act="llm" data-id="${esc(r.id)}">LLM decisions (${n})</button>
-        ${href ? `<a class="dash-btn" href="${esc(href)}">Full page</a>` : ""}</div></div>`;
+        ${href ? `<a class="dash-btn dash-fullpage" href="${esc(href)}">Full page</a>` : ""}</div></div>`;
   }
   function renderRanking(force) {
     if (!S.rankList) return;
@@ -2071,7 +2188,7 @@
     delete p.money; delete p.savings; delete p.household_funds;
     return JSON.stringify([a.id, a.alive, a.controller, a.job, a.profile, p, a.relationships, a.memory,
       (a.forks || []).map(f => [f.id, f.choice, f.happened, f.late ? 1 : 0]), a.home_history, a.household,
-      S.role, S.host.kind, llmCount(a.id)]);
+      S.role, S.host.kind, llmCount(a.id), todayNum()]);
   }
   function renderDetail(box) {
     const a = S.detail;
@@ -2133,14 +2250,6 @@
       <h3>People</h3><ul class="dash-list dash-rels">${rels || '<li class="dash-muted">Nobody yet.</li>'}</ul>
       ${hist ? `<h3>Home history</h3><ul class="dash-list">${hist}</ul>` : ""}
       <h3>Memory</h3><ul class="dash-list">${(a.memory || []).slice().reverse().map(m => `<li>${esc(m)}</li>`).join("") || '<li class="dash-muted">Nothing yet.</li>'}</ul>`;
-    const full = el(".dash-fullpage", box);
-    if (full) full.addEventListener("click", ev => {
-      // A plain click opens the page in this tab, and this view lets go of God as it unloads: leave that page
-      // a one-shot note so it skips its takeover question. A new tab gets no note and asks first.
-      if (S.role === "god" && ev.button === 0 && !(ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.altKey)) {
-        try { sessionStorage.setItem("goal.character.from-city", String(Date.now())); } catch (e) { /* private mode */ }
-      }
-    });
     const luck = el(".dash-luck-range", box);
     luck.oninput = () => { el(".dash-luckv", box).textContent = luck.value; };
     let dragged = false;   // after a drag, let go of focus so the panel keeps refreshing; arrow keys keep it
@@ -2226,7 +2335,7 @@
     S.card = { id, block, page: null, error: null, stale: false, stack, from: o.fromDetail ? "detail" : S.card ? S.card.from : null };
     if (!block) { S.cardAsk = performance.now(); request({ type: "get_home", home_id: id }, { what: "home", id }); }
     const place = block ? id : S.homeById[id].place;
-    if (o.focus) callView("focus", { place }, { inset: S.inset });
+    if (o.focus) focusMap({ place });
     highlightFor([], [place], 4000);
     openTab("people");
     renderPeople();
