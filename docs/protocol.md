@@ -55,11 +55,11 @@ Two roles share the endpoint. The first message you send picks yours:
   included. Pushes never carry a `req_id`. Use it to match replies to requests.
 - A message whose fields have the wrong type usually gets
   `{"type": "error", "error": "bad message: <detail>"}` (the server catches
-  `ValueError`, `TypeError` and `KeyError`). **Known issue:** other mistakes
-  are not caught and end the connection without a close frame: a `set_profile`
-  whose `prompt` is not a string or whose `traits` is not an object, and a
-  controller `hello` whose `characters` is neither a list nor `"all"` (a number,
-  for example). Send the documented types.
+  `ValueError`, `TypeError`, `KeyError` and `AttributeError`). A controller
+  `hello` whose `characters` is neither a list nor `"all"` gets
+  `{"type": "error", "error": "bad hello: ..."}` and may say hello again. A
+  `set_profile` `prompt` that is not a string, or `traits` that is not an
+  object, is ignored.
 - Each request gets at most one direct reply, sent right away. Pushes (state
   frames, forks, messages) are sent by the server's frame loop, which runs every
   50 ms. So a direct reply can arrive before a push that the same request
@@ -535,7 +535,7 @@ connection stays open, except after a bad hello role. All error strings:
 | `unknown character` | `get_agent` or `set_profile` with an unknown id. |
 | `not your character` | `query`, `send_message` or `invite` for a character you do not hold. |
 | `what must be one of [...]` | `query` with an unknown `what`. |
-| `only God can do that; this view is watching` | A demoted view tried a God action (see the known issue below). |
+| `only God can do that; this view is watching` | A demoted view tried a God action. |
 
 ## Answer windows: 5 seconds and 10 seconds
 
@@ -575,11 +575,9 @@ connected, the newest view takes over: the old view is sent
 a watcher. When the current God view disconnects, nobody is promoted; the next
 God hello takes over.
 
-The intended rule is that a demoted view can only watch: `set_luck`,
-`set_speed`, `pause`, `resume` and `set_profile` from it should get
-`only God can do that; this view is watching`, while `get_agent` still works.
-**Known issue:** the current server does not enforce this, and a demoted view's
-God actions still take effect. Do not rely on the old view being read-only.
+A demoted view can only watch: `set_luck`, `set_speed`, `pause`, `resume` and
+`set_profile` from it get `only God can do that; this view is watching` and
+change nothing, while `get_agent` still works.
 
 Controllers are not limited: any number can connect, each holding its own set of
 characters. A character is held by at most one controller at a time.

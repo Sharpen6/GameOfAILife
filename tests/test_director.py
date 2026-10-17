@@ -208,11 +208,7 @@ class TestAnswerWindows(DirectorTestCase):
         self.assertFalse(res["accepted"])
         self.assertEqual(fork.choice, 0)
 
-    @unittest.expectedFailure
     def test_answer_after_deadline_before_timeout_check_is_still_saved(self):
-        # BUG: between the 5s deadline and the next _check_timeouts() call the fork is still
-        # "asked", so answer() falls through to "too late" instead of timing it out and saving
-        # the answer as a late answer that teaches the profile.
         fork = self.ask()
         self.clock.advance(ANSWER_SECONDS + 1)
         res = self.sim.answer(fork.id, 0, "slow", controller="bot")
@@ -241,10 +237,7 @@ class TestAnswerValidation(DirectorTestCase):
         self.assertEqual(fork.status, "asked")
         self.assertTrue(self.sim.answer(fork.id, 3, controller="bot")["applied"])
 
-    @unittest.expectedFailure
     def test_boolean_choice_rejected(self):
-        # BUG: bool is a subclass of int, so a JSON `true` from a controller passes the
-        # isinstance(choice, int) check and is applied as option 1.
         fork = self.ask()
         self.assertFalse(self.sim.answer(fork.id, True, controller="bot")["accepted"])
 

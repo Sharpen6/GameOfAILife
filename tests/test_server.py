@@ -291,12 +291,7 @@ class TestGodTakeover(ServerCase):
         # The demoted view still watches and may read character pages.
         await first.request({"type": "get_agent", "agent_id": "tom"}, "agent")
 
-    @unittest.expectedFailure
     async def test_demoted_god_cannot_change_luck(self):
-        # BUG: _hello moves the old God socket into self.observers, but that session's
-        # local `role` stays "god", so the observer check in _session never fires: the
-        # demoted view gets "luck_set" and the luck really changes. (Even for a true
-        # observer, _god(msg) runs before the check, so the change would still apply.)
         first, _ = await self.god()
         await self.god()
         await first.expect("demoted")
@@ -304,9 +299,7 @@ class TestGodTakeover(ServerCase):
         await first.request({"type": "set_luck", "agent_id": "tom", "luck": 99}, "error")
         self.assertEqual(self.sim.agents["tom"].luck, before)
 
-    @unittest.expectedFailure
     async def test_demoted_god_cannot_change_speed(self):
-        # Same BUG as above, for set_speed / pause / resume.
         first, _ = await self.god()
         await self.god()
         await first.expect("demoted")
