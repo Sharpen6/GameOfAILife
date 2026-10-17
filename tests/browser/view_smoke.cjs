@@ -37,8 +37,13 @@
 // - long task: pings made late in long main-thread tasks (a frame dated before the ping) never stop the
 //   map, and a page hook that throws in a frame reaches the page as an error but the map keeps drawing
 // - movers: a car turning a corner keeps to the road and a walker to the pavement and paths through every
-//   frame of an L-shaped move; a household walking one street keeps apart; two buses meeting at a junction
-//   or head-on never overlap (one gives way) and both get through, in their own lanes
+//   frame of an L-shaped move; a walker stepping between two park trees crosses at their shared corner, a
+//   walker and a car whose straight move is blocked go round; a household walking one street keeps apart;
+//   two buses meeting at a junction or head-on never overlap (one gives way) and both get through, in their
+//   own lanes
+// - buses: on the real timetable (transit.bus_rows, from python3) no two buses overlap in any frame where
+//   they turn across each other at Willow Lane and Main Street, none jumps (a lane change at a corner swings
+//   across), and two buses on one tile on the first frame after a page load are drawn apart
 // - night: headlights behind a nearer building are hidden by it, like the lamp pools
 // - ticker: no name plate or badge is drawn under the page's ticker (it carries data-cv-avoid); without the
 //   mark the same sweep does draw there
@@ -54,7 +59,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const CLIENT = path.resolve(__dirname, "..", "..", "client");
+const REPO = path.resolve(__dirname, "..", "..");
+const CLIENT = path.join(REPO, "client");
 const SHOTS = process.env.VIEW_SHOTS || "";
 const VIEW_SCRIPTS = ["proj", "art", "buildings", "actors", "scene", "movers", "camera", "minimap", "view"];
 const FACADE = ["setTown", "setState", "select", "focus", "highlight", "setOverlay", "ping", "setInset", "camera",
@@ -978,7 +984,8 @@ async function runPersist(browser) {
   await page.waitForFunction(() => window.__view && __view.scene() && __view.scene().stats.frames > 3, null, { timeout: 20000 });
   let c = await page.evaluate(() => __view.camera());
   check(c.projection === "flat" && c.zoom === 2 && near(c.x, 60, 0.3) && near(c.y, 10, 0.3), "persist: a reload brings them back", c);
-  await page.evaluate(() => localStorage.setItem("goal.view", JSON.stringify({ projection: "iso", rot: 2, zoom: 1, x: 40, y: 25 })));
+  // (the view stopped first, so a save it still has due from the restore cannot overwrite the stored value)
+  await page.evaluate(() => { __view.stop(); localStorage.setItem("goal.view", JSON.stringify({ projection: "iso", rot: 2, zoom: 1, x: 40, y: 25 })); });
   await page.reload();
   await page.waitForFunction(() => window.__view && __view.scene() && __view.scene().stats.frames > 3, null, { timeout: 20000 });
   c = await page.evaluate(() => ({ projection: __view.camera().projection, rot: __view.scene().proj.rot }));
@@ -1257,7 +1264,10 @@ async function runLongTask(browser) {
 // and drawn every 10.5 ms of each 417 ms tick:
 // - a car leaving its driveway diagonally turns onto the road instead of sliding along the lawn, and its next
 //   diagonal move runs down the road instead of through the house beside it
-// - a walker stepping diagonally in a park goes round the tree tile, not through it
+// - a walker stepping diagonally in a park goes round the tree tile, not through it; one stepping between two
+//   trees (Eastgate Green, (67, 20) to (66, 19)) crosses at their shared corner point, never into a tree
+//   tile; one whose straight move runs through a tree ((65, 20) to (65, 22)) goes round it
+// - a car whose straight move from a driveway crosses a lawn ((6, 26) to (3, 26)) goes round by the road
 // - a household walking the same pavement together is drawn one behind another, never on one spot
 // - two buses crossing at a junction on the same minute never overlap (one waits short of the crossing and
 //   catches up without a jump), and two passing head-on keep to their lanes
@@ -1271,12 +1281,17 @@ async function runMovers(browser) {
       ben: { veh: "car", path: [[14, 26], [15, 25], [16, 28], [16, 31]] }, // main_29's driveway onto Main Street, then south
       neta: { veh: "walk", path: [[18, 5], [19, 4], [20, 5], [21, 4]] },  // Maple Park, round the trees at (19, 5) and (21, 5)
       dana: { veh: "walk", path: line(20, 25, 1, 0, 6) }, yossi: { veh: "walk", path: line(20, 25, 1, 0, 6) }, noa: { veh: "walk", path: line(20, 25, 1, 0, 6) },
+      maya: { veh: "walk", path: [[67, 20], [66, 19], [67, 20], [66, 19]] }, // Eastgate Green, between the trees at (66, 20) and (67, 19)
+      lior: { veh: "walk", path: [[65, 20], [65, 22], [65, 20]] },             // straight through the tree at (65, 21)
+      avi: { veh: "car", path: [[6, 26], [3, 26]] },                           // a driveway at (6, 26), straight across the lawn to Willow Lane
     };
+    const tl = (x, y) => T.tiles[y][x];
+    const pre = [tl(66, 20), tl(67, 19), tl(67, 20), tl(66, 19), tl(65, 21), tl(65, 20), tl(65, 22), tl(6, 26), tl(5, 26), tl(4, 26), tl(3, 26), tl(6, 25), tl(3, 25)].join("");
     const buses = { "1a": { line: "1", dir: "e", path: line(-1, 25, 1, 0, 10) }, "2a": { line: "2", dir: "n", path: line(3, 29, 0, -1, 10) },
       "1b": { line: "1", dir: "w", path: line(51, 36, -1, 0, 10) }, "2b": { line: "2", dir: "e", path: line(43, 36, 1, 0, 10) } };
     const ext = d => d === "e" || d === "w" ? [0.725, 0.21] : [0.21, 0.725];
     const tileAt = p => (T.tiles[Math.floor(p[1])] || "")[Math.floor(p[0])];
-    const out = { car: [], walk: [], family: Infinity, junction: -Infinity, headon: -Infinity, step: 0, samples: 0 };
+    const out = { car: [], walk: [], family: Infinity, junction: -Infinity, headon: -Infinity, step: 0, samples: 0, pre, corner: [], treeGap: Infinity, round: [], avi: [] };
     const last = {};
     for (let k = 0; k < 10; k++) {
       const st = __t.quiet(5000 + k), t = 1e7 + k * 417;
@@ -1293,6 +1308,14 @@ async function runMovers(browser) {
         if (c !== "#" && !(Math.floor(car[0]) === 14 && Math.floor(car[1]) === 26)) out.car.push([k, j, car.map(q => +q.toFixed(2)), c]);
         const w = __t.tileOf("neta"), cw = tileAt(w);
         if (!".#Pe".includes(cw)) out.walk.push([k, j, w.map(q => +q.toFixed(2)), cw]);
+        // between two trees: never in a tree tile (nor on the corner point the four tiles share), clear of the trunks
+        const m2 = __t.tileOf("maya"), cm = tileAt(m2);
+        if (cm === "T" || (Math.abs(m2[0] - 67) < 1e-6 && Math.abs(m2[1] - 20) < 1e-6)) out.corner.push([k, j, m2.map(q => +q.toFixed(3))]);
+        out.treeGap = Math.min(out.treeGap, Math.hypot(m2[0] - 66.5, m2[1] - 20.5), Math.hypot(m2[0] - 67.5, m2[1] - 19.5));
+        const l2 = __t.tileOf("lior");
+        if (tileAt(l2) === "T") out.round.push([k, j, l2.map(q => +q.toFixed(2))]);
+        const a2 = __t.tileOf("avi");
+        if (tileAt(a2) !== "#" && !(Math.floor(a2[0]) === 6 && Math.floor(a2[1]) === 26)) out.avi.push([k, j, a2.map(q => +q.toFixed(2)), tileAt(a2)]);
         if (k >= 1 && k <= 5) {
           const fam = ["dana", "yossi", "noa"].map(id => { const m = s.movers.find(q => q.id === id); return s.worldToCss(m.wx + 8, m.wy + 28); });
           for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) out.family = Math.min(out.family, Math.hypot(fam[a][0] - fam[b][0], fam[a][1] - fam[b][1]));
@@ -1308,12 +1331,16 @@ async function runMovers(browser) {
         out.headon = Math.max(out.headon, overlap("1b", "2b"));
       }
     }
-    out.end = { "1a": __t.tileOf("1a"), "2a": __t.tileOf("2a") };
+    out.end = { "1a": __t.tileOf("1a"), "2a": __t.tileOf("2a"), maya: __t.tileOf("maya"), lior: __t.tileOf("lior"), avi: __t.tileOf("avi") };
     return out;
   });
+  check(r.pre === "TTPPTPPe..###", "movers: the fixture town has the trees, lawn and roads the moves below are about", r.pre);
   check(r.samples === 400, "movers: 400 frames drawn", r.samples);
   check(r.car.length === 0, "movers: a car leaving its driveway diagonally keeps to the road (never the lawn or the house)", r.car.slice(0, 6));
   check(r.walk.length === 0, "movers: a walker stepping diagonally in a park goes round the trees", r.walk.slice(0, 6));
+  check(r.corner.length === 0 && r.treeGap > 0.6, "movers: a walker stepping between two trees crosses at their shared corner, never into a tree (0.6 tiles or more from the trunks)", { corner: r.corner.slice(0, 6), gap: r.treeGap });
+  check(r.round.length === 0 && Math.hypot(r.end.lior[0] - 65.5, r.end.lior[1] - 20.5) < 0.3, "movers: a walker whose straight move runs through a tree goes round it, and gets there", { round: r.round.slice(0, 6), end: r.end.lior });
+  check(r.avi.length === 0 && Math.floor(r.end.avi[0]) === 3 && Math.floor(r.end.avi[1]) === 26, "movers: a car whose straight move from a driveway crosses a lawn goes round by the road", { off: r.avi.slice(0, 6), end: r.end.avi });
   check(r.family >= 8, "movers: a family walking the same pavement is drawn one behind another (8 px apart or more at zoom 2)", r.family);
   check(r.junction <= 0, "movers: two buses crossing at a junction on the same minute never overlap", r.junction);
   check(r.headon <= 0, "movers: two buses passing head-on keep to their lanes", r.headon);
@@ -1321,6 +1348,71 @@ async function runMovers(browser) {
   check(r.end["1a"][0] > 6 && r.end["2a"][1] < 22, "movers: both buses have crossed by the end", r.end);
   await shot(page, "movers");
   noErrors(log, "movers");
+  await ctx.close();
+}
+
+// The real timetable's bus rows for ticks [t0, t0 + n), from the engine (python3, or $PYTHON).
+function busRows(t0, n) {
+  const code = "import json, sys\nsys.path.insert(0, sys.argv[1])\nfrom gameofailife import transit\n" +
+    "print(json.dumps([transit.bus_rows(t) for t in range(int(sys.argv[2]), int(sys.argv[3]))]))";
+  const out = require("child_process").execFileSync(process.env.PYTHON || "python3", ["-c", code, REPO, String(t0), String(t0 + n)], { timeout: 60000 });
+  return JSON.parse(out.toString());
+}
+
+// Buses on the real timetable (review ART-3): from 06:00 to 06:40 (ticks 360-400) the line 1 and line 2 buses
+// meet at the Willow Lane / Main Street junction (3, 25) every 13 minutes: at 06:04 1a (heading south) and 2a
+// (heading west) both reach it, and at 06:05 1a turns east while 2a turns north across 1a's lane. Drawn 40
+// times a tick:
+// - no two bus bodies (1.45 x 0.42 tiles) overlap in any frame, and the junction pairs get through
+// - no bus jumps: no step from one frame to the next is over 0.2 tiles (the most a bus covers is about 0.13,
+//   catching up after a wait; a lane change at a corner swings across instead of jumping 0.33)
+// - a fresh view whose first frame has two buses on one tile (tick 0: 1a and 2a both at (3, 25)) draws them
+//   apart from that frame on
+async function runBuses(browser) {
+  const rows = busRows(360, 41), first = busRows(0, 3);
+  const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0&hud=0&minimap=0&zoom=1&at=4,24");
+  const r = await page.evaluate(([rows, first]) => {
+    const v = __view;
+    v.stop();
+    const SUB = 40, ext = d => d % 2 === 0 ? [0.725, 0.21] : [0.21, 0.725];
+    const out = { overlap: -Infinity, worst: null, step: 0, stepAt: null, frames: 0, first: -Infinity, junction: {}, firstRows: null };
+    const run = (list, tick0, base) => {
+      const last = {};
+      for (let k = 0; k < list.length; k++) {
+        const st = __t.quiet(base + k), t = 2e7 + base * 417 + k * 417;
+        st.buses = list[k];
+        __t.pushAt(st, t);
+        for (let j = 0; j < SUB; j++) {
+          v.frame(t + j * 417 / SUB);
+          out.frames++;
+          const bs = v.scene().movers.filter(m => m.kind === "bus").map(m => ({ id: m.id, d: m.lights, p: v.scene().proj.toTile(m.cx, m.cy) }));
+          for (const b of bs) {
+            if (last[b.id]) { const d = Math.hypot(b.p[0] - last[b.id][0], b.p[1] - last[b.id][1]); if (d > out.step) { out.step = d; out.stepAt = [tick0 + k, j, b.id]; } }
+            last[b.id] = b.p;
+            if (Math.abs(b.p[0] - 3.5) < 0.6 && Math.abs(b.p[1] - 25.5) < 0.6) out.junction[b.id] = true;
+          }
+          for (let a = 0; a < bs.length; a++) for (let b = a + 1; b < bs.length; b++) {
+            const A = bs[a], B = bs[b], ea = ext(A.d), eb = ext(B.d);
+            const ov = Math.min(ea[0] + eb[0] - Math.abs(A.p[0] - B.p[0]), ea[1] + eb[1] - Math.abs(A.p[1] - B.p[1]));
+            if (tick0 === 0) out.first = Math.max(out.first, ov);
+            else if (ov > out.overlap) { out.overlap = ov; out.worst = [tick0 + k, j, A.id, B.id]; }
+          }
+        }
+      }
+    };
+    run(rows, 360, 3000);
+    // a page load on a minute when two buses stand on one tile: a new town (new movers), tick 0 first
+    v.setTown(window.CITY_FIXTURE.town);
+    out.firstRows = first[0].filter(b => b.x === 3 && b.y === 25).map(b => b.id);
+    run(first, 0, 4000);
+    return out;
+  }, [rows, first]);
+  check(r.frames === 41 * 40 + 3 * 40, "buses: every frame drawn", r.frames);
+  check(r.overlap <= 0, "buses: on the real timetable no two buses overlap in any frame (the 06:05 turns at Willow Lane and Main Street included)", { overlap: r.overlap, at: r.worst });
+  check(["1a", "2a", "1d", "2d", "1c", "2c"].every(id => r.junction[id]), "buses: the line 1 and line 2 buses that meet at (3, 25) all go through it", Object.keys(r.junction));
+  check(r.step <= 0.2, "buses: no bus jumps from one frame to the next (0.2 tiles at most, 40 frames a tick)", { step: r.step, at: r.stepAt });
+  check(r.firstRows.length === 2 && r.first <= 0, "buses: two buses on one tile on a fresh view's first frame are drawn apart", { onTile: r.firstRows, overlap: r.first });
+  noErrors(log, "buses");
   await ctx.close();
 }
 
@@ -1503,7 +1595,7 @@ async function runDashboard(browser) {
 
 const RUNS = [["globals", runGlobals], ["bench", runBench], ["picking", runPicking], ["facade", runFacade], ["stages", runStages],
   ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["rotation", runRotation], ["long task", runLongTask],
-  ["movers", runMovers], ["night", runNight], ["ticker", runTicker], ["plane", runPlane], ["dashboard", runDashboard]];
+  ["movers", runMovers], ["buses", runBuses], ["night", runNight], ["ticker", runTicker], ["plane", runPlane], ["dashboard", runDashboard]];
 
 async function main() {
   const pw = findPlaywright();
