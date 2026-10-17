@@ -237,8 +237,11 @@ function render(mode) {
     const by = `<span class="tag ${esc(f.decided_by)}">${esc(label)}</span>`;
     const major = f.major ? ' <span class="tag major" title="A big decision: habit settles it only when the choice is very clear">major</span>' : "";
     const pick = Number.isInteger(f.profile_choice) ? f.profile_choice : null;
+    // Only a controller's answer can differ from the profile: a profile play (habit, default or timeout) is the
+    // profile's own pick, with the Director's noise, even when that isn't the noiseless top score.
+    const asked = f.decided_by === "model";
     const opts = (f.options || []).map((o, i) => {
-      const mark = i === pick && i !== f.choice ? ' <span class="small" title="What the play-style profile would have picked">(profile)</span>' : "";
+      const mark = asked && i === pick && i !== f.choice ? ' <span class="small" title="What the play-style profile would have picked">(profile)</span>' : "";
       return `<li class="${i === f.choice ? "chosen" : ""}">${i === f.choice ? "▶ " : ""}${esc(o)}${mark}</li>`;
     }).join("");
     const happened = Array.isArray(f.happened) ? f.happened.join(" · ") : f.happened;

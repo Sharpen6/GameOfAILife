@@ -203,6 +203,27 @@ class AffordabilityTest(unittest.TestCase):
         self.assertFalse(housing.is_upgrade(sim, hh["katz"], "elm_court_1a"))  # never down a tier
         self.assertTrue(housing.is_upgrade(sim, hh["rosen"], "elm_court_2b"))  # crowded: more bedrooms
         self.assertTrue(housing.is_upgrade(sim, hh["cohen"], "river_28"))  # owning instead of renting
+        sim.homes["cedar_court_2a"].owner = "rosen"  # a crowded owner may still rent somewhere bigger
+        self.assertTrue(housing.is_upgrade(sim, hh["rosen"], "elm_court_2b"))
+
+    def test_owners_never_sell_up_to_rent(self):
+        """The first evening: the Cohens and the Mizrahis buy, and 20 and 13 Main Street go back to let. Both
+        are worth 15% more than the Levis' and the Elbazes' own homes, but an owner who isn't crowded looks
+        only at homes for sale (housing.md 11, point 4): selling to rent dearer is never a step up."""
+        sim, hh = self.sim, self.sim.households
+        for who, to in (("cohen", "river_28"), ("mizrahi", "main_55")):
+            self.assertTrue(housing.move_household(sim, hh[who], to, "buy"))
+        rentals = [h.id for h in housing.vacancies(sim, "for_rent")]
+        for owner, rental in (("levi", "main_20"), ("elbaz", "main_13")):
+            self.assertIn(rental, rentals)
+            self.assertFalse(housing.crowded(sim, hh[owner]))
+            self.assertGreaterEqual(housing.value(sim, rental), 1.15 * housing.value(sim, hh[owner].home_id))
+            self.assertFalse(housing.is_upgrade(sim, hh[owner], rental), owner)
+            self.assertEqual([h.id for h in housing.hunt_candidates(sim, hh[owner]) if not housing.buys(h)], [],
+                             owner)
+        for owner in ("levi", "elbaz", "segal", "katz", "friedman", "ezra", "halabi"):  # every owner, all evening
+            self.assertTrue(all(housing.buys(h) for h in housing.hunt_candidates(sim, hh[owner])), owner)
+        self.assertTrue(housing.is_upgrade(sim, hh["amar"], "main_20"))  # a renter still moves up by 15%
 
 
 # --- moves ----------------------------------------------------------------------------------
@@ -296,6 +317,73 @@ class MoveTest(unittest.TestCase):
         self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST)
         self.assertEqual(cohen.history[-1]["price"], price)
         self.assertIn(("dana", [("move_house", "river_28")]), sim.plans)
+
+    def offer(self, agent_id: str, home_id: str = "river_28"):
+        """Choose a haggle: its extra holds the listing (what house_hunt's option 1 carries)."""
+        opt = SimpleNamespace(extra={"hold": home_id}, steps=[("viewing", self.sim.homes[home_id].place)],
+                              outcomes=["the seller's answer"])
+        housing.apply_extra(self.sim, self.sim.agents[agent_id], SimpleNamespace(kind="house_hunt"), opt)
+        return opt
+
+    def test_an_offer_holds_the_listing_until_the_answer(self):
+        sim, dana = self.sim, self.sim.agents["dana"]
+        cohen, segal = sim.households["cohen"], sim.households["segal"]
+        self.assertIn("river_28", [h.id for h in housing.hunt_candidates(sim, segal)])  # the Segals want it too
+        price = housing._int(housing.value(sim, "river_28") * 0.9)
+        opt = self.offer("dana")
+        home = sim.homes["river_28"]
+        self.assertEqual((home.held_for, home.under_offer_until), ("cohen", sim.clock.tick + housing.OFFER_HOLD_MINUTES))
+        self.assertEqual((opt.steps, opt.outcomes), ([("viewing", "river_28")], ["the seller's answer"]))
+        self.assertNotIn("river_28", [h.id for h in housing.vacancies(sim)])
+        self.assertNotIn("river_28", [h.id for h in housing.hunt_candidates(sim, segal)])
+        self.assertIsNone(housing.homes_json(sim)["river_28"]["listing"])  # under offer
+        self.assertFalse(housing.move_household(sim, segal, "river_28", "buy"))
+        self.assertEqual(sim.texts("too_late"), ["The Segals were too late: 28 River Road is under offer."])
+        sim.clock.tick += 60  # the viewing is over and the seller says yes
+        for key, value in {"factor": 0.9, "buy": "river_28"}.items():
+            self.assertTrue(housing.apply_effect(sim, dana, key, value))
+        self.assertEqual((cohen.home_id, cohen.history[-1]["price"]), ("river_28", price))
+        self.assertEqual((home.held_for, home.under_offer_until, home.household), (None, 0, "cohen"))
+        self.assertEqual(len(sim.texts("too_late")), 1)
+
+    def test_a_refusal_or_a_rival_ends_the_hold(self):
+        sim, dana = self.sim, self.sim.agents["dana"]
+        home = sim.homes["river_28"]
+        self.offer("dana")
+        housing.apply_effect(sim, sim.agents["tom"], "release", "river_28")  # only the Cohens' answer frees it
+        self.assertEqual(home.held_for, "cohen")
+        self.assertTrue(housing.apply_effect(sim, dana, "release", "river_28"))  # the seller turns them down
+        self.assertEqual((home.held_for, home.under_offer_until), (None, 0))
+        self.assertIn("river_28", [h.id for h in housing.vacancies(sim)])
+        self.offer("dana")
+        housing.apply_effect(sim, dana, "withdraw", "river_28")  # another buyer snaps it up first
+        self.assertEqual((home.held_for, home.under_offer_until), (None, sim.clock.tick + 3 * DAY))
+        self.assertFalse(housing.move_household(sim, sim.households["cohen"], "river_28", "buy"))
+        self.assertEqual(sim.texts("too_late"), ["The Cohens were too late: 28 River Road has been sold."])
+
+    def test_a_hold_runs_out_and_a_failed_purchase_frees_it(self):
+        sim, dana = self.sim, self.sim.agents["dana"]
+        home = sim.homes["river_28"]
+        self.offer("dana")
+        sim.clock.tick += housing.OFFER_HOLD_MINUTES - 1
+        self.assertNotIn("river_28", [h.id for h in housing.vacancies(sim)])
+        sim.clock.tick += 1  # no answer came (the decider died, say): the seller stops waiting
+        self.assertIn("river_28", [h.id for h in housing.vacancies(sim)])
+        self.offer("dana")
+        set_funds(sim, "cohen", 1000)  # the money went meanwhile
+        housing.apply_effect(sim, dana, "buy", "river_28")
+        self.assertEqual(sim.texts("too_late"), ["The Cohens can't raise the money for 28 River Road after all."])
+        self.assertEqual((home.held_for, home.under_offer_until), (None, 0))
+        self.assertIn("river_28", [h.id for h in housing.vacancies(sim)])
+
+    def test_an_offer_on_a_home_already_gone(self):
+        """Another household took the home while the controller was thinking: no viewing, no answer."""
+        sim, dana = self.sim, self.sim.agents["dana"]
+        self.assertTrue(housing.move_household(sim, sim.households["segal"], "river_28", "buy"))
+        opt = self.offer("dana")
+        self.assertEqual(sim.texts("too_late"), ["The Cohens were too late: 28 River Road has been sold."])
+        self.assertEqual((opt.steps, dana.plan, opt.outcomes), ([("idle", "home")], [("idle", "home")], []))
+        self.assertEqual(sim.homes["river_28"].held_for, None)
 
     def test_withdraw_takes_a_listing_off_for_three_days(self):
         sim = self.sim
@@ -811,6 +899,8 @@ class ForkTest(unittest.TestCase):
         self.assertEqual([o.group for o in haggle.outcomes], ["deal"] * 4)
         self.assertEqual(haggle.outcomes[0].effects, {"factor": 0.9, "buy": "river_28"})
         self.assertEqual(list(haggle.outcomes[1].effects), ["factor", "buy"])  # the companion comes first
+        self.assertEqual(haggle.extra, {"hold": "river_28"})  # nobody else takes it during the viewing ...
+        self.assertEqual(haggle.outcomes[3].effects, {"fun": -4, "release": "river_28"})  # ... until a refusal
         self.assertEqual(look.extra, {"hh_cooldown": 3 * DAY})
         self.assertEqual(stay.extra, {"hh_cooldown": 14 * DAY})
         self.assertEqual(stay.tags["thrift"], 0.0)  # buying would lower their weekly outgo
@@ -856,6 +946,7 @@ class ForkTest(unittest.TestCase):
             "Stay in Elm Court, flat 2A and keep the money"])
         self.assertEqual(fork.options[0].extra, {"move": "main_39", "how": "rent"})
         self.assertEqual(fork.options[1].outcomes[0].effects, {"factor": 0.9, "buy": "main_39"})
+        self.assertEqual(fork.options[1].extra, {"hold": "main_39"})
 
     def test_house_hunt_gates(self):
         sim = FakeSim(tick=at(0, 18, 30))
@@ -1218,6 +1309,51 @@ class EngineTest(unittest.TestCase):
         for _ in range(120):
             sim.step()
             self.assertFalse(dana.activity == "move_house" or dana.activity_place == "river_28", sim.clock.stamp())
+
+    def haggle(self, hit: str):
+        """Dana offers 90% for 28 River Road on the first evening, and the seller's answer will be `hit`."""
+        sim = self.sim
+        sim.clock.tick = at(0, 18, 30)
+        dana = sim.agents["dana"]
+        fork = housing_forks.house_hunt_fork(sim, dana)
+        haggle = fork.options[1]
+        for out in haggle.outcomes:
+            out.p = 1.0 if out.id == hit else 0.0
+        sim._decide(dana, fork, 1, "model", "")
+        return dana, fork
+
+    def test_a_haggle_holds_the_home_through_the_viewing(self):
+        """Without the hold the Segals buy 28 River Road a minute later, and the record says the Cohens were too
+        late and then that the seller accepted."""
+        sim = self.sim
+        dana, fork = self.haggle("offer_accepted")
+        cohen = sim.households["cohen"]
+        price = housing._int(housing.value(sim, "river_28") * 0.9)
+        for _ in range(6 * 60):
+            sim.step()
+            if cohen.home_id == "river_28":
+                break
+        self.assertEqual(sim.homes["river_28"].household, "cohen")  # not the Segals
+        self.assertEqual((cohen.home_id, cohen.history[-1]["price"]), ("river_28", price))
+        self.assertEqual([e["text"] for e in sim.events if e["tag"] == "too_late" and "River Road" in e["text"]
+                          and "Cohens" in e["text"]], [])
+        summary = next(f for f in dana.forks if f["id"] == fork.id)
+        self.assertEqual(summary["happened"], ["The seller accepts the offer"])
+
+    def test_a_refused_haggle_puts_the_home_back_on_the_market(self):
+        sim = self.sim
+        dana, fork = self.haggle("refused")
+        home = sim.homes["river_28"]
+        self.assertEqual(home.held_for, "cohen")
+        summary = next(f for f in dana.forks if f["id"] == fork.id)
+        for _ in range(6 * 60):
+            sim.step()
+            if summary["happened"]:
+                break
+        self.assertEqual(summary["happened"], ["The seller turns the offer down"])
+        self.assertEqual(sim.households["cohen"].home_id, "main_20")
+        self.assertIsNone(home.held_for)
+        self.assertTrue(home.household is not None or "river_28" in [h.id for h in housing.vacancies(sim)])
 
     def test_build_fork_asks_one_partner(self):
         from gameofailife.forks import build_fork

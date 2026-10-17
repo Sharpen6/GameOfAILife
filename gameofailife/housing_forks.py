@@ -179,13 +179,15 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
         cost = housing.net_cost(sim, hh, a.id)
         says = (f"{LANDLORD} agrees to the lower rent", f"{LANDLORD} meets them halfway",
                 "Another family takes it first", f"{LANDLORD} turns the offer down")
+    # The listing is held for the offer from the decision until the answer lands after the viewing, so the
+    # answer is never about a home somebody else took meanwhile; a refusal hands it back to the market.
     haggle = Option(haggle_label, [("viewing", a.place)], cost=max(0, _whole(cost)), base=0.30 + bonus(a),
                     tags={"thrift": 0.5, "adventure": 0.4, "diligence": -0.1}, gains={"fun": 10},
                     outcomes=[Outcome("offer_accepted", says[0], 0.40, +1, {"factor": 0.9, "buy": a.id}, group="deal"),
                               Outcome("meet_halfway", says[1], 0.35, +1, {"factor": 0.95, "buy": a.id}, group="deal"),
                               Outcome("outbid", says[2], 0.25, -1, {"withdraw": a.id, "fun": -10}, group="deal"),
-                              Outcome("refused", says[3], 1.0, 0, {"fun": -4}, group="deal")],
-                    household_pays=True, charge=False)
+                              Outcome("refused", says[3], 1.0, 0, {"fun": -4, "release": a.id}, group="deal")],
+                    extra={"hold": a.id}, household_pays=True, charge=False)
     if b:
         cheaper = move(b, True)
     else:

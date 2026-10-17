@@ -77,6 +77,7 @@ DAY = 24 * 60  # minutes
 MOVE_VAN_MINUTES = 180  # the moving van stays at the curb this long after a move
 LANDLORD_WORKS_MINUTES = 8 * 60  # builders on site while the landlord repaints
 UNDER_OFFER_DAYS = 3  # a listing another buyer snapped up is off the market this long
+OFFER_HOLD_MINUTES = 6 * 60  # a listing is held for a household's offer until the answer lands, at most this long
 SETTLE_DAMAGE = 10  # condition lost when an emergency is never properly fixed, or left behind in a move
 EMERGENCY_STAGE_P = {2: 0.015, 3: 0.045, 4: 0.045}  # extra nightly emergency odds of a shabby or worse home
 WINTER_EMERGENCY = 1.5
@@ -172,6 +173,7 @@ class Home:
     household: str | None = None  # who lives there
     listing: str | None = None  # None, "for_sale" or "for_rent"
     under_offer_until: int = 0  # tick a listing shows again after another buyer's offer
+    held_for: str | None = None  # the household whose offer holds it while under offer (None: another buyer)
     pending_emergency: dict | None = None  # hidden {"kind", "due"}: never serialised
     emergency: dict | None = None  # live {"kind", "since"}: public
     history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "household", "price"}
@@ -274,9 +276,23 @@ def property_tax(home: Home) -> int:
     return _int(home.base_value * PROPERTY_TAX)
 
 
-def listed(sim, home: Home) -> str | None:
-    """The home's listing as buyers see it: None while it is under offer."""
-    return home.listing if home.under_offer_until <= sim.clock.tick else None
+def listed(sim, home: Home, hh: Household | None = None) -> str | None:
+    """The home's listing as buyers see it (as household `hh` sees it, when given): None while it is under
+    offer, except to the household the listing is held for."""
+    free = home.under_offer_until <= sim.clock.tick or (hh is not None and home.held_for == hh.id)
+    return home.listing if free else None
+
+
+def hold(sim, home: Home, hh: Household | None, minutes: int) -> None:
+    """Take a listing off the market for `minutes`: for household `hh`'s offer, or for another buyer (None)."""
+    home.under_offer_until = sim.clock.tick + minutes
+    home.held_for = hh.id if hh is not None else None
+
+
+def release(home: Home) -> None:
+    """Back on the market (if it is still listed): no offer holds it."""
+    home.under_offer_until = 0
+    home.held_for = None
 
 
 def adults(sim, hh: Household) -> list[Agent]:
@@ -487,13 +503,19 @@ def affordable(sim, hh: Household, home_id: str, factor: float = 1.0) -> bool:
 
 def is_upgrade(sim, hh: Household, home_id: str) -> bool:
     """Not a lower tier, and: more room for a crowded household; owning instead of renting a home worth at
-    least 90% of today's; or a home worth at least 15% more."""
+    least 90% of today's; or a home worth at least 15% more.
+
+    Owners look only at homes for sale unless they are crowded: selling up to rent a pricier place gives away
+    the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4)."""
     cur, new = sim.homes[hh.home_id], sim.homes[home_id]
     if TIERS[new.tier]["rank"] < TIERS[cur.tier]["rank"]:
         return False
     if crowded(sim, hh) and new.bedrooms > cur.bedrooms:
         return True
-    if cur.owner != hh.id and buys(new):
+    owner = cur.owner == hh.id
+    if owner and not buys(new):
+        return False
+    if not owner and buys(new):
         return value(sim, home_id) >= 0.9 * value(sim, cur.id)
     return value(sim, home_id) >= 1.15 * value(sim, cur.id)
 
@@ -705,6 +727,21 @@ def _members(sim, hh: Household) -> list[Agent]:
     return [a for a in (sim.agents[m] for m in hh.member_ids) if a.alive]
 
 
+def available(sim, hh: Household, home: Home) -> bool:
+    """The household can still move into this home: vacant and listed as the household sees it."""
+    return home.household is None and listed(sim, home, hh) is not None
+
+
+def too_late(sim, hh: Household, home: Home, agent: Agent | None) -> None:
+    """The news that a home the household wanted has gone: taken, or held for someone else's offer."""
+    if home.household is None and home.listing and home.held_for not in (None, hh.id):
+        gone = "is under offer"
+    else:
+        gone = "has been " + ("sold" if buys(home) or home.owner not in ("landlord", "market") else "let")
+    _event(sim, f"{household_name(sim, hh)} {'was' if _one(sim, hh) else 'were'} too late: {home.name} {gone}.",
+           "too_late", home.place, agent)
+
+
 def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1.0, decider: Agent | None = None,
                    forced: str | None = None, plan_decider: bool = True, check: bool = True) -> bool:
     """Move a household into a vacant listed home: `how` is "buy" or "rent", at `factor` times the asking price
@@ -722,13 +759,13 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
     now, stamp = sim.clock.tick, sim.clock.stamp()
     who = household_name(sim, hh)
     agent = decider or (adults(sim, hh) or _members(sim, hh) or [None])[0]
-    if new.household is not None or listed(sim, new) is None:
-        gone = "sold" if buys(new) or new.owner not in ("landlord", "market") else "let"
-        _event(sim, f"{who} {'was' if _one(sim, hh) else 'were'} too late: {new.name} has been {gone}.", "too_late",
-               new.place, agent)
+    if not available(sim, hh, new):
+        too_late(sim, hh, new, agent)
         return False
     if check and not forced and not affordable(sim, hh, home_id, factor):
         _event(sim, f"{who} can't raise the money for {new.name} after all.", "too_late", new.place, agent)
+        if new.held_for == hh.id:
+            release(new)  # their own offer no longer holds it
         return False
     old = sim.homes[hh.home_id]
     owned = old.owner == hh.id
@@ -741,7 +778,7 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
     else:
         old.listing = "for_rent"
     old.household = None
-    old.under_offer_until = 0
+    release(old)
     old.pending_emergency = None
     if old.emergency:  # the problem stays with the house, as lost condition
         old.emergency = None
@@ -758,7 +795,7 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
         hh.weekly_rent = _int(new.rent * factor)
     new.listing = None
     new.household = hh.id
-    new.under_offer_until = 0
+    release(new)
     hh.home_id = new.id
     hh.moved_tick = now
     hh.trouble_seen = 0
@@ -1089,7 +1126,7 @@ def on_death(sim, agent: Agent) -> None:
     home.household = None
     home.pending_emergency = None
     home.emergency = None
-    home.under_offer_until = 0
+    release(home)
     _history(home.history, {"tick": now, "time": stamp, "event": "left", "household": hh.id, "price": None})
     _history(hh.history, {"tick": now, "time": stamp, "event": "left", "home": home.id, "name": home.name,
                           "price": None})
@@ -1103,8 +1140,17 @@ def on_death(sim, agent: Agent) -> None:
 
 # --- group B: fork extras and outcome effects ------------------------------------------------
 
+def _call_off(agent: Agent, opt) -> None:
+    """The home an option was about has gone: the decider goes home instead. _decide starts the option's own
+    steps once the extras are done (PLAN 3.11), so those are what must change; the plan is set too for a caller
+    that doesn't. None of what the option promised happens."""
+    opt.steps = [("idle", "home")]
+    agent.plan = [("idle", "home")]
+    opt.outcomes = []
+
+
 def apply_extra(sim, agent: Agent, fork, opt) -> None:
-    """The housing extras of a chosen option, at decision time (PLAN 3.11): move, repair, works,
+    """The housing extras of a chosen option, at decision time (PLAN 3.11): move, hold, repair, works,
     fix_emergency, hh_cooldown, belt_tighten, sell_car, sell_stuff, ask_help and odd_jobs."""
     extra = getattr(opt, "extra", None) or {}
     if not extra:
@@ -1117,11 +1163,14 @@ def apply_extra(sim, agent: Agent, fork, opt) -> None:
         how = extra.get("how", "buy")
         down = how == "rent" and fork is not None and fork.kind == "housing_trouble"
         if not move_household(sim, hh, extra["move"], how, decider=agent, plan_decider=False, check=not down):
-            # Nothing to move into: home instead. _decide starts the option's own steps once the extras are done
-            # (PLAN 3.11), so those are what must change; the plan is set too for a caller that doesn't.
-            opt.steps = [("idle", "home")]
-            agent.plan = [("idle", "home")]
-            opt.outcomes = []  # and none of what the move promised happens
+            _call_off(agent, opt)  # nothing to move into
+    if "hold" in extra:  # an offer: nobody else takes the home while the seller thinks it over
+        home = sim.homes[extra["hold"]]
+        if available(sim, hh, home):
+            hold(sim, home, hh, OFFER_HOLD_MINUTES)
+        else:
+            too_late(sim, hh, home, agent)
+            _call_off(agent, opt)
     lot = sim.lots[sim.homes[hh.home_id].place]
     if "repair" in extra:
         _change_condition(sim, lot, extra["repair"])
@@ -1178,7 +1227,10 @@ def apply_effect(sim, agent: Agent, key, value) -> bool:
         home = sim.homes[value]
         move_household(sim, hh, value, "buy" if buys(home) else "rent", _take(agent, "factor", 1.0), decider=agent)
     elif key == "withdraw":
-        sim.homes[value].under_offer_until = now + UNDER_OFFER_DAYS * DAY
+        hold(sim, sim.homes[value], None, UNDER_OFFER_DAYS * DAY)
+    elif key == "release":
+        if sim.homes[value].held_for == hh.id:
+            release(sim.homes[value])
     elif key == "gift_from":
         giver = sim.agents[value]
         amount = min(_take(agent, "amount", 0), max(0.0, giver.money + giver.savings))
