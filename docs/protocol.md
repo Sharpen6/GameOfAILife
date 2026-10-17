@@ -94,13 +94,15 @@ Two roles share the endpoint. The first message you send picks yours:
   write buffer) have room, whether or not the client is reading. Once they are
   full, it has to wait for the client to read. When a push has waited more than
   5 seconds without being handed over (the client stopped reading, or reads too
-  slowly to keep up), the client is dropped at its next push: the connection is
-  cut with no close frame. So a client that stops reading is dropped only once
-  its buffers have filled and 5 more seconds have passed, which can take tens of
-  seconds for a God view and much longer for a controller, whose pushes are
-  small. As with any disconnect, a dropped controller's characters are
-  released, and if the dropped view was God, the city has no God until the next
-  God `hello`.
+  slowly to keep up), the client is dropped at its next push: the server closes
+  its end without a close frame. Data already in the operating system's buffers
+  may still reach the client, followed by an EOF, so a client that starts
+  reading again first gets frames that are already old. A client that stops
+  reading is therefore dropped only once its buffers have filled and 5 more
+  seconds have passed, which can take minutes for a God view at 1x (less at
+  higher speeds) and much longer for a controller, whose pushes are small. As
+  with any disconnect, a dropped controller's characters are released, and if
+  the dropped view was God, the city has no God until the next God `hello`.
 
 ## Hello and welcome
 
@@ -297,7 +299,9 @@ Any other `type` gets `{"type": "error", "error": "unknown message type <type>"}
 where `<type>` is the server's `repr` of the value: quoted for a string
 (`unknown message type 'hello'`) and `None` for a message with no `type`.
 Controller messages (`choose`, `claim`, `query`, ...) sent on a God connection
-get this error too.
+get this error too. On a [watching](#one-god-per-city) view, a `type` that is a
+JSON array or object gets `bad message: unhashable type: 'list'` (or `'dict'`)
+instead.
 
 ## Controller messages
 
@@ -543,7 +547,7 @@ Characters without a controller play their profile default.)
 | `agent_id`         | Which of your characters is deciding. |
 | `kind`             | One of `invite`, `work`, `sleep`, `hunger`, `payday`, `groceries`, `lonely`, `free_time`. |
 | `question`         | The situation in plain language. |
-| `options`          | Always exactly 4. `index` is what you send as `choice`; `cost` is money spent up front; `travel_minutes` (game minutes) is present only when the option starts somewhere other than where the character is now. Outcome odds are never included. Options only send the character to a place that will be open when they get there (for a meal or a shop, also for the visit). If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands; when that place is the option's first stop, the `cost` also comes back and that choice's hidden outcomes are dropped. |
+| `options`          | Always exactly 4. `index` is what you send as `choice`; `cost` is money spent up front; `travel_minutes` (game minutes) is present only when the option starts somewhere other than where the character is now. Outcome odds are never included. Options only send the character to a place that will be open when they get there (for a meal or a grocery run, also for the visit; a payday shopping trip can still be cut short when the market closes, and its `cost` is kept). If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands; when that place is the option's first stop, the `cost` also comes back and that choice's hidden outcomes are dropped. |
 | `time`             | Game time stamp. |
 | `deadline_seconds` | Always `5.0`, real seconds. |
 | `weather`          | `"clear"` or `"rain"`. |
@@ -621,7 +625,7 @@ connection stays open, except after a bad hello role. All error strings:
 | `say hello first` | Any message before `hello`. |
 | `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list, `"all"` nor an empty value (for example `5` or `"dana"`; see [Bad hello](#bad-hello)): `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
 | `role must be god or controller` | Bad hello role; the server closes the connection. |
-| `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. |
+| `bad message: <detail>` | A field had an unusable value: for example `bad message: luck must be a number` for `"luck": "lots"`, or a number too big to use. `<detail>` is the server's own description. A watching God view whose `type` is a JSON array or object gets `bad message: unhashable type: 'list'` (or `'dict'`). |
 | `unknown message type <type>` | The type is not one your role can send. `<type>` is the server's Python `repr` of the value: quoted for a string (`unknown message type 'hello'`), `None` for a missing type or `null`, and bare for a number (`unknown message type 5`). |
 | `unknown character` | `get_agent` or `set_profile` with an unknown id. |
 | `not your character` | `query`, `send_message` or `invite` for a character you do not hold. |
@@ -642,11 +646,12 @@ Some refusals are not `error` messages but come in the normal reply, with
 | `sent` | `unknown or dead character` | `send_message` where either character is unknown or dead. |
 | `sent` | `can't message yourself` | `send_message` to the sending character. |
 
-`claimed` (from `claim`) and `invited` (from `invite`) report a refusal with
-`ok: false` only, and no `error` field. The frame-level failures in
-[Message basics](#message-basics) (a frame over 4 MiB, a bad control frame,
-a push left waiting more than 5 seconds once the network buffers are full)
-close the connection instead of sending an error.
+`claimed` (from `claim`), `invited` (from `invite`) and `luck_set` (from
+`set_luck`, for an unknown id) report a refusal with `ok: false` only, and no
+`error` field. The frame-level failures in [Message basics](#message-basics) (a
+frame over 4 MiB, a bad control frame, a push left waiting more than 5 seconds
+once the network buffers are full) close the connection instead of sending an
+error.
 
 ## Answer windows: 5 seconds and 10 seconds
 
