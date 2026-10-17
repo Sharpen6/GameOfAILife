@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 OP_CONT, OP_TEXT, OP_BINARY, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 MAX_MESSAGE = 4 * 1024 * 1024
+CLOSE_SECONDS = 2.0  # how long close() waits for a peer to take the close frame
 
 
 class ConnectionClosed(Exception):
@@ -60,7 +61,7 @@ class WebSocket:
             raise ConnectionClosed()
         try:
             await self._write_frame(OP_TEXT, text.encode())
-        except (ConnectionError, RuntimeError) as exc:
+        except (OSError, RuntimeError) as exc:  # OSError: also TimeoutError, EHOSTUNREACH
             self.closed = True
             raise ConnectionClosed() from exc
 
@@ -72,6 +73,10 @@ class WebSocket:
             (n,) = struct.unpack("!H", await self.reader.readexactly(2))
         elif n == 127:
             (n,) = struct.unpack("!Q", await self.reader.readexactly(8))
+        if opcode & 0x8 and (n > 125 or not fin):
+            # RFC 6455 5.5: control frames carry at most 125 bytes and are never fragmented.
+            await self.close(1002)
+            raise ConnectionClosed("bad control frame")
         if n > MAX_MESSAGE:
             raise ConnectionClosed("frame too large")
         key = await self.reader.readexactly(4) if masked else b""
@@ -83,6 +88,7 @@ class WebSocket:
     async def recv(self) -> str:
         """Return the next text message; raise ConnectionClosed when the peer goes away."""
         parts: list[bytes] = []
+        size = 0
         try:
             while True:
                 fin, opcode, data = await self._read_frame()
@@ -97,15 +103,17 @@ class WebSocket:
                     raise ConnectionClosed()
                 if opcode in (OP_TEXT, OP_BINARY, OP_CONT):
                     parts.append(data)
-                    if sum(len(p) for p in parts) > MAX_MESSAGE:
+                    size += len(data)
+                    if size > MAX_MESSAGE:
                         raise ConnectionClosed("message too large")
                     if fin:
                         return b"".join(parts).decode()
-        except (asyncio.IncompleteReadError, ConnectionError) as exc:
+        except (asyncio.IncompleteReadError, OSError) as exc:
             self.closed = True
             raise ConnectionClosed() from exc
 
     async def _raw_control(self, opcode: int, payload: bytes) -> None:
+        payload = payload[:125]  # the most a control frame may carry, so it fits the 7-bit length
         header = bytearray([0x80 | opcode, (0x80 if self.mask else 0) | len(payload)])
         if self.mask:
             key = os.urandom(4)
@@ -114,16 +122,25 @@ class WebSocket:
         self.writer.write(bytes(header) + payload)
         await self.writer.drain()
 
-    async def close(self) -> None:
+    async def _send_close(self, code: int) -> None:
+        async with self._send_lock:
+            await self._raw_control(OP_CLOSE, struct.pack("!H", code))
+
+    async def close(self, code: int = 1000) -> None:
         if self.closed:
             return
         self.closed = True
         try:
-            async with self._send_lock:
-                await self._raw_control(OP_CLOSE, struct.pack("!H", 1000))
+            # Bounded, so a peer that has stopped reading cannot hold up whoever closes it.
+            await asyncio.wait_for(self._send_close(code), CLOSE_SECONDS)
             self.writer.close()
-        except (ConnectionError, RuntimeError):
-            pass
+        except (OSError, RuntimeError):  # TimeoutError is an OSError
+            self.writer.transport.abort()
+
+    def abort(self) -> None:
+        """Drop the connection at once: no close frame, and nothing still buffered is sent."""
+        self.closed = True
+        self.writer.transport.abort()
 
 
 async def server_handshake(
