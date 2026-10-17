@@ -103,13 +103,17 @@
     }
 
     // The stats cadence (PLAN 3.8): a push when STATS_SECONDS have passed since the last one and a tick ran, or
-    // STATS_MAJOR_SECONDS when a major event happened; nothing while paused and quiet. Encoded once.
+    // STATS_MAJOR_SECONDS when a major event happened; nothing while paused and quiet. Encoded once for all
+    // viewers.
     _push_stats(viewers) {
       const since = this.now() - this._stats_at;
       if (!((this._stats_stepped && since >= STATS_SECONDS) || (this._stats_major && since >= STATS_MAJOR_SECONDS))) return;
       this._stats_at += since;
       this._stats_stepped = this._stats_major = false;
-      if (!viewers.length) return;
+      if (!viewers.length) {
+        this.sim.stats.take_new_samples(); // nobody to carry them to: a new view's welcome has them all
+        return;
+      }
       const push = JSON.stringify(this.sim.stats_json(false));
       for (const ws of viewers) this._push(ws, push);
     }
@@ -148,7 +152,9 @@
       ws._deliver(JSON.stringify(reply));
     }
 
-    // A push the client did not ask for. In the page nothing lags behind, so there is no queue to coalesce.
+    // A push the client did not ask for. GameServer queues it in the client's Outbox, where a state frame or stats
+    // push merges into the one of its kind still waiting (PLAN 3.14). Here it goes straight to the in-page socket,
+    // which hands it to the client on the next task: no backlog builds up, so nothing is merged or dropped.
     _push(ws, text) { ws._deliver(text); }
 
     connect(ws) { this.sessions.set(ws, { role: null }); }

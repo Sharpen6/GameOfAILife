@@ -5,8 +5,11 @@
 //   node port/tools/parity.cjs golden SEED          the golden city (tests/fixtures/city_seed1.json's data)
 //   node port/tools/parity.cjs messages SEED DAYS   LocalHost's messages for a God view, after DAYS game days
 //   node port/tools/parity.cjs god SEED TEXTS       LocalHost's replies to a God view's raw messages (a JSON list)
+//   node port/tools/parity.cjs affinity SEED STEPS  chronicle.on_affinity on scripted bumps (a JSON list)
+//   node port/tools/parity.cjs quiet SEED FRAMES    LocalHost's stats cadence with no view, then a God view
 //   node port/tools/parity.cjs run SEED DAYS DICE   a run through LocalHost, with every fork checked
-//   node port/tools/parity.cjs trace SEED DAYS DICE [LUCK|-] [hard]  every event, fork and hourly agent row
+//   node port/tools/parity.cjs trace SEED DAYS DICE [LUCK|-] [SCENARIO]  every event, fork and hourly agent
+//                                                   row, each midnight's stats push samples and the last stats
 "use strict";
 const crypto = require("crypto");
 const G = require("./engine.cjs").load();
@@ -91,6 +94,56 @@ function god(seed, texts) {
   });
   sim.set_luck("dana", "nan");
   out.push({ direct_luck: sim.agents.get("dana").luck });
+  return out;
+}
+
+// chronicle.on_affinity on scripted relationship bumps, for the Python twin to repeat. Each step is
+// [a_id, b_id, before, after, tick, kind_ab, kind_ba]: at game minute `tick`, a's affinity to b went from
+// `before` to `after`; a kind sets that side's relationship kind first ("-" removes b's side, null leaves it).
+// After each step: the events, both sides' kinds and b's newest memory; at the end, sim._rifts.
+function affinity(seed, steps) {
+  const sim = new G.sim.Simulation(seed, null, null, seed);
+  sim.drain();
+  const rel = (x, y) => (sim.agents.has(x) ? sim.agents.get(x).relationships.get(y) ?? null : null);
+  const out = steps.map(([a_id, b_id, before, after, tick, kind_ab, kind_ba]) => {
+    sim.clock.tick = tick;
+    if (kind_ab) rel(a_id, b_id).kind = kind_ab;
+    if (kind_ba === "-") sim.agents.get(b_id).relationships.delete(a_id);
+    else if (kind_ba) rel(b_id, a_id).kind = kind_ba;
+    if (rel(a_id, b_id)) rel(a_id, b_id).affinity = after;
+    G.chronicle.on_affinity(sim, a_id, b_id, before, after);
+    const [events] = sim.drain();
+    const b = sim.agents.get(b_id);
+    return { events: events.map(e => [e.tick, e.tag, e.importance, e.text, e.agent, e.agents, e.place]),
+      kinds: [rel(a_id, b_id) && rel(a_id, b_id).kind, rel(b_id, a_id) && rel(b_id, a_id).kind],
+      memory: b ? b.memory[b.memory.length - 1] ?? null : null };
+  });
+  out.push({ rifts: Array.from(sim._rifts || new Map()).sort() });
+  return out;
+}
+
+// The stats cadence with nobody watching: FRAMES frames at speed 16 on a hand-driven clock, then a God view
+// joins. A push that falls due with no viewer hands its samples to nobody, so the view's first push carries only
+// what came after (its welcome has them all).
+function quiet(seed, frames) {
+  const sim = new G.sim.Simulation(seed, null, null, seed);
+  const { host, clock } = hostFor(sim, 16);
+  const step = () => {
+    clock.t += G.host.FRAME_SECONDS;
+    host.frame();
+  };
+  for (let i = 0; i < frames; i++) step();
+  const out = { tick: sim.clock.tick, samples: sim.stats.samples.length, pushed: sim.stats._pushed };
+  const god = new Client();
+  host.connect(god);
+  host.receive(god, JSON.stringify({ type: "hello", role: "god" }));
+  out.welcome_samples = god.take("welcome").stats.samples.map(s => s.tick);
+  let push = null;
+  for (let i = 0; i < 400 && !push; i++) {
+    step();
+    push = god.take("stats");
+  }
+  out.push_samples = push.samples.map(s => s.tick);
   return out;
 }
 
@@ -183,9 +236,11 @@ function run(seed, days, dice) {
 }
 
 // The whole run, step by step, for the Python twin to repeat with the same dice (tests/test_port.py gives the
-// Python Simulation these SimDice): every event and decided fork, and every agent at each whole hour.
+// Python Simulation these SimDice): every event and decided fork, every agent at each whole hour, the samples
+// a stats push would carry at each midnight, and the full stats message at the end.
 // SCENARIO "hard": adults start broke and the over-40s 30 years older, to reach arrears and deaths; "debt":
-// adults start $3,000 in debt, to reach housing trouble, evictions and forced sales.
+// adults start $3,000 in debt, to reach housing trouble, evictions and forced sales; "bonds": acquaintances
+// and coworkers start one point short of friends, friends and partners one point from falling out.
 function trace(seed, days, dice, luck = null, scenario = "") {
   const sim = new G.sim.Simulation(seed, null, null, dice);
   if (luck !== null) for (const a of sim.agents.values()) sim.set_luck(a.id, luck); // God's hand on everyone
@@ -196,7 +251,16 @@ function trace(seed, days, dice, luck = null, scenario = "") {
       if (a.age >= 40) a.age += 30;
     }
   }
-  const out = { events: [], forks: [], hours: [] };
+  if (scenario === "bonds") {
+    const { FRIEND_AT, RIFT_AT, FRIENDS_FROM, RIFT_KINDS } = G.chronicle;
+    for (const a of sim.agents.values()) {
+      for (const rel of a.relationships.values()) {
+        if (FRIENDS_FROM.includes(rel.kind)) rel.affinity = FRIEND_AT - 1.0;
+        else if (RIFT_KINDS.includes(rel.kind)) rel.affinity = RIFT_AT + 1.0;
+      }
+    }
+  }
+  const out = { events: [], forks: [], hours: [], pushes: [] };
   const end = sim.clock.tick + days * G.clock.MINUTES_PER_DAY;
   const drain = () => {
     const [events, forks] = sim.drain();
@@ -213,7 +277,10 @@ function trace(seed, days, dice, luck = null, scenario = "") {
         G.agent.NEEDS.map(n => G.py.pyRound(a.needs[n], 2)), a.household_id,
         sim.households.get(a.household_id).home_id]).map(r => JSON.stringify(r)).join(";")]);
     }
+    if (sim.clock.minute_of_day === 0) out.pushes.push(sim.stats_json(false).samples);
   }
+  out.stats = sim.stats_json(true);
+  out.richest = sim.stats.richest;
   return out;
 }
 
@@ -232,12 +299,16 @@ function main(argv) {
     out = messages(n(0), n(1) || 0);
   } else if (cmd === "god") {
     out = god(n(0), JSON.parse(args[1]));
+  } else if (cmd === "quiet") {
+    out = quiet(n(0), n(1));
+  } else if (cmd === "affinity") {
+    out = affinity(n(0), JSON.parse(args[1]));
   } else if (cmd === "trace") {
     out = trace(n(0), n(1), n(2), args.length > 3 && args[3] !== "-" ? n(3) : null, args[4] || "");
   } else if (cmd === "run") {
     out = run(n(0), n(1), n(2));
   } else {
-    process.stderr.write("usage: parity.cjs rng|dice|golden|messages|god|run|trace ...\n");
+    process.stderr.write("usage: parity.cjs rng|dice|golden|messages|god|affinity|quiet|run|trace ...\n");
     process.exit(2);
   }
   process.stdout.write(JSON.stringify(out) + "\n");

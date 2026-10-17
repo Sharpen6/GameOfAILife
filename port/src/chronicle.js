@@ -4,7 +4,10 @@
 // Each event the simulation logs carries a `tag` from EVENT_TAGS. The tag gives the event's default `kind`
 // and `importance` (0 routine, 1 notable, 2 major; `major` is importance 2). The News tab's topic chips
 // come from TOPIC_OF_TAG. Outcome events are classified from their effects by `outcome_tag`, with the
-// money amount appended to the text. Pure data and pure functions.
+// money amount appended to the text.
+//
+// Pure data and pure functions, except `on_affinity`, the friendship rule run after every relationship bump.
+// Nothing here reads the rest of the engine (not even G.agent or G.clock), as in the Python module.
 (function (G) {
   "use strict";
   const { hasOwn, commas, firstName, PyError } = G.py;
@@ -15,6 +18,7 @@
   const FRIEND_AT = 40; // an acquaintance or coworker becomes a friend when affinity rises to this
   const RIFT_AT = 0; // a friend or partner falls out when affinity drops below this
   const RIFT_GAP_DAYS = 7; // at most one falling-out per pair in this many game days
+  const TICKS_PER_DAY = 24 * 60; // a tick is a game minute (clock.MINUTES_PER_DAY; not read, see the header)
 
   // tag -> [kind, default importance]. Every event uses one of these tags; a call may override importance.
   const EVENT_TAGS = {
@@ -169,16 +173,51 @@
       agents: ids, place: place ?? null, at: at !== null && at !== undefined ? [at[0], at[1]] : null };
   }
 
+  const FRIENDS_FROM = ["acquaintance", "coworker"]; // the kinds of relationship that can grow into a friendship
+  const RIFT_KINDS = ["friend", "partner"]; // ... and the ones that can end in a falling-out
+
+  // The pair's key in sim._rifts: both ids in code-unit order, joined by "|" (ids never contain it).
+  const rift_key = (a_id, b_id) => (a_id < b_id ? `${a_id}|${b_id}` : `${b_id}|${a_id}`);
+
   // Called at the end of every relationship bump with a's affinity to b before and after it.
   //
-  // P0: does nothing. P3 adds the friendship and falling-out rule here (FRIEND_AT, RIFT_AT, RIFT_GAP_DAYS).
+  // An acquaintance or coworker whose affinity rises to FRIEND_AT becomes a friend, on both sides (a side that
+  // is family or a partner keeps its kind), with one `new_friend` event. A friend or partner whose affinity
+  // drops below RIFT_AT falls out (`falling_out`; the kind stays), at most once per pair in RIFT_GAP_DAYS game
+  // days: sim._rifts maps rift_key(a, b) to the tick of the pair's last falling-out (a Map, made on first use).
+  // No fork reads a relationship's kind, so no decision changes. Unknown characters (or a city with nobody)
+  // do nothing.
   function on_affinity(sim, a_id, b_id, before, after) {
+    const agents = (sim && sim.agents) || new Map();
+    const a = agents.get(a_id) ?? null, b = agents.get(b_id) ?? null;
+    const rel = a !== null && b !== null ? a.relationships.get(b_id) ?? null : null;
+    if (rel === null) return null;
+    const kind = rel.kind; // RelationKind values are the strings themselves
+    if (FRIENDS_FROM.includes(kind) && before < FRIEND_AT && FRIEND_AT <= after) {
+      const friend = "friend"; // RelationKind.FRIEND, without reading G.agent
+      rel.kind = friend;
+      const back = b.relationships.get(a_id) ?? null;
+      if (back !== null && FRIENDS_FROM.includes(back.kind)) back.kind = friend;
+      const text = `${a.name} and ${b.name} have become friends.`;
+      sim.event(text, a, null, { tag: "new_friend", agents: [b.id] });
+      b.remember(sim.clock.stamp(), text);
+    } else if (RIFT_KINDS.includes(kind) && before >= RIFT_AT && RIFT_AT > after) {
+      let rifts = sim._rifts ?? null;
+      if (rifts === null) rifts = sim._rifts = new Map();
+      const key = rift_key(a_id, b_id);
+      const last = rifts.get(key) ?? null;
+      if (last !== null && sim.clock.tick - last < RIFT_GAP_DAYS * TICKS_PER_DAY) return null;
+      rifts.set(key, sim.clock.tick);
+      const text = `${a.name} and ${b.name} have fallen out.`;
+      sim.event(text, a, null, { tag: "falling_out", agents: [b.id] });
+      b.remember(sim.clock.stamp(), text);
+    }
     return null;
   }
 
   G.chronicle = {
-    BIG_MONEY, MONEY_SWING, INJURY, FRIEND_AT, RIFT_AT, RIFT_GAP_DAYS, EVENT_TAGS, GOD_ONLY_TAGS, FULL_NAME_TAGS,
-    TOPICS, TOPIC_OF_KIND, TOPIC_OF_TAG, kind_of, importance_of, money_of, outcome_tag, money_suffix,
-    outcome_event, make_event, on_affinity,
+    BIG_MONEY, MONEY_SWING, INJURY, FRIEND_AT, RIFT_AT, RIFT_GAP_DAYS, TICKS_PER_DAY, EVENT_TAGS, GOD_ONLY_TAGS,
+    FULL_NAME_TAGS, TOPICS, TOPIC_OF_KIND, TOPIC_OF_TAG, kind_of, importance_of, money_of, outcome_tag,
+    money_suffix, outcome_event, make_event, FRIENDS_FROM, RIFT_KINDS, rift_key, on_affinity,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

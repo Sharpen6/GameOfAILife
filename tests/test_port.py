@@ -5,7 +5,9 @@ port/build.py inlines it with the client into port/dist/millbrook.html. These te
 
 * node parity: the Rng(7920) vector and every Rng helper; the seed-1 city equals tests/fixtures/city_seed1.json,
   tiles_sha1 included; the recursive key sets of LocalHost's welcome, state, stats, agent and home messages
-  equal the Python server's for seed 1, at the start and after a game day;
+  equal the Python server's for seed 1, at the start and after a game day; LocalHost answers odd God messages
+  as GameServer does; with the same dice the two engines live the same days, event for event, down to the
+  stats pushes' samples and the final stats message; chronicle.on_affinity's rule case by case;
 * a 3-day JS run of the 60 people through LocalHost raises nothing and every fork has four options;
 * the build reads its stylesheets and scripts from client/index.html (today's, and one in the PLAN 3.12 order),
   and the page it writes has no http(s):// URL and no href="character.html;
@@ -17,6 +19,7 @@ The node tests skip when node is absent; the browser check skips without Playwri
 
 from __future__ import annotations
 
+import collections
 import importlib.util
 import json
 import os
@@ -27,7 +30,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gameofailife import stats as py_stats
 from gameofailife.rng import Rng, r2
 from gameofailife.server import GameServer
 from gameofailife.sim import Simulation
@@ -48,7 +50,7 @@ PLAN_STYLES = ["style.css", "view/view.css", "dashboard.css"]
 PLAN_SCRIPTS = [f"view/{name}.js" for name in ("proj", "art", "buildings", "actors", "scene", "movers", "camera",
                                                 "minimap", "view")] + ["dashboard.js", "game.js"]
 
-# PLAN 3.8: the `stats` message, for as long as the Python engine cannot make one (P3 adds stats.stats_json).
+# PLAN 3.8: the `stats` message's shape, which LocalHost's must have as well as Python's.
 _COUNTERS = {"asked": 0, "in_time": 0, "timeouts": 0, "late": 0, "withdrawn": 0, "against_habit": 0,
              "avg_seconds": 0.0}
 STATS_SCHEMA = {
@@ -154,11 +156,9 @@ def python_messages(seed: int = 1, days: float = 0) -> dict:
            "state": {"type": "state", "speed": server.speed, "state": state, "events": events, "forks": forks},
            "agent": server._god({"type": "get_agent", "agent_id": "dana"}),
            "home": server._god({"type": "get_home", "home_id": "main_20"}),
+           "stats": server._god({"type": "get_stats"}),
+           "decisions": server._god({"type": "get_decisions", "limit": 5}),
            "agent_ids": list(sim.agents)}
-    if hasattr(py_stats, "stats_json"):
-        out["stats"] = sim.stats_json(full=True)
-    if hasattr(py_stats, "decisions"):
-        out["decisions"] = server._god({"type": "get_decisions", "limit": 5})
     return json.loads(json.dumps(out))
 
 
@@ -264,15 +264,10 @@ class MessageSchemas(unittest.TestCase):
         only_js, only_py = key_diff(js, py, rename)
         self.assertEqual((only_js, only_py), ([], []), f"{what}: keys only in JS / only in Python")
 
-    def _welcome(self, js, py):
-        js = dict(js)
-        if "stats" not in py and not hasattr(py_stats, "stats_json"):
-            # The JS welcome carries `stats` (PLAN 3.9); the Python one does once P3 adds stats.stats_json.
-            self.assertSameKeys(js.pop("stats"), STATS_SCHEMA, "welcome.stats")
-        return js
-
     def test_welcome(self):
-        self.assertSameKeys(self._welcome(self.js["welcome"], self.py["welcome"]), self.py["welcome"], "welcome")
+        self.assertSameKeys(self.js["welcome"], self.py["welcome"], "welcome")
+        self.assertSameKeys(self.js["welcome"]["stats"], STATS_SCHEMA, "welcome.stats against PLAN 3.8")
+        self.assertIs(self.js["welcome"]["stats"]["full"], True)
         self.assertEqual(self.js["welcome"]["host"], {"kind": "browser", "controllers": False})
         self.assertEqual(self.js["welcome"]["req_id"], 1)
 
@@ -283,7 +278,7 @@ class MessageSchemas(unittest.TestCase):
         self.assertEqual(len(frame["state"]["agents"]), 60)
 
     def test_stats(self):
-        want = self.py.get("stats", STATS_SCHEMA)
+        want = self.py["stats"]
         self.assertSameKeys(self.js["get_stats"], want, "get_stats")
         self.assertSameKeys(self.js["stats"], want, "stats push")
         self.assertSameKeys(self.js["get_stats"], STATS_SCHEMA, "get_stats against PLAN 3.8")
@@ -305,16 +300,19 @@ class MessageSchemas(unittest.TestCase):
             self.assertEqual(reply["type"], "decisions")
         self.assertIsNone(self.js["decisions"]["agent_id"])
         self.assertEqual(self.js["decisions_agent"]["agent_id"], "dana")
-        if "decisions" in self.py:
-            self.assertSameKeys(self.js["decisions"], self.py["decisions"], "decisions")
+        self.assertSameKeys(self.js["decisions"], self.py["decisions"], "decisions")
 
     def test_after_a_day(self):
         js, py = self.js_day, self.py_day
         ids = set(js["agent_ids"]) | set(py["agent_ids"])
-        self.assertSameKeys(self._welcome(js["welcome"], py["welcome"]), py["welcome"], "welcome after a day", ids)
+        self.assertSameKeys(js["welcome"], py["welcome"], "welcome after a day", ids)
         self.assertSameKeys(js["state"], py["state"], "state after a day", ids)
         self.assertSameKeys(js["agent"], py["agent"], "agent after a day", ids)
-        self.assertSameKeys(js["get_stats"], py.get("stats", STATS_SCHEMA), "stats after a day", ids)
+        self.assertSameKeys(js["get_stats"], py["stats"], "stats after a day", ids)
+        self.assertSameKeys(js["get_stats"], STATS_SCHEMA, "stats after a day against PLAN 3.8")
+        pushed = js["stats"]["samples"]  # the first push carries every sample so far: one per whole hour
+        self.assertGreaterEqual(len(pushed), 24)
+        self.assertEqual(pushed, js["get_stats"]["samples"][:len(pushed)])
         self.assertTrue(js["agent"]["agent"]["forks"], "Dana decided nothing in a day")
 
     def test_god_replies(self):
@@ -395,7 +393,8 @@ class DiceSim(Simulation):
 
 
 def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
-    """parity.cjs `trace` in Python: every event and decided fork, and every agent at each whole hour."""
+    """parity.cjs `trace` in Python: every event and decided fork, every agent at each whole hour, the samples a
+    stats push would carry at each midnight, and the full stats message and the richest person at the end."""
     from gameofailife.agent import NEEDS
     from gameofailife.clock import MINUTES_PER_DAY
 
@@ -404,7 +403,15 @@ def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
         for a in sim.agents.values():
             if a.is_adult:
                 a.money, a.savings = -3000.0, 0.0
-    out = {"events": [], "forks": [], "hours": []}
+    if scenario == "bonds":
+        from gameofailife.chronicle import FRIEND_AT, FRIENDS_FROM, RIFT_AT, RIFT_KINDS
+        for a in sim.agents.values():
+            for rel in a.relationships.values():
+                if rel.kind.value in FRIENDS_FROM:
+                    rel.affinity = FRIEND_AT - 1.0
+                elif rel.kind.value in RIFT_KINDS:
+                    rel.affinity = RIFT_AT + 1.0
+    out = {"events": [], "forks": [], "hours": [], "pushes": []}
 
     def drain():
         events, forks, _ = sim.drain()
@@ -422,7 +429,11 @@ def python_trace(seed: int, days: int, dice: int, scenario: str = "") -> dict:
                 [a.id, a.x, a.y, a.state, a.activity, a.inside, round(a.money, 2), round(a.savings, 2),
                  round(a.health, 2), [round(a.needs[n], 2) for n in NEEDS], a.household_id,
                  sim.households[a.household_id].home_id] for a in sim.agents.values()]])
-    return out
+        if sim.clock.minute_of_day == 0:
+            out["pushes"].append(sim.stats_json(full=False)["samples"])
+    out["stats"] = sim.stats_json(full=True)
+    out["richest"] = sim.stats.richest
+    return json.loads(json.dumps(out))
 
 
 @needs_node
@@ -447,13 +458,154 @@ class LockstepRun(unittest.TestCase):
                 self.assertEqual(js_row, row, f"tick {tick}: {row[0]} differs (JS first)")
         self.assertEqual(len(py["hours"]), len(js["hours"]))
         self.assertGreater(len(py["forks"]), 100)
+        # God's dashboard: each push's samples (each sample in one push only), then the whole stats message.
+        self.assertEqual(len(js["pushes"]), len(py["pushes"]))
+        for day, (got, want) in enumerate(zip(js["pushes"], py["pushes"]), 1):
+            self.assertEqual(got, want, f"the stats push at midnight {day} carries other samples")
+        pushed = [s["tick"] for push in py["pushes"] for s in push]  # every whole hour once, up to the last midnight
+        self.assertEqual(pushed, [t for t, _ in py["hours"]][:len(pushed)])
+        self.assertEqual(pushed[-1] % (24 * 60), 0)
+        for key in py["stats"]:
+            self.assertEqual(js["stats"][key], py["stats"][key], f"stats.{key} differs (JS first)")
+        self.assertEqual(js["stats"], py["stats"])
+        self.assertEqual(js["richest"], py["richest"])
+        self.assertIsNotNone(py["richest"])
+        return js, py
+
+    def tags(self, trace):
+        return collections.Counter(e.split(" ", 2)[1] for e in trace["events"])
 
     def test_three_days(self):
         self.assertLockstep(1, 3, 5)
 
     def test_ten_days_in_debt(self):
         # Every adult starts $3,000 in debt: the Sunday charges, arrears, hardship and the housing extras.
-        self.assertLockstep(1, 10, 2, "debt")
+        js, py = self.assertLockstep(1, 10, 2, "debt")
+        self.assertGreater(self.tags(py)["richest"], 0)  # a new richest person makes a headline
+        self.assertEqual(len(py["stats"]["samples"]), 168)  # 7 days of hourly samples are kept, no more
+
+    def test_eight_days_of_friendships_and_rifts(self):
+        # Every acquaintance and coworker starts one point short of a friendship, every friend and partner one
+        # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts.
+        js, py = self.assertLockstep(1, 8, 3, "bonds")
+        tags = self.tags(py)
+        self.assertGreater(tags["new_friend"], 0)
+        self.assertGreater(tags["falling_out"], 0)
+
+
+DAY = 24 * 60
+# chronicle.on_affinity's cases, as [a_id, b_id, before, after, tick, kind_ab, kind_ba] (see parity.cjs affinity).
+AFFINITY_STEPS = [
+    ["dana", "omer", 39, 40, 1000, None, None],  # coworkers rise to 40: friends, both sides
+    ["dana", "omer", 0.5, -0.5, 1100, None, None],  # friends drop below 0: a falling-out
+    ["omer", "dana", 0, -1, 1100 + 6 * DAY, None, None],  # the same pair from the other side, 6 days on: no rift
+    ["dana", "omer", 0, -2, 1100 + 7 * DAY - 1, None, None],  # a minute short of 7 days: still none
+    ["dana", "omer", 0, -2, 1100 + 7 * DAY, None, None],  # 7 days on: the next falling-out
+    ["dana", "sara", 30, 45, 1200, None, "family"],  # the other side is family: it stays family
+    ["dana", "lina", 39.9, 40, 1300, None, "-"],  # no relationship back: only dana's side becomes a friend
+    ["dana", "yossi", 0, -0.1, 1400, None, None],  # partners fall out and stay partners
+    ["dana", "noa", 0, -5, 1500, None, None],  # family never falls out ...
+    ["dana", "noa", 39, 41, 1600, None, None],  # ... nor becomes a friend
+    ["dana", "nobody", 39, 41, 1700, None, None],  # an unknown character: nothing
+    ["nobody", "dana", 0, -1, 1700, None, None],
+    ["dana", "gal", 41, 39, 1800, None, None],  # a friend still at or above 0: nothing
+    ["dana", "ari", -1, -2, 1900, None, None],  # already below 0: no new falling-out
+    ["yossi", "rina", 40, 41, 2000, None, None],  # a coworker already at 40: no new friendship
+    ["yossi", "rina", 38, 39.99, 2100, None, None],  # ... nor one still short of it
+    ["noa", "amira", 39, 40, 2200, "acquaintance", "acquaintance"],  # acquaintances become friends too
+    ["amira", "noa", 0, -1, 2300, None, None],  # and new friends can fall out
+]
+
+
+def python_affinity(seed: int, steps: list) -> list:
+    """parity.cjs `affinity` in Python: chronicle.on_affinity on the same scripted bumps."""
+    from gameofailife import chronicle
+    from gameofailife.agent import RelationKind
+
+    sim = Simulation(seed=seed)
+    sim.drain()
+
+    def rel(x, y):
+        return sim.agents[x].relationships.get(y) if x in sim.agents else None
+
+    out = []
+    for a_id, b_id, before, after, tick, kind_ab, kind_ba in steps:
+        sim.clock.tick = tick
+        if kind_ab:
+            rel(a_id, b_id).kind = RelationKind(kind_ab)
+        if kind_ba == "-":
+            del sim.agents[b_id].relationships[a_id]
+        elif kind_ba:
+            rel(b_id, a_id).kind = RelationKind(kind_ba)
+        if rel(a_id, b_id):
+            rel(a_id, b_id).affinity = after
+        chronicle.on_affinity(sim, a_id, b_id, before, after)
+        events, _, _ = sim.drain()
+        b = sim.agents.get(b_id)
+        out.append({"events": [[e["tick"], e["tag"], e["importance"], e["text"], e["agent"], e["agents"], e["place"]]
+                               for e in events],
+                    "kinds": [r.kind.value if (r := rel(a_id, b_id)) else None,
+                              r.kind.value if (r := rel(b_id, a_id)) else None],
+                    "memory": (b.memory[-1] if b.memory else None) if b else None})
+    out.append({"rifts": sorted([k, v] for k, v in getattr(sim, "_rifts", {}).items())})
+    return json.loads(json.dumps(out))
+
+
+def python_quiet(seed: int, frames: int) -> dict:
+    """parity.cjs `quiet` in Python, up to the God view: GameServer's frames on a hand-driven monotonic clock."""
+    from unittest import mock
+
+    from gameofailife import server as py_server
+    from gameofailife.clock import TICKS_PER_REAL_SECOND
+
+    clock = [1000.0]
+    with mock.patch.object(py_server, "time", mock.Mock(monotonic=lambda: clock[0])):
+        sim = Simulation(seed=seed)
+        server = GameServer(sim, speed=16)
+        for _ in range(frames):  # GameServer._run's loop, without the sleep
+            clock[0] += py_server.FRAME_SECONDS
+            server._pending_ticks += py_server.FRAME_SECONDS * TICKS_PER_REAL_SECOND * server.speed
+            stepped = False
+            while server._pending_ticks >= 1:
+                server._pending_ticks -= 1
+                sim.step()
+                stepped = True
+            server._flush(stepped)
+    return {"tick": sim.clock.tick, "samples": len(sim.stats.samples), "pushed": sim.stats._pushed}
+
+
+@needs_node
+class StatsCadence(unittest.TestCase):
+    def test_pushes_with_nobody_watching(self):
+        # 1,000 frames at speed 16 is about 32 game hours and 16 pushes that fall due with no view to take them.
+        js = node("quiet", 1, 1000)
+        py = python_quiet(1, 1000)
+        self.assertEqual({k: js[k] for k in py}, py)
+        self.assertGreater(py["pushed"], 0)  # the samples went to nobody ...
+        self.assertEqual(len(js["welcome_samples"]), js["samples"])  # ... the welcome has them all ...
+        self.assertTrue(js["push_samples"])  # ... and the view's first push only what came after
+        self.assertEqual(js["push_samples"][0], js["pushed"] + 60)
+
+
+@needs_node
+class FriendshipRule(unittest.TestCase):
+    """chronicle.on_affinity, the friendship and falling-out rule P3 added, case by case in both engines."""
+
+    def test_scripted_bumps(self):
+        js = node("affinity", 1, json.dumps(AFFINITY_STEPS))
+        py = python_affinity(1, AFFINITY_STEPS)
+        self.assertEqual(len(js), len(py))
+        for step, got, want in zip(AFFINITY_STEPS + ["rifts"], js, py):
+            self.assertEqual(got, want, step)
+        tags = [[e[1] for e in row["events"]] for row in py[:-1]]
+        self.assertEqual(tags, [["new_friend"], ["falling_out"], [], [], ["falling_out"], ["new_friend"],
+                                ["new_friend"], ["falling_out"], [], [], [], [], [], [], [], [],
+                                ["new_friend"], ["falling_out"]])
+        self.assertEqual(py[0]["kinds"], ["friend", "friend"])
+        self.assertEqual(py[5]["kinds"], ["friend", "family"])
+        self.assertEqual(py[6]["kinds"], ["friend", None])
+        self.assertEqual(py[7]["kinds"], ["partner", "partner"])
+        self.assertEqual(py[-1]["rifts"], [["amira|noa", 2300], ["dana|omer", 1100 + 7 * DAY], ["dana|yossi", 1400]])
 
 
 @needs_node
