@@ -1,9 +1,11 @@
 """Getting around: travel times, the usual way to work and what it costs a week, and the nearest open place.
 
-Everything reads the town's O(1) walk fields through `sim.town.walk_minutes(xy, place_id)`. P0 writes the
-simple versions: a trip takes ceil(walk / speed) and the bus counts as walking. P1 adds roads, junction
-waits and buses behind the same signatures. `Simulation` has delegating methods of the same names.
-Nothing here imports the simulation or the town, so `sim.py` can import this module.
+Walking and running read the town's O(1) walk fields (`sim.town.walk_minutes(xy, place_id)`). Cars and taxis
+follow the roads (`sim.town.drive_length`, memoized on the shared map) and lose about a minute at each
+junction's lights; an ambulance doesn't wait. A bus trip is the walk to the stop, the wait, the ride and the
+walk from the stop (`transit.best_trip`), and falls back to walking when the bus doesn't save
+transit.MIN_SAVING minutes. `Simulation` has delegating methods of the same names. Nothing here imports the
+simulation or the town, so `sim.py` can import this module.
 """
 
 from __future__ import annotations
@@ -23,29 +25,72 @@ SPEEDS = {"walk": 1, "run": 2, "car": 4, "taxi": 4, "ambulance": 4, "bus": 1}  #
 TAXI_FARE = 12  # flat fare door to door
 TRIP_COST = {"walk": 0, "car": 2, "bus": 2 * BUS_FARE}  # a workday's commute, there and back, by usual mode
 UNREACHABLE = 65535  # what the walk fields give for a tile that cannot reach the place
+ROAD_MODES = ("car", "taxi", "ambulance")  # they follow the roads
+LIGHT_WAIT = 1  # minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
+BUS_MIN_WALK = 25  # the bus is someone's usual way to work only when the walk is longer than this
+
+
+def bus_trip(sim: Simulation, agent: Agent, place_id: str,
+             worst: bool = False) -> tuple[int, str, str, str] | None:
+    """The bus trip the character would make to a place leaving now: (minutes door to door, line, board stop,
+    alight stop), or None when they are inside it or no bus saves transit.MIN_SAVING minutes over walking.
+    With `worst`, the slowest departure minute's trip instead (see transit.best_trip)."""
+    if agent.inside == place_id:
+        return None
+    return transit.best_trip(sim.town, (agent.x, agent.y), place_id, sim.clock.tick, worst)
 
 
 def travel_minutes(sim: Simulation, agent: Agent, place_id: str, mode: str, worst: bool = False) -> int:
     """Minutes from where the character is to a place by `mode`: 0 when already inside.
 
-    P0: ceil(walk / SPEEDS[mode]), with the bus as walking; `worst` (count a full headway as the bus
-    wait) changes nothing until P1. UNREACHABLE when the place cannot be reached on foot.
+    walk and run: ceil(walk / speed). car and taxi: ceil(road tiles / 4) plus LIGHT_WAIT at each junction on
+    the drive path; ambulance: the same without the lights. bus: the trip leaving now (`bus_trip`), or with
+    `worst` the slowest departure minute's trip, and walking when no bus saves transit.MIN_SAVING minutes.
+    Any other mode walks. UNREACHABLE when the place cannot be reached on foot.
     """
     if agent.inside == place_id:
         return 0
-    walk = sim.town.walk_minutes((agent.x, agent.y), place_id)
+    xy = (agent.x, agent.y)
+    walk = sim.town.walk_minutes(xy, place_id)
     if walk >= UNREACHABLE:
         return UNREACHABLE
+    if mode in ROAD_MODES:
+        tiles, junctions = sim.town.drive_length(xy, place_id)
+        if tiles >= UNREACHABLE:
+            return UNREACHABLE
+        return -(-tiles // SPEEDS[mode]) + (junctions * LIGHT_WAIT if mode != "ambulance" else 0)
+    if mode == "bus":
+        trip = bus_trip(sim, agent, place_id, worst)
+        return trip[0] if trip else walk
     return -(-walk // SPEEDS.get(mode, 1))
 
 
 def usual_mode(sim: Simulation, agent: Agent) -> str:
-    """How the character usually gets to work: "car" | "bus" | "walk". P0: the car if they own one."""
-    return "car" if agent.owns_car else "walk"
+    """How the character usually gets to work: "car" | "bus" | "walk".
+
+    The car if they own one. Otherwise the bus when the walk from home to the job (or school) is longer than
+    BUS_MIN_WALK minutes and, whenever they leave, a bus saves transit.MIN_SAVING minutes or more (the
+    worst-case trip from home is at most walk - MIN_SAVING). Otherwise walking. It depends only on where they
+    live (`sim.home_of`, a place id) and work, not on where they are now.
+    """
+    if agent.owns_car:
+        return "car"
+    job = agent.job
+    if not job:
+        return "walk"
+    home = sim.town.places[sim.home_of(agent)].entry
+    walk = sim.town.walk_minutes(home, job.place_id)
+    if BUS_MIN_WALK < walk < UNREACHABLE and transit.best_trip(sim.town, home, job.place_id, 0, worst=True):
+        return "bus"
+    return "walk"
 
 
 def commute_minutes(sim: Simulation, agent: Agent) -> int | None:
-    """Minutes from here to the job (or school) by the usual mode, counting the worst bus wait; None without one."""
+    """Minutes from here to the job (or school) by the usual mode, counting the worst bus wait; None without one.
+
+    A bus commuter's minutes are the worst-case trip from here (walking, when no bus saves time from here), so
+    setting off that long before the shift is always in time whatever the timetable.
+    """
     if not agent.job:
         return None
     return travel_minutes(sim, agent, agent.job.place_id, usual_mode(sim, agent), worst=True)

@@ -429,6 +429,7 @@ class FakeTown:
         self.places = {p.id: p for p in places}
         self.cut_off = set(cut_off)
         self.walls = {(p.x, p.y) for p in places}
+        self.memo = {}  # P1: transit caches its bus tables on the town
 
     def walk_minutes(self, xy, place_id: str) -> int:
         assert isinstance(xy, tuple) and len(xy) == 2, xy
@@ -437,9 +438,19 @@ class FakeTown:
         ex, ey = self.places[place_id].entry
         return abs(xy[0] - ex) + abs(xy[1] - ey)
 
+    # P1 also reads these (PLAN 3.10: drive paths and the walk fields of the bus stops): roads run everywhere
+    # with no junctions, and the bus stops are far away up the map, so no bus beats walking here.
+    def drive_length(self, xy, place_id: str) -> tuple[int, int]:
+        return self.walk_minutes(xy, place_id), 0
+
+    def steps(self, xy, goal) -> int:
+        return 65535 if xy in self.walls else abs(xy[0] - goal[0]) + abs(xy[1] - goal[1])
+
 
 def fake_sim(places: list[FakePlace], hour: float = 12.0, cut_off: tuple[str, ...] = ()):
-    return SimpleNamespace(town=FakeTown(places, cut_off), clock=SimpleNamespace(hour=hour))
+    # Every fake character lives at the place "home" (on STREET it is at (0, 0)).
+    return SimpleNamespace(town=FakeTown(places, cut_off), clock=SimpleNamespace(hour=hour, tick=int(hour * 60)),
+                           home_of=lambda agent: "home")
 
 
 def fake_agent(x: int = 0, y: int = 0, inside: str | None = None, car: bool = False, job=None, age: int = 40):
@@ -646,8 +657,9 @@ class TestOnTheRealTown(unittest.TestCase):
         walk = self.town.walk_minutes(tuple(home.entry), "office")
         self.assertTrue(0 < walk < travel.UNREACHABLE)
         self.assertEqual(travel.travel_minutes(sim, me, "office", "walk"), walk)
-        self.assertEqual(travel.travel_minutes(sim, me, "office", "car"), -(-walk // 4))
-        self.assertEqual(travel.commute_minutes(sim, me), -(-walk // 4))
+        tiles, junctions = self.town.drive_length(tuple(home.entry), "office")  # P1: cars keep to the roads
+        self.assertEqual(travel.travel_minutes(sim, me, "office", "car"), -(-tiles // 4) + junctions)
+        self.assertEqual(travel.commute_minutes(sim, me), -(-tiles // 4) + junctions)
         self.assertEqual(travel.travel_minutes(sim, me, "main_20", "walk"), 0)
         walks = {p.id: self.town.walk_minutes(tuple(home.entry), p.id) for p in self.town.places.values()}
         cafes = sorted((walks[p.id], p.id) for p in self.town.places.values()
