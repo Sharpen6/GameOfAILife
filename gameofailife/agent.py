@@ -118,6 +118,7 @@ class Agent:
     needs: dict[str, float] = field(default_factory=lambda: {n: 75.0 for n in NEEDS})
     relationships: dict[str, Relationship] = field(default_factory=dict)
     goal: dict | None = None  # {"name", "target", "saved"}
+    savings: float = 0.0  # money put aside on payday with no goal to save for
     controller: str | None = None  # name of the connected controller, if any
     # Movement and activity state, run by the simulation.
     state: str = "idle"  # idle, deciding, travelling, busy
@@ -164,6 +165,7 @@ class Agent:
             "car": self.owns_car,
             "phone": {"condition": "cracked" if self.goal and "phone" in self.goal["name"] else "fine"},
             "money": round(self.money, 2),
+            "savings": round(self.savings, 2),
             "savings_goal": self.goal,
             "groceries_at_home": household.groceries,
         }
