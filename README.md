@@ -588,7 +588,7 @@ The browser tests need Node and Playwright with a Chromium, and the full app's t
     node tests/browser/dashboard_smoke.cjs    # the dashboard on its fixture
     node tests/browser/god_view_smoke.cjs     # the God view against the real server
 
-`FULL_SHOTS=docs/screenshots node tests/browser/full_app_smoke.cjs` also refreshes the screenshots in this README. `client/dev/view.html` and `client/dev/dashboard.html` open the city view and the dashboard on fixtures, with no server.
+`FULL_SHOTS=docs/screenshots node tests/browser/full_app_smoke.cjs` also refreshes the screenshots in this README. `client/dev/view.html` and `client/dev/dashboard.html` open the city view and the dashboard on fixtures, with no server. The city view's fixture is the real seed-1 city on its first morning; after a change to the simulation, `python3 -m tests.test_integration --write-fixture` makes it again (a test fails until then).
 
 ## What's in this build
 
@@ -628,7 +628,7 @@ This build answers what the first players asked for: homes worth buying and home
 - Play-style profiles that learn from a controller's choices and that God can edit.
 - Money that moves: wages for each shift with income tax withheld, a weekly pension for retirees, weekly rent or property tax and bills, groceries, outings, home repairs and moves, and money put aside on payday.
 - Health that drops when characters go hungry or exhausted, or live in a neglected home, hospital visits, and deaths from old age or from health running out.
-- Text messages and invitations between characters, sent by controllers. Characters also invite a friend to Corner Cafe on their own.
+- Text messages and invitations between characters, sent by controllers. Characters also invite a friend out to a cafe on their own.
 
 **Not built yet (design only)**
 
@@ -653,7 +653,7 @@ GameOfAILife/
 │   ├── town.py              the 80 x 50 map: streets, districts, the 39 places, trees
 │   ├── cast.py              the starter cast: about 60 people in 27 households
 │   ├── agent.py             characters: needs, jobs, households, relationships, play style
-│   ├── travel.py            getting around: walking, running and driving times, the lights
+│   ├── travel.py            getting around: trip times on foot, by car, taxi and bus, the lights
 │   ├── transit.py           the bus lines, stops and timetable, and the daily flights
 │   ├── housing.py           homes, their condition, the market, moves, rent, tax and emergencies
 │   ├── housing_forks.py     the four housing forks

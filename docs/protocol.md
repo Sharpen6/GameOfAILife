@@ -542,7 +542,7 @@ free, they meet an `invite` fork (accept, decline, suggest another day, ignore),
 which reaches their controller as a normal [fork](#fork) unless the Director
 decides it from habit. The guest only meets that fork between 06:00 and 22:00
 (and before 19:00 for characters under 18, who stay home after curfew), not
-while they should be setting off for a shift (counting the walk by way of the
+while they should be setting off for a shift (counting the trip by way of the
 invite's place), and only if the place will be open when they get there. Until
 then the invite waits. When the guest decides, your controller gets an
 [`invite_answer`](#invite_answer) push. An invite not answered within 120 game
@@ -554,13 +554,13 @@ If the host dies, their pending invites expire at once, and a guest's `invite`
 fork for one of them that is still being asked is withdrawn: its `choose` gets
 `fork withdrawn`.
 
-Characters also invite friends on their own. When a payday
-`"Go out for drinks with <friend>"` option or a lonely
-`"Invite <friend> to Corner Cafe"` option is chosen (by habit, default, timeout
-or a controller), the character invites that friend to Corner Cafe and heads
-there. The host's controller first learns that invite's id from the
-`invite_answer` push, since the `choose` `ack` carries none. Such an invite also
-expires as soon as the host stops hanging out at the cafe.
+Characters also invite friends on their own. When a payday option to go out for
+drinks with a friend or a lonely `"Invite <friend> to <cafe>"` option is chosen
+(by habit, default, timeout or a controller), the character invites that friend
+to the cafe (the invite's `place`) and heads there. The host's controller first
+learns that invite's id from the `invite_answer` push, since the `choose` `ack`
+carries none. Such an invite also expires as soon as the host stops hanging out
+at the cafe.
 
 ### Controller's other messages
 
@@ -683,7 +683,7 @@ Characters without a controller play their profile default.)
 | `agent_id`         | Which of your characters is deciding. |
 | `kind`             | One of `invite`, `work`, `hunger`, `sleep`, `repair`, `payday`, `groceries`, `housing_trouble`, `house_hunt`, `upkeep`, `lonely`, `free_time`. `house_hunt` (buy or rent a better home, haggle, look for a cheaper one, or stay) and `housing_trouble` (the household is in the red after the week's bills, or its home is falling apart and the renovation costs more than it has) are major forks: the Director settles them by habit only on a clear lead, so they reach controllers more often. `repair` is an emergency at home (a burst pipe, a broken boiler, a leaking roof, an electrical fault) and `upkeep` a home that is looking worn. |
 | `question`         | The situation in plain language. |
-| `options`          | Always exactly 4. `index` is what you send as `choice`; `label` is the option; `cost` is money spent up front; `travel_minutes` (game minutes) is present only when the option starts somewhere other than where the character is now; `household: true` is present when the cost comes out of the household's pooled money (its adults' money and savings) rather than the character's own pocket, as for a move or a repair. Outcome odds are never included. Options only send the character to a place that will be open when they get there, and a paid outing only when the place stays open for all of it. If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands. A paid outing that would no longer fit before closing is called off the same way (`"finds <place> about to close ($N refunded)."`). When that place is the option's first stop, the `cost` comes back and that choice's hidden outcomes are dropped. |
+| `options`          | Always exactly 4. `index` is what you send as `choice`; `label` is the option; `cost` is money spent up front; `travel_minutes` (game minutes, by the option's way of travel: a bus trip counts the walk to the stop, the wait, the ride and the walk from it) is present only when the option starts somewhere other than where the character is now; `household: true` is present when the cost comes out of the household's pooled money (its adults' money and savings) rather than the character's own pocket, as for a move or a repair. Outcome odds are never included. Options only send the character to a place that will be open when they get there, and a paid outing only when the place stays open for all of it. If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands. A paid outing that would no longer fit before closing is called off the same way (`"finds <place> about to close ($N refunded)."`). When that place is the option's first stop, the `cost` comes back and that choice's hidden outcomes are dropped. |
 | `time`             | Game time stamp. |
 | `deadline_seconds` | Always `5.0`, real seconds. |
 | `weather`          | `"clear"` or `"rain"`. |
@@ -707,13 +707,14 @@ and the character stands still.
 Some options move money besides their `cost`. In a `groceries` fork,
 `"Ask <name> to do the shopping"` shows `cost` 0, but if that person is free
 (idle or doing something leisurely, not asleep, working, deciding or due to
-leave for work) they go to Fresh Market at once, and the groceries cost $35,
-paid by the shopper or, if the shopper has less than that, by your character.
-If they are not free, nobody shops and nothing is paid. A payday
-`"Put $<amount> toward savings"` option, offered to a character with no
-savings goal, moves the money into `savings` (see [Possessions](#possessions)).
-A move goes through only if the home is still free when the household acts on
-it: otherwise the event says the household was too late, and nothing is paid.
+leave for work) they go to a market at once (the `errand` event names it), and
+the groceries cost $35, paid by the shopper or, if the shopper has less than
+that, by your character. If they are not free, nobody shops and nothing is paid.
+A payday `"Put $<amount> toward savings"` option, offered to a character with
+no savings goal, moves the money into `savings` (see
+[Possessions](#possessions)). A move goes through only if the home is still free
+when the household acts on it: otherwise the event says the household was too
+late, and nothing is paid.
 
 ### `message`
 
@@ -1005,7 +1006,7 @@ The live snapshot, in the God welcome and every state frame.
 | `weather` | `clear` or `rain`. |
 | `lights`  | `{"ns": color, "ew": color}` for every junction: the north-south and east-west lights, each `green`, `yellow` or `red`. |
 | `plane`   | `{"progress": 0..1, "from": "Riverton", "to": "Lakeside"}` during a flight, else `null`. |
-| `buses`   | The 8 buses: `[{"id", "line", "x", "y", "dir", "at_stop", "riders"}]`. `id` is `1a` to `1d` and `2a` to `2d`; `x`, `y` the road tile; `dir` the heading, `n`, `s`, `e` or `w`; `at_stop` the stop id while it stands at a stop with its doors open, else `null`; `riders` the number of people on board (0 in this build: the buses run to the timetable, but nobody boards yet). Positions are a pure function of the tick. |
+| `buses`   | The 8 buses: `[{"id", "line", "x", "y", "dir", "at_stop", "riders"}]`. `id` is `1a` to `1d` and `2a` to `2d`; `x`, `y` the road tile; `dir` the heading, `n`, `s`, `e` or `w`; `at_stop` the stop id while it stands at a stop with its doors open, else `null`; `riders` the number of people on board (the characters whose `riding` is that bus). Positions are a pure function of the tick. |
 | `agents`  | Every character, living or dead, see below. |
 | `lots`    | Only in the welcome and when changed (see [the rule](#state-frame)). Object of residential place id (a house or a block of flats) to `{"condition", "stage", "works", "moving"}`: `condition` 0..100 (a whole number that agrees with the stage), `stage` 0..4 (see [Housing](#housing)), `works` true while builders are on site (a repair or the landlord repainting) and `moving` true while a moving van stands outside after a move (3 game hours). |
 | `homes`   | Only in the welcome and when changed. Object of home id to `{"hh", "owner", "listing", "price", "value", "emergency"}`: `hh` the household id living there or `null` (vacant); `owner` `"landlord"` (let by the landlord), `"market"` (for sale, nobody's yet) or the owning household's id; `listing` `"for_sale"`, `"for_rent"` or `null` (also while it is under offer); `price` the asking price for sale or the weekly rent to let, else `null`; `value` the market value in dollars (base value x (0.7 + 0.003 x condition), to the nearest $50); `emergency` the kind of a live emergency (`leak`, `boiler`, `roof` or `electrics`) or `null`. |
@@ -1019,13 +1020,13 @@ An agent in `agents`:
 | `inside` | The place id the character is inside, or `null` (on the map). |
 | `state` | `idle`, `deciding`, `travelling`, `busy` or `dead`. |
 | `activity` | What they are doing, such as `work` (pupils' school day too), `sleep`, `eat_home`, `hang_out`, `viewing` (a home), `move_house` or `deciding`. |
-| `vehicle` | How they are moving: `walk`, `run` or `car`. |
+| `vehicle` | How they are moving: `walk`, `run`, `car`, `taxi`, `ambulance` or `bus` (a bus trip is `bus` from the walk to the stop to the walk from it; on board, `riding` names the bus). |
 | `mood`, `luck` | Rounded to integers. |
 | `controller` | The controller name, or `null`. |
 | `alive`, `age` | As on the [agent page](#agent-page). |
 | `home` | The home id of the character's household (see [Homes](#homes)). |
 | `car` | Whether the character owns a car. |
-| `riding` | The bus id while on board, else `null` (always `null` in this build). |
+| `riding` | The bus id while on board, else `null`. While riding, `x` and `y` are the bus's tile. |
 
 ### Event
 

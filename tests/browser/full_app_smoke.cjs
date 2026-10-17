@@ -21,8 +21,9 @@
 //     lands on that place
 //   - the LLM log fills with the controller's answers, with its name, model and reasons, and shows the late
 //     answer on the timed-out decision
-//   - a major event of the running city pops a News toast inside the window, and it is in the News tab (on a
-//     phone a burst of majors may fold straight into the "N more major events" card, which counts as the toast)
+//   - a major event of the running city pops a News toast inside the window: a card with its headline that is on
+//     screen (on a phone too, where a burst adds an "N more major events" card under the first headline), and
+//     the headline is in the News tab
 //   - no console errors and no horizontal scroll, checked along the way and at the end
 // The Claude controller (examples/claude_controller.py) is not needed.
 //
@@ -167,10 +168,11 @@ function startController(port) {
 // a house is on screen), the last state.homes and state.agents the page was sent (window.__net), and every major
 // toast that appears, with whether it sat inside the window (window.__toasts).
 //
-// A major card and the coalesced "N more major events" card both count, and each is read from the mutation
-// records, so a card that came and went within one task counts too: on a phone (one slot) two majors in one state
-// frame add the first card and fold it into the coalesced card at once, before an observer could find it in the
-// box. `shown` says whether the card was still on the page when the observer ran; `inside` is measured only then.
+// Major cards and the coalesced "N more major events" card are read from the mutation records, so a card that
+// came and went within one task is recorded too, as not shown: a page that added a headline card and folded it
+// into the coalesced card at once would show the player no headline, and the toast check counts only cards that
+// were on screen. `shown` says whether the card was still on the page when the observer ran; `inside` is
+// measured only then; `head` is the card's headline.
 function instrument() {
   const CV = window.CityView = window.CityView || {};
   let create = null;
@@ -209,7 +211,9 @@ function instrument() {
           if (t.nodeType !== 1 || t.__seen || !t.matches(".dash-toast.major, .dash-toast.more")) continue;
           t.__seen = true;
           const shown = t.isConnected, r = shown ? t.getBoundingClientRect() : null;
-          window.__toasts.push({ kind: t.classList.contains("more") ? "more" : "major", text: t.textContent.trim().slice(0, 160), shown,
+          const head = t.querySelector(".dash-ttext");
+          window.__toasts.push({ kind: t.classList.contains("more") ? "more" : "major", head: head ? head.textContent.trim() : "",
+            text: t.textContent.trim().slice(0, 160), shown,
             inside: shown ? r.width > 0 && r.left >= 0 && r.right <= innerWidth + 1 && r.top >= 0 && r.bottom <= innerHeight + 1 : null });
         }
       }
@@ -491,29 +495,24 @@ async function run(browser, name, size, touch) {
     await page.evaluate(c => { window.__view.setCamera({ x: c.x, y: c.y, zoom: c.zoom }); Dash.openTab("city"); }, cam0);
     if (touch) await page.evaluate(() => { const t = document.querySelector('#panel .dash-tab[data-tab="city"]'); if (t) t.click(); });
     await settled(page); // so the phone's picture of the toast can be taken the moment it is up
-    // For that picture the city runs at 2x until the toast: a phone shows one major card at a time, the next major
-    // turns it into an "N more major events" card, and the first evening's moves come a few game minutes apart.
-    if (touch && SHOTS) await page.click('#speed button[data-speed="2"]');
-    const toasted = await page.waitForFunction(() => window.__toasts.length > 0, null, { timeout: MAJOR_WAIT_MS, polling: 100 })
-      .then(() => true, () => false);
+    const headline = () => window.__toasts.some(t => t.kind === "major" && t.shown);
+    const toasted = await page.waitForFunction(headline, null, { timeout: MAJOR_WAIT_MS, polling: 100 }).then(() => true, () => false);
     if (touch && toasted && SHOTS) {
-      // the picture shows a headline when one is up within 20 s, else the coalesced card
-      await page.waitForFunction(() => document.querySelector("#toasts .dash-toast.major"), null, { timeout: 20000, polling: 100 }).catch(() => {});
+      // the picture is taken while a headline card is up: this one, or the next when it has gone
+      await page.waitForFunction(() => document.querySelector("#toasts .dash-toast.major"), null, { timeout: MAJOR_WAIT_MS, polling: 100 }).catch(() => {});
       await page.waitForTimeout(300); // after the card's 0.2 s fade-in
       await shot(page, "phone", false);
     }
     const seen = await page.evaluate(() => ({ majors: window.__net.majors.slice(0, 5), count: window.__net.majors.length,
       welcomes: window.__net.welcomes, toasts: Dash.inspect().toasts, time: document.getElementById("clock").textContent }));
-    check(toasted, "a major event pops a News toast", seen);
+    check(toasted, "a major event pops a News toast with its headline on screen", seen);
     const toasts = await page.evaluate(() => window.__toasts.slice());
-    if (toasts.length) {
-      const onScreen = toasts.filter(t => t.shown);
-      check(onScreen.length > 0 && onScreen.every(t => t.inside), "the toasts sit inside the window", toasts);
+    const unseen = toasts.filter(t => t.kind === "major" && !t.shown);
+    check(!unseen.length, "no headline card is taken off the page as soon as it is added", toasts);
+    if (toasted) {
+      check(toasts.filter(t => t.shown).every(t => t.inside), "the toasts sit inside the window", toasts);
       await page.evaluate(() => Dash.openTab("news"));
-      // the first major card's headline; when the burst went straight into the coalesced card, the first major's
-      const major = toasts.find(t => t.kind === "major");
-      const head = major ? major.text.replace(/(Show|Open News)\s*$/, "").trim().slice(0, 40)
-        : await page.evaluate(() => (window.__net.majors[0] || "").replace(/^Day \d+ \w+ \d\d:\d\d /, "").slice(0, 40));
+      const head = toasts.find(t => t.kind === "major" && t.shown).head.slice(0, 40);
       await waitFor(page, h => !!h && document.getElementById("panel").textContent.includes(h), head, 3000, "the toast's headline in the News tab");
       await page.waitForTimeout(1200);
       if (!touch) await shot(page, "news");

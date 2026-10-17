@@ -13,7 +13,13 @@ By default (a few seconds):
     - every message type the server sent is shown in docs/protocol.md as "type": "<it>";
     - the message types docs/protocol.md lists under God messages and Controller messages are exactly the ones
       server.py handles, and the session sent each of them and was not told it was an unknown type;
-    - no key that could reveal hidden odds (SECRET_KEYS) appears anywhere in the session.
+    - no key that could reveal hidden odds (SECRET_KEYS) appears anywhere in the session;
+    - the agent row's `vehicle` lists exactly the vehicles the engine has (travel.SPEEDS), and every `vehicle` and
+      `state` in the recorded frames is one the row lists.
+- DevFixture checks that client/dev/fixture_town.js is the seed-1 city the engine makes now (its town, and its
+  state at Day 1 Mon 08:15). After an engine change it fails until the fixture is made again with
+
+      python3 -m tests.test_integration --write-fixture
 
 With GOAL_SLOW=1:
 
@@ -35,6 +41,7 @@ import random
 import re
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -42,11 +49,14 @@ from gameofailife import ws
 from gameofailife.__main__ import run_headless
 from gameofailife.server import HOUSING_EVERY, STATS_SECONDS, GameServer
 from gameofailife.sim import ANSWER_SECONDS, Simulation
+from gameofailife.travel import SPEEDS
 
 ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL = ROOT / "docs" / "protocol.md"
 SERVER_PY = ROOT / "gameofailife" / "server.py"
 SMOKE = ROOT / "tests" / "browser" / "full_app_smoke.cjs"
+FIXTURE = ROOT / "client" / "dev" / "fixture_town.js"
+FIXTURE_AT = "Day 1 Mon 08:15"  # the first morning: people on their way to work and school
 TIMEOUT = 5.0
 
 # Keys that would reveal hidden odds or outcome tables (the same set as tests/test_server.py's).
@@ -116,6 +126,19 @@ def documented_requests(text: str) -> dict[str, set[str]]:
         assert m, f"docs/protocol.md has no '## {title}' section"
         out[role] = set(re.findall(r"^### `(\w+)`", m.group(1), re.M))
     return out
+
+
+AGENT_ROW = "An agent in `agents`:"  # docs/protocol.md's table of an agent row's fields follows this line
+
+
+def documented_values(text: str, field: str, after: str = AGENT_ROW) -> set[str]:
+    """The values that the first table row for `field` (| `field` | ... |) after the line `after` in
+    docs/protocol.md lists in backticks, before any note in brackets."""
+    at = text.find(after)
+    assert at >= 0, f"docs/protocol.md has no line {after!r}"
+    m = re.compile(rf"^\| `{field}` +\|(.*)\|\s*$", re.M).search(text, at)
+    assert m, f"docs/protocol.md has no table row for `{field}` after {after!r}"
+    return set(re.findall(r"`([^`]+)`", m.group(1).split(" (")[0]))
 
 
 def handled_requests() -> dict[str, set[str]]:
@@ -413,11 +436,78 @@ class RecordedSession(unittest.TestCase):
                     if reply is not None:
                         self.assertFalse(str(reply.get("error", "")).startswith("unknown message type"), (m, reply))
 
+    def test_the_agent_rows_values_are_in_the_protocol(self):
+        vehicles, states = documented_values(self.doc, "vehicle"), documented_values(self.doc, "state")
+        self.assertEqual(vehicles, set(SPEEDS), "the `vehicle` row must list every vehicle in travel.SPEEDS")
+        seen = {"vehicle": set(), "state": set()}
+        for msg in self.received("god"):
+            for a in msg.get("state", {}).get("agents", []):
+                for key in seen:
+                    seen[key].add(a[key])
+        self.assertIn("walk", seen["vehicle"])
+        self.assertLessEqual(seen["vehicle"], vehicles)
+        self.assertLessEqual(seen["state"], states)
+
     def test_no_message_reveals_hidden_odds(self):
         for d, who, msg in self.log:
             if d == "got":
                 self.assertEqual(find_secret_keys(msg), [], f"{who} got {msg.get('type')}")
         self.assertGreater(len(self.log), 50)
+
+
+# --- the view's dev fixture ----------------------------------------------------------------------------------
+
+FIXTURE_HEAD = f"""// CityView dev fixture (PLAN decision 81): window.CITY_FIXTURE = {{town, state}}, generated from the real seed-1 city.
+//   town   sim.town_json() (PLAN 3.2): the 80 x 50 Millbrook of city.md 3.4 with its places, the 37 homes of
+//          PLAN 4.2, housing, districts, streets, junctions, stops and the bus timetable
+//   state  sim.state_json(housing=True) (PLAN 3.3) at {FIXTURE_AT}, the first morning: 60 people on their way to
+//          work and school, 8 buses, and PLAN 4.2's start conditions and listings in lots and homes
+// view.html adapts it for fake_state.js and picks each adult's workplace and hours itself (the state does not
+// carry them). Made by `python3 -m tests.test_integration --write-fixture`, which steps
+// gameofailife.sim.Simulation(seed=1) to {FIXTURE_AT}; tests/test_integration.py's DevFixture fails when
+// the engine no longer makes this city.
+// Generated data for client/dev/view.html; classic script.
+"use strict";
+"""
+
+
+def fixture_data() -> dict:
+    """The seed-1 city's town and its state at FIXTURE_AT, as the engine makes them now."""
+    sim = Simulation(seed=1)
+    town = sim.town_json()
+    for _ in range(24 * 60):
+        if sim.state_json(housing=False)["time"] == FIXTURE_AT:
+            return {"town": town, "state": sim.state_json(housing=True)}
+        sim.step()
+        sim.drain()
+    raise AssertionError(f"the seed-1 city never reached {FIXTURE_AT}")
+
+
+def fixture_text(data: dict) -> str:
+    """client/dev/fixture_town.js's text for fixture_data()."""
+    body = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return f"{FIXTURE_HEAD}window.CITY_FIXTURE = {body};\n"
+
+
+def read_fixture() -> dict:
+    m = re.search(r"^window\.CITY_FIXTURE = (.*?);?\s*\Z", FIXTURE.read_text(), re.M | re.S)
+    assert m, "client/dev/fixture_town.js does not set window.CITY_FIXTURE"
+    return json.loads(m.group(1))
+
+
+class DevFixture(unittest.TestCase):
+    """client/dev/fixture_town.js (the city view's dev page and view_smoke.cjs) is the real seed-1 city."""
+
+    def test_the_dev_fixture_is_the_seed_1_city(self):
+        have, want = read_fixture(), fixture_data()
+        stale = [f"town.{k}" for k in sorted(set(have["town"]) | set(want["town"]))
+                 if have["town"].get(k) != want["town"].get(k)]
+        stale += [f"state.{k}" for k in sorted(set(have["state"]) | set(want["state"]))
+                  if have["state"].get(k) != want["state"].get(k)]
+        self.assertEqual(stale, [], "client/dev/fixture_town.js is not the city the engine makes now; make it again "
+                                    "with `python3 -m tests.test_integration --write-fixture`")
+        same = FIXTURE.read_text() == fixture_text(want)  # not assertEqual: no diff of a 40 KB line
+        self.assertTrue(same, "client/dev/fixture_town.js's text is not what --write-fixture writes")
 
 
 @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the 7-day headless runs (about 7 s) run with GOAL_SLOW=1")
@@ -484,4 +574,8 @@ class FullAppSmoke(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if sys.argv[1:] == ["--write-fixture"]:  # python3 -m tests.test_integration --write-fixture
+        FIXTURE.write_text(fixture_text(fixture_data()))
+        print(f"wrote {FIXTURE.relative_to(ROOT)} ({FIXTURE_AT} on seed 1)")
+    else:
+        unittest.main()
