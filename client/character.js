@@ -299,5 +299,7 @@ $("takeover").onclick = () => {
 };
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 
-if (storage(s => s.getItem(CONSENT_KEY)) === "1") connect();
+// Coming from the city view in this same tab, that view has already let go of God.
+const fromCity = new URLSearchParams(location.search).get("from") === "city";
+if (fromCity || storage(s => s.getItem(CONSENT_KEY)) === "1") connect();
 else { $("gate").hidden = false; $("role").textContent = "Not God yet"; }

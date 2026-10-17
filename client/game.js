@@ -513,6 +513,7 @@ function renderDetail(box) {
   box.innerHTML = `
     <button class="back" id="back">← Everyone</button>
     <h2>${esc(a.name)}</h2>
+    <a class="small" href="character.html?id=${encodeURIComponent(a.id)}&from=city">Open the full character page</a>
     <div class="small">${a.age} · ${a.job ? esc(a.job.title) : "retired"} · ${a.controller ? "played by " + esc(a.controller) : "running on profile defaults"}</div>
     <div id="live">${liveHtml(a)}</div>
     <div class="luck">
