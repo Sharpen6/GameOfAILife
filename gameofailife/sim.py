@@ -748,6 +748,7 @@ class Simulation:
         place = self.town.places[place_id].name
         self.event(f"{host.name} invites {guest.name} to {place}.", host, kind="social")
         guest.inbox.append({"time": self.clock.stamp(), "from": host.id, "text": f"Want to meet at {place}?"})
+        del guest.inbox[:-30]
         return inv
 
     def _expire_invites(self) -> None:
