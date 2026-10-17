@@ -76,7 +76,7 @@
   // forks: habit and profile decisions kept; llm: controller decisions (model, timeout) kept. Forks a
   // get_decisions reply brought are never dropped (dashboard.md 6.3: a character's history stays complete).
   const KEEP = { notable: 600, routine: 300, forks: 1000, llm: 1000, samples: 168 };
-  const SHOW = { news: 200, llm: 150, headlines: 5 };
+  const SHOW = { news: 200, llm: 150, older: 100, headlines: 5 };
   const TOAST_MS = 8000, NOTICE_MS = 6000, TICKER_DIM_MS = 20000, POLL_MS = 800, TIP_TOUCH_MS = 4000;
   const MINUS = "−";
 
@@ -205,7 +205,8 @@
       thinkingBy: {}, hudThink: { n: 0, by: {} }, stats: null, samples: [], peopleById: {}, hhById: {}, hhWorth: {}, topHousehold: 0,
       ev: new Map(), notable: [], routine: [], maxSeq: 0, seenSeq: 0, unread: 0,
       // forkPinned: ids a get_decisions reply brought (never dropped); forkCount: the others kept, by KEEP slot;
-      // forkCursor: per filter ("" for everyone), the oldest fork the server has paged to, for "Load older"
+      // forkCursor: per filter ("" for everyone), the oldest fork of the unbroken run the page holds (the welcome's
+      // llm_log, then each older page), where "Load older" asks the server to go on from
       forks: new Map(), forkList: [], forkMore: {}, forkPinned: new Set(), forkCount: { forks: 0, llm: 0 }, forkCursor: {},
     };
   }
@@ -231,9 +232,10 @@
       role: "god", host: { kind: "server", controllers: true }, speed: 1,
       tab: "city", collapsed: storage.get("goal.dash.collapsed") === "1", sheet: "peek", mode: "desktop", phone: false,
       news: { level: "notable", topic: null, person: null, q: "" },
-      // shown: how many decisions the list may hold; every older page loaded raises it by the page's size
+      // The list's window: the newest `shown` decisions, and always down to `floor` (the oldest fork an older page
+      // brought). held and end: how many decisions match the filters and how many the last render showed.
       llm: { agent: "", kind: "", against: false, timeouts: false, all: false, expanded: new Set(), topId: null,
-        pending: 0, loading: false, shown: SHOW.llm },
+        pending: 0, loading: false, shown: SHOW.llm, floor: null, held: 0, end: 0 },
       ppl: { seg: "adults", sort: "worth", q: "", expanded: null, press: false },
       selected: null, detail: null, detailKey: "", editingProfile: null, card: null, cardAsk: 0,
       overlay: null, overlayKey: "", inset: { top: 0, right: 0, bottom: 0 }, layoutQueued: false,
@@ -412,18 +414,23 @@
     return { peek: 92, half: round(vh * (S.phone ? 0.55 : 0.45)), full: round(vh - 64) };
   }
   // The one way the dashboard moves the camera (dashboard.md 8.2: the target lands in the visible part of the
-  // map). A full phone sheet leaves no map to see: a "Show on map" (show: true) drops it to half first, and any
-  // focus then uses the half sheet's inset, since layout() measures the new height only once the sheet has moved.
+  // map). The view centres its camera in the part of the map its inset leaves free, so the focus goes out with the
+  // inset the view already has. A full phone sheet leaves no map to see: a "Show on map" (show: true) drops it to
+  // half and gives the view the half sheet's inset first, without waiting for layout() to measure the sheet once
+  // it has moved (a focus against the full sheet's inset would land the target that much lower, behind the sheet).
   function focusMap(target, opts) {
     if (!S || !target) return;
-    let inset = S.inset;
-    if (S.mode === "sheet" && S.sheet === "full") {
-      if (opts && opts.show) setSheet("half");
+    if (S.mode === "sheet" && S.sheet === "full" && opts && opts.show) {
+      setSheet("half");
       const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
       const wr = S.world ? S.world.getBoundingClientRect() : { bottom: vh };
-      inset = Object.assign({}, S.inset, { bottom: Math.max(0, round(wr.bottom - (vh - sheetHeights().half))) });
+      const bottom = Math.max(0, round(wr.bottom - (vh - sheetHeights().half)));
+      if (bottom !== S.inset.bottom) {
+        S.inset = Object.assign({}, S.inset, { bottom });
+        callView("setInset", S.inset);
+      }
     }
-    callView("focus", target, { inset });
+    callView("focus", target, { inset: S.inset });
   }
   function buildGrip(grip) {
     grip.addEventListener("pointerdown", ev => {
@@ -866,7 +873,7 @@
     if (S.notable.length) setTicker(S.notable[S.notable.length - 1], false);
     for (const f of msg.llm_log || []) storeFork(f);
     if (msg.llm_log && msg.llm_log.length) S.forkCursor[""] = msg.llm_log[0].id;   // oldest first
-    S.llm.shown = SHOW.llm;
+    resetLlmWindow();
     if (msg.stats) takeStats(msg.stats);
     // A reconnect starts the lists again from the welcome, as a fresh page would.
     for (const box of [S.rankList, S.stream, S.llmList]) if (box) box.innerHTML = "";
@@ -948,8 +955,9 @@
         const forks = msg.forks || [], key = msg.agent_id || "";
         for (const f of forks) storeFork(f, true);
         if (forks.length) S.forkCursor[key] = forks[forks.length - 1].id;   // newest first
-        // An older page makes room for itself: the list grows by what it brought (F.shown).
-        if (ctx && ctx.older && (ctx.agent || "") === S.llm.agent) S.llm.shown += forks.length;
+        // An older page shows at once: the window reaches down to its oldest fork, however many rows the page
+        // held above it (live forks keep arriving while the list is open).
+        if (ctx && ctx.older && forks.length && (ctx.agent || "") === S.llm.agent) S.llm.floor = forks[forks.length - 1].id;
         S.forkMore[key] = !!msg.more;
         S.llm.loading = false;
         S.dirty.llm = true;
@@ -1722,15 +1730,19 @@
     S.llmPill = el(".dash-pill", box);
     S.llmOlder = el(".dash-older", box);
     el(".dash-llm-agent", box).addEventListener("change", ev => setLlmAgent(ev.target.value));
-    el(".dash-llm-kind", box).addEventListener("change", ev => { S.llm.kind = ev.target.value; S.llm.shown = SHOW.llm; renderLlm(); });
-    for (const c of box.querySelectorAll("[data-f]")) c.addEventListener("change", () => { S.llm[c.dataset.f] = c.checked; S.llm.shown = SHOW.llm; renderLlm(); });
-    S.llmPill.addEventListener("click", () => { box.scrollTop = 0; S.llm.topId = null; S.llm.shown = SHOW.llm; renderLlm(); });
+    el(".dash-llm-kind", box).addEventListener("change", ev => { S.llm.kind = ev.target.value; resetLlmWindow(); renderLlm(); });
+    for (const c of box.querySelectorAll("[data-f]")) c.addEventListener("change", () => { S.llm[c.dataset.f] = c.checked; resetLlmWindow(); renderLlm(); });
+    S.llmPill.addEventListener("click", () => { box.scrollTop = 0; S.llm.topId = null; resetLlmWindow(); renderLlm(); });
     S.llmOlder.addEventListener("click", () => {
-      // The next page starts where the server's last page (or the welcome's llm_log) ended, else at the oldest
-      // decision held for this filter.
+      // Older rows the page already holds come first; the server is asked only once the list shows them all.
       const F = S.llm;
+      if (F.held > F.end) { F.shown = F.end + SHOW.older; renderLlm(); return; }
+      // The next page starts where the unbroken run this filter holds ends (the welcome's llm_log, then each older
+      // page), else at the oldest decision held for it. When that fork has left the server's ring, so has every
+      // older one: the reply is empty with more false.
       const mine = S.forkList.filter(f => isLlmFork(f) && (!F.agent || f.agent === F.agent));
-      const oldest = S.forkCursor[F.agent] || (mine.length ? mine[mine.length - 1].id : null);
+      const cur = S.forkCursor[F.agent];
+      const oldest = cur && S.forks.has(cur) ? cur : mine.length ? mine[mine.length - 1].id : cur || null;
       const msg = { type: "get_decisions", limit: 30 };
       if (F.agent) msg.agent_id = F.agent;
       if (oldest) msg.before = oldest;
@@ -1784,12 +1796,17 @@
     const sel = el(".dash-llm-agent", S.bodies.llm);
     if (sel && sel.value !== S.llm.agent) sel.value = S.llm.agent;
     S.llm.topId = null;
-    S.llm.shown = SHOW.llm;
+    resetLlmWindow();
     if (S.llm.agent) {
       S.llm.loading = true;
       request({ type: "get_decisions", agent_id: S.llm.agent, limit: 30 }, { what: "decisions", agent: S.llm.agent });
     }
     renderLlm();
+  }
+  // A new filter (or the welcome, or "back to top") starts the list at its newest SHOW.llm rows again.
+  function resetLlmWindow() {
+    S.llm.shown = SHOW.llm;
+    S.llm.floor = null;
   }
   function openLlmFor(id) {
     openTab("llm");
@@ -1896,7 +1913,16 @@
       const i = items.findIndex(f => f.id === F.topId);
       if (i > 0) { F.pending = i; items = items.slice(i); } else F.pending = 0;
     } else { F.pending = 0; F.topId = items.length ? items[0].id : null; }
-    items = items.slice(0, F.shown);
+    let end = F.shown;
+    const floor = F.floor && S.forks.get(F.floor);
+    if (floor) {
+      let n = 0;
+      while (n < items.length && forkOrder(items[n], floor) <= 0) n++;
+      end = Math.max(end, n);
+    }
+    F.held = items.length;
+    items = items.slice(0, end);
+    F.end = items.length;
     // Day separators, newest day first, as in the News stream.
     const rows = [], today = todayNum();
     let day = null;
@@ -1913,8 +1939,9 @@
     if (F.pending) S.llmPill.textContent = `${F.pending} new · back to top`;
     S.llmEmpty.hidden = items.length > 0;
     if (!items.length) S.llmEmpty.innerHTML = llmEmptyText();
+    // "Load older" stays while the page holds more than it shows, or the server may have more.
     const more = S.forkMore[F.agent || ""];
-    S.llmOlder.hidden = S.host.kind === "browser" || more === false || (!items.length && !F.agent);
+    S.llmOlder.hidden = browser || (more === false && F.held <= F.end) || (!items.length && !F.agent);
     S.llmOlder.disabled = F.loading;
     S.llmOlder.textContent = F.loading ? "Loading…" : "Load older";
   }

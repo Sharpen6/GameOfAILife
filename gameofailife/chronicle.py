@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 BIG_MONEY = 150  # an outcome that moves at least this much money is major news
 MONEY_SWING = 40  # ... and at least this much is notable
 INJURY = -8  # an outcome whose health effect is this or worse is an injury
-FRIEND_AT = 40  # an acquaintance or coworker becomes a friend when affinity rises to this
+FRIEND_AT = 30  # an acquaintance or coworker becomes a friend when affinity rises to this
 RIFT_AT = 0  # a friend or partner falls out when affinity drops below this
 RIFT_GAP_DAYS = 7  # at most one falling-out per pair in this many game days
 TICKS_PER_DAY = 24 * 60  # a tick is a game minute (clock.MINUTES_PER_DAY; not imported, see the module docstring)

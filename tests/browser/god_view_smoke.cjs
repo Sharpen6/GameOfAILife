@@ -18,6 +18,8 @@
 // out), and idle-bot claims nobody. At both sizes the AI chip reads "AI: 60 playing" ("AI 60" on a phone) and
 // shows a thinking count only while it is above 0, each controller's line counts its own characters thinking
 // (idle-bot never thinks), and a person's "LLM decisions (n)" is the server's count, the stats people row's llm.
+// On the phone, "Show on map" on an LLM row with a place puts the place at the same spot whether the sheet was full
+// (it drops to half) or half: in the map above the sheet, read from the view's screenOf.
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
 // browser it can launch, the test prints SKIP and exits 0. Set GOD_SHOTS=<folder> to also save screenshots.
@@ -276,6 +278,7 @@ async function runPlayed(browser, base, name, size, touch) {
   page.on("console", m => { if (m.type() === "error") errors.push(m.text()); });
   page.on("pageerror", e => errors.push(String(e && e.message || e)));
   await page.addInitScript(() => {
+    window.__place = {};   // fork id -> its place, from the frames and the welcome's llm_log
     const Base = window.WebSocket;
     window.WebSocket = class extends Base {
       constructor(...args) {
@@ -285,10 +288,19 @@ async function runPlayed(browser, base, name, size, touch) {
             const m = JSON.parse(e.data);
             if (m.type === "stats") window.__stats = m;
             else if (m.type === "welcome" && m.stats) window.__stats = m.stats;
+            for (const f of [].concat(m.forks || [], m.llm_log || [])) if (f && f.id) window.__place[f.id] = f.place;
           } catch (x) { /* not ours */ }
         });
       }
     };
+  });
+  // The view game.js makes, kept as window.__view for the phone's "Show on map" check.
+  await page.addInitScript(() => {
+    const CV = window.CityView = window.CityView || {};
+    let create = null;
+    Object.defineProperty(CV, "create", { configurable: true, enumerable: true,
+      get() { return create && function () { const v = create.apply(this, arguments); window.__view = v; return v; }; },
+      set(fn) { create = fn; } });
   });
   await page.goto(`${base}/`);
   await waitFor(page, () => window.Dash && Dash.inspect() && Dash.inspect().role === "god" && window.__stats
@@ -354,6 +366,7 @@ async function runPlayed(browser, base, name, size, touch) {
     }, who.id);
     check(!!ok, "the ranking row's LLM decisions (n) is the server's count", ok || seen);
   }
+  if (touch) await showOnMapFromFull(page);
   const wide = await page.evaluate(() => ({ doc: document.documentElement.scrollWidth, view: window.innerWidth }));
   check(wide.doc <= wide.view, "no horizontal scroll", wide);
   if (SHOTS) {
@@ -362,6 +375,51 @@ async function runPlayed(browser, base, name, size, touch) {
   }
   check(!errors.length, "no console errors", errors);
   await page.close();
+}
+
+// F3 on the phone: "Show on map" on an LLM row with a place (the camera follows nobody) from a full sheet drops it
+// to half and puts the place where the same tap from a half sheet does, in the map above the sheet.
+async function showOnMapFromFull(page) {
+  await page.evaluate(() => Dash.openTab("llm"));
+  await waitFor(page, () => document.querySelector("#dash-llm .dash-llmlist li.dash-fork"), null, 10000, "F3: LLM rows");
+  const key = await page.evaluate(() => {
+    const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].find(l => window.__place[l.dataset.key]);
+    return li ? li.dataset.key : null;
+  });
+  if (!check(!!key, "F3: an LLM row with a place")) return;
+  const place = await page.evaluate(k => window.__place[k], key);
+  const sheet = () => page.evaluate(() => Dash.inspect().sheet);
+  const sheetTo = async want => {
+    for (let i = 0; i < 5 && (await sheet()) !== want; i++) {
+      await page.focus("#panel .dash-grip");
+      await page.keyboard.press((await sheet()) === "full" ? "ArrowDown" : "ArrowUp");
+      await page.waitForTimeout(350);
+    }
+    return (await sheet()) === want;
+  };
+  const seen = {};
+  for (const start of ["half", "full"]) {
+    check(await sheetTo(start), `F3: the sheet goes to ${start}`);
+    // The camera starts away from the place each time, so each tap makes the same flight.
+    await page.evaluate(() => window.__view.focus({ tile: [2, 2] }, { ms: 1 }));
+    await page.waitForTimeout(150);
+    const row = page.locator(`#dash-llm li.dash-fork[data-key="${key}"]`);
+    await row.evaluate(l => l.scrollIntoView({ block: "center" }));
+    if (!(await row.evaluate(l => l.classList.contains("open")))) await row.locator(".dash-fhead").click();
+    await row.locator('[data-act="map"]').click();
+    await page.waitForTimeout(1500);
+    seen[start] = await page.evaluate(p => {
+      const s = window.__view.screenOf({ place: p }), i = Dash.inspect();
+      return { sheet: i.sheet, inset: i.inset, at: s ? s.map(Math.round) : null,
+        h: Math.round(document.getElementById("world").getBoundingClientRect().height) };
+    }, place);
+  }
+  const h = seen.half, f = seen.full;
+  check(f.sheet === "half" && !!h.at && !!f.at, "F3: from a full sheet the tap ends with a half sheet", seen);
+  if (h.at && f.at) {
+    check(Math.abs(h.at[1] - f.at[1]) <= 4 && Math.abs(h.at[0] - f.at[0]) <= 4, "F3: the place lands where it does from a half sheet", seen);
+    check(f.at[1] >= f.inset.top && f.at[1] <= f.h - f.inset.bottom, "F3: the place is in the map above the sheet", seen);
+  }
 }
 
 (async () => {

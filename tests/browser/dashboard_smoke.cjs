@@ -14,6 +14,12 @@
 // arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent. Both the rules run and the phone
 // run check the People ranking in its Adults, Everyone and Households segments: richest to poorest, ranks 1..n,
 // a net worth below zero written with a minus and ranked last, each row's 24 h change, one row per household.
+// The last runs check the main-screen review's fixes: the LLM log's "Load older" (also with hundreds of forks
+// arriving after the welcome, past what the server's ring keeps behind it), day separators, kept fetched forks and
+// the server's LLM decisions count, the Full page hand-off, the per-controller thinking counts, the 100% clamp,
+// one 24 h mood change, folded first meetings, the phone AI chip, and "Show on map" from a full phone sheet (the
+// view gets the half sheet's inset before the focus; with the real map, ?view=real, the place lands where it does
+// from a half sheet).
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
 // browser it can launch, the test prints SKIP and exits 0. Set DASH_SHOTS=<folder> to also save screenshots,
@@ -709,6 +715,60 @@ async function screenFixes(browser, base) {
   await page.close();
 }
 
+// F1 on a page that stays open: `live` LLM forks reach the page after its welcome (?backlog=90: the city's ring of
+// 500 is full) before "Load older" is first clicked. With 300 the welcome's oldest fork is still in the server's
+// ring, 120 older behind it; with 450 it has left the ring, so the server has nothing older than what the page
+// holds. Either way the clicks reach every decision the page or the ring has, and the button goes only then.
+async function liveOlder(browser, base, live) {
+  console.log(`desktop Load older after ${live} live forks 1440x900 ?backlog=90`);
+  const { page, errors } = await openPage(browser, base, "?backlog=90&speed=4", { width: 1440, height: 900 });
+  await capturePaused(page);
+  const want = await page.evaluate(n => {
+    // Forks the city decides after the welcome: the fake host's rings take them as the server's would, and the
+    // page gets them in frames of 30. One in five timed out (the default filter hides those).
+    const W = devHost.world, st = window.__lastState, tpl = W.llmRing[W.llmRing.length - 1];
+    const played = W.agents.filter(a => a.alive && a.controller);
+    const forks = [];
+    for (let i = 0; i < n; i++) {
+      const a = played[i % played.length], timeout = i % 5 === 4;
+      const f = Object.assign({}, tpl, { id: `f${++W.forkSeq}`, agent: a.id, tick: st.tick, happened: [], late: null,
+        decided_by: timeout ? "timeout" : "model", answer_seconds: timeout ? null : 2.5, reason: timeout ? "" : tpl.reason || "live" });
+      a.llmForks.push(f);
+      if (a.llmForks.length > 30) a.llmForks.shift();
+      W.llmRing.push(f);
+      if (W.llmRing.length > 500) W.llmRing.shift();
+      forks.push(f);
+    }
+    for (let i = 0; i < forks.length; i += 30) Dash.frame({ type: "state", speed: 0, state: st, events: [], forks: forks.slice(i, i + 30) });
+    // Every model decision the page holds (the welcome's 80 and these) or the ring still has, newest first.
+    const seen = new Map();
+    for (const f of [].concat(W.llmBacklog, W.llmRing)) if (f.decided_by === "model") seen.set(f.id, f);
+    const all = [...seen.values()].sort((x, y) => (y.tick - x.tick) || (Number(y.id.slice(1)) - Number(x.id.slice(1))));
+    return { n: all.length, oldest: all[all.length - 1].id, inRing: W.llmRing.some(f => f.id === W.llmBacklog[0].id) };
+  }, live);
+  await page.keyboard.press("3");
+  await page.waitForTimeout(350);
+  const forkRows = () => page.locator("#dash-llm .dash-llmlist li.dash-fork").count();
+  const counts = [await forkRows()];
+  for (let i = 0; i < 40; i++) {
+    if (!(await page.locator("#dash-llm .dash-older").isVisible())) break;
+    await page.evaluate(() => { const b = document.getElementById("dash-llm"); b.scrollTop = b.scrollHeight; });
+    await page.click("#dash-llm .dash-older");
+    await page.waitForFunction(() => { const b = document.querySelector("#dash-llm .dash-older"); return b.hidden || !b.disabled; },
+      null, { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(60);
+    counts.push(await forkRows());
+  }
+  const oldestShown = await page.evaluate(() => { const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].pop(); return li && li.dataset.key; });
+  check(want.inRing === (live + 80 <= 500), `F1 (${live} live): the welcome's oldest fork is ${live + 80 <= 500 ? "still" : "no longer"} in the server's ring`, want);
+  check(counts[1] > counts[0] && counts[counts.length - 1] === want.n,
+    `F1 (${live} live): Load older shows every decision the page and the server's ring hold`, { counts, want: want.n });
+  check(oldestShown === want.oldest, `F1 (${live} live): the oldest row shown is the oldest decision there is`, [oldestShown, want.oldest]);
+  check(await page.locator("#dash-llm .dash-older").isHidden(), `F1 (${live} live): Load older goes once nothing older is left`);
+  check(errors.length === 0, `F1 (${live} live): no console errors`, errors);
+  await page.close();
+}
+
 // The phone: the AI chip says how many play, and every "Show on map" from a full sheet drops it to half (F3).
 async function phoneFixes(browser, base) {
   console.log("phone main-screen fixes 390x844");
@@ -746,6 +806,18 @@ async function phoneFixes(browser, base) {
     check(fs.length > before && info.sheet === "half", `F3: ${what} from a full sheet drops it to half`, [info.sheet, fs.length - before]);
     check(!!inset && inset.bottom < 600 && Math.abs(inset.bottom - info.inset.bottom) <= 3,
       `F3: ${what} focuses with the half sheet's inset`, [inset, info.inset]);
+    // The view centres its camera within its own inset: when the focus goes out, that inset is already the half
+    // sheet's (a focus against the full sheet's would land the target lower by half the difference).
+    const order = await page.evaluate(() => {
+      const c = devView.calls;
+      let i = c.length - 1;
+      while (i >= 0 && c[i][0] !== "focus") i--;
+      let j = i - 1;
+      while (j >= 0 && c[j][0] !== "setInset") j--;
+      return { focus: i >= 0 ? (c[i][1][1] || {}).inset : null, viewInset: j >= 0 ? c[j][1][0] : null };
+    });
+    check(!!order.focus && !!order.viewInset && order.viewInset.bottom === order.focus.bottom,
+      `F3: ${what} gives the view the half sheet's inset before the focus`, order);
   }
   await page.click("#dash-tab-news");
   await page.waitForTimeout(350);
@@ -773,6 +845,64 @@ async function phoneFixes(browser, base) {
   await page.close();
 }
 
+// F3 with the real map (?view=real): "Show on map" on an LLM row with a place (the camera follows nobody) puts the
+// place at the same spot on the screen, in the map above the sheet, whether the sheet was full or half.
+async function phoneRealMap(browser, base) {
+  console.log("phone Show on map with the real view 390x844 ?view=real");
+  const { page, errors } = await openPage(browser, base, "?view=real&speed=4", { width: 390, height: 844 }, true);
+  if (!(await page.evaluate(() => !!(window.devView && !devView.stub && devView.screenOf)))) {
+    check(false, "F3: the real view loaded on the dev page");
+    await page.close();
+    return;
+  }
+  await capturePaused(page);
+  await page.click("#dash-tab-llm");
+  await page.waitForTimeout(350);
+  const key = await page.evaluate(() => {
+    const li = [...document.querySelectorAll("#dash-llm .dash-llmlist li.dash-fork")].find(l => {
+      const f = devHost.world.llmRing.find(x => x.id === l.dataset.key);
+      return f && f.place;
+    });
+    return li ? li.dataset.key : null;
+  });
+  if (!check(!!key, "F3: an LLM row with a place")) { await page.close(); return; }
+  const place = await page.evaluate(k => devHost.world.llmRing.find(x => x.id === k).place, key);
+  const sheetTo = async want => {
+    for (let i = 0; i < 5 && (await inspect(page)).sheet !== want; i++) {
+      await page.focus("#panel .dash-grip");
+      await page.keyboard.press((await inspect(page)).sheet === "full" ? "ArrowDown" : "ArrowUp");
+      await page.waitForTimeout(350);
+    }
+    return (await inspect(page)).sheet === want;
+  };
+  const seen = {};
+  for (const start of ["half", "full"]) {
+    check(await sheetTo(start), `F3: the sheet goes to ${start}`);
+    // Move the camera away first, so each tap makes the same flight.
+    await page.evaluate(() => devView.focus({ tile: [2, 2] }, { ms: 1 }));
+    await page.waitForTimeout(150);
+    await page.evaluate(() => { document.getElementById("dash-llm").scrollTop = 0; });
+    const row = page.locator(`#dash-llm li.dash-fork[data-key="${key}"]`);
+    if (!(await row.evaluate(l => l.classList.contains("open")))) { await row.locator(".dash-fhead").click(); await page.waitForTimeout(200); }
+    await row.locator('[data-act="map"]').click();
+    await page.waitForTimeout(1500);
+    seen[start] = await page.evaluate(p => {
+      const s = devView.screenOf({ place: p }), i = Dash.inspect();
+      return { sheet: i.sheet, inset: i.inset, at: s ? s.map(Math.round) : null, h: document.getElementById("world").getBoundingClientRect().height };
+    }, place);
+    await shot(page, `f3-real-from-${start}`);
+  }
+  const h = seen.half, f = seen.full;
+  check(f.sheet === "half" && !!h.at && !!f.at, "F3: from a full sheet the tap ends with a half sheet", seen);
+  if (h.at && f.at) {
+    check(Math.abs(h.at[1] - f.at[1]) <= 4 && Math.abs(h.at[0] - f.at[0]) <= 4,
+      "F3: the place lands where it does from a half sheet", seen);
+    check(f.at[1] >= f.inset.top && f.at[1] <= f.h - f.inset.bottom, "F3: the place is in the map above the sheet", seen);
+  }
+  check(errors.length === 0, "F3 real map: no console errors", errors);
+  await page.close();
+}
+
 (async () => {
   const pw = findPlaywright();
   if (!pw || !pw.chromium) { console.log("SKIP: Playwright is not installed"); process.exit(0); }
@@ -790,7 +920,9 @@ async function phoneFixes(browser, base) {
     await browserBuild(browser, base);
     await phone(browser, base);
     await screenFixes(browser, base);
+    for (const live of [300, 450]) await liveOlder(browser, base, live);
     await phoneFixes(browser, base);
+    await phoneRealMap(browser, base);
   } catch (e) {
     failures += 1;
     console.log(`  FAIL the run stopped: ${e && e.stack || e}`);
