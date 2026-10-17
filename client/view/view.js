@@ -32,7 +32,7 @@
     const prefs = Object.assign({ projection: "iso" }, opt.persist === false ? {} : loadPrefs());
     prefs.rot = 0; // rotation is a tested parameter of the projection with no UI in v1: never restored
     let scene = null, movers = null, cam = null, mini = null, town = null;
-    let running = false, raf = 0, lastT = 0, lastCamSent = 0, camDirty = true, lastSave = 0;
+    let running = false, raf = 0, lastT = 0, lastCamSent = 0, camDirty = true, lastSave = 0, loopErrAt = 0;
     let selected = null, pendingState = null, pendingSpeed = 1, inset = { top: 0, right: 0, bottom: 0 };
     let lastLots = null, lastHomes = null, seedHousing = false; // the last lots and homes any frame carried
     let lastClick = null, highlightRaw = null, overlayRaw = null, gaps = [], dprCap = 2, slowChecked = 0;
@@ -371,8 +371,8 @@
     // --- the loop -------------------------------------------------------------------------------------
     function frame(now) {
       if (!scene) return;
-      const dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0;
-      if (lastT && dynamic) adapt(now - lastT, now);
+      const dt = lastT ? Math.max(0, Math.min(0.1, (now - lastT) / 1000)) : 0;
+      if (lastT && dynamic && now > lastT) adapt(now - lastT, now);
       lastT = now;
       movers.update(now);
       cam.update(dt, followPos());
@@ -381,8 +381,8 @@
       if (now - reservedAt > 250) refreshReserved();
       scene.draw(now);
       if (mini) mini.draw(now);
-      if (camDirty) { camDirty = false; emitCamera(false); persist(false); }
-      else { if (camLate) emitCamera(false); if (saveLate) persist(false); } // the last move is never dropped
+      if (camDirty) { camDirty = false; persist(false); emitCamera(false); }
+      else { if (saveLate) persist(false); if (camLate) emitCamera(false); } // the last move is never dropped
     }
     // Dynamic resolution: when frames are slow for 2 s, step the backing store down, then quality.
     function adapt(gap, now) {
@@ -398,7 +398,19 @@
       else if (Math.min(dprCap, dpr) > 1) { dprCap = 1; resize(); }
       else if (scene.quality !== "low") scene.quality = "low";
     }
-    function loop(now) { if (!running) return; frame(now); raf = requestAnimationFrame(loop); }
+    // The next frame is asked for first, so one bad frame (or a page hook that throws) cannot stop the map.
+    // The error still reaches the page as an uncaught error, at most one every 2 s rather than every frame.
+    function loop(now) {
+      if (!running) return;
+      raf = requestAnimationFrame(loop);
+      try { frame(now); } catch (e) {
+        // unwind any save() the frame left open (a clip or a translate), so the next frame draws whole
+        const g = canvas.getContext("2d");
+        for (let i = 0; i < 32; i++) g.restore();
+        const at = performance.now();
+        if (!loopErrAt || at - loopErrAt >= 2000) { loopErrAt = at; setTimeout(() => { throw e; }, 0); }
+      }
+    }
 
     // --- the facade -----------------------------------------------------------------------------------
     const view = {

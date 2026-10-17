@@ -32,6 +32,8 @@
 //   HUD, every control stays in the free area, clear of the others and tappable, or waits out of sight
 // - rotation (a tested parameter with no UI): at rotations 1-3 the projection round-trips, the camera
 //   keeps its tile, focus and picking find a known building, and nothing logs an error
+// - long task: pings made late in long main-thread tasks (a frame dated before the ping) never stop the
+//   map, and a page hook that throws in a frame reaches the page as an error but the map keeps drawing
 // - the dashboard's dev page with the real view (?view=real) runs with no errors and no failed view calls
 //
 // Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
@@ -1088,6 +1090,91 @@ async function runRotation(browser) {
   await ctx.close();
 }
 
+// A long main-thread task: a frame's timestamp can then be older than a ping stamped late in the task (and
+// a ping on a home rebuilds its statics first). The rings never get a negative age, and a frame that throws,
+// here a page onCamera hook, never stops the loop. On the dev page and on the dashboard's with the real view.
+async function runLongTask(browser) {
+  const pages = [["view", "", null, "__view"]];
+  if (fs.existsSync(path.join(CLIENT, "dev", "dashboard.html"))) pages.push(["dashboard", "?view=real", { path: "/dev/dashboard.html" }, "devView"]);
+  for (const [label, query, o, v] of pages) {
+    const { ctx, page, log } = await open(browser, query, o || undefined);
+    if (o) await page.waitForFunction(() => window.devView && typeof devView.scene === "function" && devView.scene() && devView.scene().stats.frames > 3, null, { timeout: 20000 });
+    const frames = () => page.evaluate(v => window[v].scene().stats.frames, v);
+    // the same thing by hand: a frame dated before the ping it draws
+    const early = await page.evaluate(v => {
+      const view = window[v], s = view.scene();
+      try {
+        view.ping({ place: "bank" }, "money");
+        const t0 = s.pings[s.pings.length - 1].t0;
+        for (const back of [1, 200, 700, 2900]) view.frame(t0 - back);
+        return true;
+      } catch (e) { return String(e); }
+    }, v);
+    check(early === true, `long task (${label}): a frame dated before a ping draws it without a negative ring`, early);
+    const f0 = await frames();
+    for (let i = 0; i < 4; i++) {
+      await page.evaluate(([v, i]) => {
+        const view = window[v], s = view.scene(), homes = s.town.homes || [];
+        let t = performance.now();
+        while (performance.now() - t < 700) { /* a slow phone, a big re-render */ }
+        view.ping(i % 2 && homes.length ? { place: homes[i % homes.length].id } : { place: "bank" }, i % 2 ? "life" : "money");
+        t = performance.now();
+        while (performance.now() - t < 50) { /* busy after the ping too */ }
+      }, [v, i]);
+      await page.waitForTimeout(250);
+    }
+    const f1 = await frames();
+    await page.waitForTimeout(800);
+    const f2 = await frames();
+    check(f1 > f0 && f2 > f1 + 10, `long task (${label}): pings made late in long tasks never stop the map`, [f0, f1, f2]);
+    check(await page.evaluate(v => window[v].scene().pings.length, v) > 0, `long task (${label}): the pings are still drawn`);
+    noErrors(log, `long task (${label})`);
+    if (o) { await ctx.close(); continue; }
+
+    // a page hook that throws in a frame: the error reaches the page, the map keeps drawing
+    await page.evaluate(() => Object.defineProperty(__calls, "cameraLast", { configurable: true, get() { return null; }, set() { throw new Error("onCamera hook failed on purpose"); } }));
+    const g0 = await frames();
+    await page.evaluate(() => { __view.focus({ place: "bank" }, { zoom: 2, ms: 500 }); });
+    await page.waitForTimeout(400);
+    await page.evaluate(() => { __view.focus({ district: "downtown" }, { zoom: 1, ms: 500 }); });
+    await page.waitForTimeout(900);
+    const g1 = await frames();
+    const thrown = log.errors.filter(e => /on purpose/.test(e));
+    check(g1 > g0 + 20, "long task: a page hook that throws in a frame never stops the map", [g0, g1]);
+    check(thrown.length >= 1 && thrown.length <= 2, "long task: the hook's error reaches the page, not every frame", thrown.length);
+    const n0 = await page.evaluate(() => { delete __calls.cameraLast; __calls.cameraLast = null; return __calls.camera; });
+    await page.evaluate(() => { __view.focus({ place: "bank" }, { ms: 300 }); });
+    await page.waitForTimeout(600);
+    const back = await page.evaluate(() => ({ n: __calls.camera, last: __calls.cameraLast }));
+    check(back.n > n0 && back.last && back.last.x != null, "long task: onCamera reports again once the hook is fixed", back);
+
+    // a frame that throws with a clip still open: the next frames paint the whole canvas again (after the
+    // 2 s in which a second error would not be reported)
+    await page.waitForTimeout(2100);
+    await page.evaluate(() => {
+      const s = __view.scene(), orig = s.draw, g = document.getElementById("map").getContext("2d"), c = __t.centre();
+      window.__before = __t.grab(c[0] - 60, c[1] - 60, 120, 120);
+      s.draw = function (now) {
+        s.draw = orig;
+        g.save(); g.beginPath(); g.rect(0, 0, 2, 2); g.clip();
+        throw new Error("draw failed on purpose");
+      };
+    });
+    await page.waitForTimeout(200);
+    await page.evaluate(() => { __view.focus({ district: "downtown" }, { zoom: 1, ms: 50 }); });
+    await page.waitForTimeout(500);
+    const clip = await page.evaluate(() => {
+      const c = __t.centre(), a = __before, b = __t.grab(c[0] - 60, c[1] - 60, 120, 120);
+      return { share: __t.changed(a, b, 12) / (a.width * a.height), draws: __view.scene().draw.toString().includes("on purpose") };
+    });
+    check(!clip.draws && clip.share > 0.2, "long task: a frame that throws with a clip open leaves the next frames whole", clip);
+    check(log.errors.filter(e => /draw failed on purpose/.test(e)).length === 1, "long task: the draw's error reaches the page once");
+    log.errors = log.errors.filter(e => !/on purpose/.test(e));
+    noErrors(log, "long task (view, hook)");
+    await ctx.close();
+  }
+}
+
 // The dashboard's dev page with the real view: every call the dashboard makes goes through.
 async function runDashboard(browser) {
   if (!fs.existsSync(path.join(CLIENT, "dev", "dashboard.html"))) return;
@@ -1119,7 +1206,8 @@ async function runDashboard(browser) {
 }
 
 const RUNS = [["globals", runGlobals], ["bench", runBench], ["picking", runPicking], ["facade", runFacade], ["stages", runStages],
-  ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["rotation", runRotation], ["dashboard", runDashboard]];
+  ["persist", runPersist], ["old town", runOldTown], ["phone", runPhone], ["rotation", runRotation], ["long task", runLongTask],
+  ["dashboard", runDashboard]];
 
 async function main() {
   const pw = findPlaywright();

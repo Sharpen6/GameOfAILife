@@ -1079,12 +1079,14 @@
         g.beginPath(); g.ellipse(cx, cy, rx + pulse * 2 * scene.dpr, ry + pulse * scene.dpr, 0, 0, Math.PI * 2); g.stroke();
         g.restore();
       }
-      // pings: two expanding rings for 3 s (the off-screen arrow in the label pass lasts longer)
+      // pings: two expanding rings for 3 s (the off-screen arrow in the label pass lasts longer). The age is
+      // never below 0: a frame's timestamp can be older than a ping stamped late in a long task.
       const keep = [];
       for (const pg of scene.pings) {
-        if (now - pg.t0 >= PING_ARROW_MS) continue;
+        const age = Math.max(0, now - pg.t0);
+        if (age >= PING_ARROW_MS) continue;
         keep.push(pg);
-        const t = (now - pg.t0) / PING_MS;
+        const t = age / PING_MS;
         if (t >= 1) continue;
         for (let k = 0; k < 2; k++) {
           const tt = (t * 2 + k * 0.5) % 1;
@@ -1160,7 +1162,7 @@
       const k = scene.dpr, area = (cv.width / k) * (cv.height / k);
       const want = Math.round(area / (snow ? 7000 : 4000) * (scene.quality === "low" ? 0.5 : 1));
       while (drops.length < want) drops.push({ x: Math.random() * cv.width, y: Math.random() * cv.height, s: 2 + Math.random() * 3, l: 10 + Math.random() * 4 });
-      const dt = Math.min(0.1, (now - lastRain) / 1000 || 0); lastRain = now;
+      const dt = Math.max(0, Math.min(0.1, (now - lastRain) / 1000 || 0)); lastRain = now;
       const vx = -80, vy = 520, vl = Math.hypot(vx, vy);
       if (snow) g.fillStyle = "rgba(255,255,255,.9)";
       else { g.strokeStyle = "rgba(200,220,255,0.7)"; g.lineWidth = 2 * k; g.lineCap = "butt"; g.beginPath(); }
@@ -1346,7 +1348,7 @@
       const cx = (L + Rt) / 2, cy = (T + B) / 2;
       const seen = new Set();
       for (let n = scene.pings.length - 1; n >= 0; n--) {
-        const pg = scene.pings[n], age = now - pg.t0;
+        const pg = scene.pings[n], age = Math.max(0, now - pg.t0);
         if (age >= PING_ARROW_MS) continue;
         const w = proj.toWorld(pg.x, pg.y), px = w[0] * v.S + v.ox, py = w[1] * v.S + v.oy;
         if (px >= L - m && px <= Rt + m && py >= T - m && py <= B + m) continue;
