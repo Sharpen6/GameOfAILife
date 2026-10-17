@@ -1,9 +1,9 @@
-"""The 80 x 50 tile map of Millbrook: streets, districts, the 39 places, seeded trees and walk distance fields.
+"""The 80 x 50 tile map of Millbrook: streets, districts, the 39 places, seeded trees, walk and road fields.
 
-`build_map(seed)` is memoized and a TownMap is read-only after it is built: only its lazy walk-field cache
-fills in, so Simulations with the same seed share one map and its fields. The layout and the places are the
-same for every seed; the seed only moves the trees. The homes live in `housing.py` and the cast in `cast.py`;
-this module imports neither.
+`build_map(seed)` is memoized and a TownMap is read-only after it is built: only its lazy caches (walk fields,
+road fields, drive lengths and `memo`) fill in, so Simulations with the same seed share one map and its fields.
+The layout and the places are the same for every seed; the seed only moves the trees. The homes live in
+`housing.py` and the cast in `cast.py`; this module imports neither.
 """
 
 from __future__ import annotations
@@ -89,9 +89,11 @@ class Place:
 
 @dataclass(eq=False)
 class TownMap:
-    """The tiles and places of the town. Read-only once built; only the walk-field cache fills in.
+    """The tiles and places of the town. Read-only once built; only the lazy caches fill in.
 
     Tile index i is (i % w, i // w). Fields are arrays of w * h uint16 values, 65535 = unreachable.
+    `memo` holds values other modules derive from the map alone (and from fixed module data such as the bus
+    timetable), keyed by tuples that start with the module's own tag, so Simulations sharing the map share them.
     """
 
     tiles: list[list[str]]
@@ -99,9 +101,12 @@ class TownMap:
     w: int = field(init=False)
     h: int = field(init=False)
     junctions: set[tuple[int, int]] = field(init=False, repr=False)  # road tiles with 3 or more road neighbours
+    memo: dict = field(init=False, repr=False)  # derived values other modules cache on the shared map
     _ok: bytes = field(init=False, repr=False)  # 1 where walkable, by tile index
     _road: bytes = field(init=False, repr=False)  # 1 where road, by tile index
     _fields: dict = field(init=False, repr=False)  # goal tile index -> (dist, off)
+    _roads: dict = field(init=False, repr=False)  # goal tile index -> road distance
+    _drives: dict = field(init=False, repr=False)  # (start x, start y, place id) -> (tiles, junctions)
 
     def __post_init__(self) -> None:
         self.h = len(self.tiles)
@@ -110,6 +115,9 @@ class TownMap:
         self._ok = bytes(c in WALKABLE for c in cells)
         self._road = bytes(c == ROAD for c in cells)
         self._fields = {}
+        self._roads = {}
+        self._drives = {}
+        self.memo = {}
         self.junctions = {(x, y) for y in range(self.h) for x in range(self.w)
                           if self.tiles[y][x] == ROAD and sum(self._is_road(x + dx, y + dy) for dx, dy in
                                                               ((1, 0), (-1, 0), (0, 1), (0, -1))) >= 3}
@@ -208,14 +216,114 @@ class TownMap:
             return UNREACHABLE
         return self.walk_field(self.places[place_id].entry)[0][y * self.w + x]
 
+    def steps(self, start: tuple[int, int], goal: tuple[int, int]) -> int:
+        """Steps on foot from one tile to another, such as a bus stop: O(1) once the goal's walk field is built."""
+        x, y = start
+        if not (0 <= x < self.w and 0 <= y < self.h):
+            return UNREACHABLE
+        return self.walk_field(goal)[0][y * self.w + x]
+
+    # --- road fields and drive paths --------------------------------------------
+
+    def road_field(self, goal: tuple[int, int]) -> array:
+        """BFS from `goal` (a place entry) that steps only onto road tiles, cached per goal tile, as array('H').
+
+        dist[i] is the number of steps from road tile i to the goal, where only the last step (from the road tile
+        beside the goal onto the goal) leaves the road. It is 0 at the goal and 65535 on every other off-road tile.
+        """
+        gx, gy = goal
+        if not (0 <= gx < self.w and 0 <= gy < self.h):
+            return self._blank_field()[0]
+        g = gy * self.w + gx
+        f = self._roads.get(g)
+        if f is None:
+            f = self._roads[g] = self._build_road_field(g)
+        return f
+
+    def _build_road_field(self, g: int) -> array:
+        w, n = self.w, self.w * self.h
+        road = self._road
+        dist = array("H", [UNREACHABLE]) * n
+        dist[g] = 0
+        queue = [g]
+        head = 0
+        while head < len(queue):
+            c = queue[head]
+            head += 1
+            d = dist[c] + 1
+            x = c % w
+            # Neighbours in the order E, W, S, N.
+            for nb in (c + 1 if x + 1 < w else -1, c - 1 if x else -1, c + w if c + w < n else -1, c - w):
+                if nb >= 0 and road[nb] and dist[nb] == UNREACHABLE:
+                    dist[nb] = d
+                    queue.append(nb)
+        return dist
+
     def drive_path(self, start: tuple[int, int], place_id: str) -> list[tuple[int, int]]:
-        """The route a car takes to a place. For now the walk path; road fields replace it later."""
-        return self.path(start, self.places[place_id].entry)
+        """The route a car takes to a place, excluding start: roads only, apart from the first and last step.
+
+        From a road tile it descends the place's road field (ties E, W, S, N) to the road tile beside the entry,
+        then steps onto the entry. From a tile beside a road it first steps onto the neighbouring road tile with the
+        smallest road distance (ties E, W, S, N). From anywhere else, such as the middle of a park, it is the walk
+        path. [] when start is the entry or the place cannot be reached.
+        """
+        goal = self.places[place_id].entry
+        sx, sy = start
+        if (sx, sy) == goal:
+            return []
+        w, n = self.w, self.w * self.h
+        if not (0 <= sx < w and 0 <= sy < self.h):
+            return []
+        dist = self.road_field(goal)
+        road = self._road
+        c = sy * w + sx
+        out = []
+        if not road[c]:
+            x = c % w
+            best = -1
+            for nb in (c + 1 if x + 1 < w else -1, c - 1 if x else -1, c + w if c + w < n else -1, c - w):
+                if nb >= 0 and road[nb] and dist[nb] != UNREACHABLE and (best < 0 or dist[nb] < dist[best]):
+                    best = nb
+            if best < 0:
+                return self.path((sx, sy), goal)
+            c = best
+            out.append((c % w, c // w))
+        elif dist[c] == UNREACHABLE:
+            return self.path((sx, sy), goal)
+        while dist[c]:
+            want = dist[c] - 1
+            x = c % w
+            for nb in (c + 1 if x + 1 < w else -1, c - 1 if x else -1, c + w if c + w < n else -1, c - w):
+                if nb >= 0 and dist[nb] == want:
+                    c = nb
+                    break
+            out.append((c % w, c // w))
+        return out
+
+    def drive_length(self, start: tuple[int, int], place_id: str) -> tuple[int, int]:
+        """(tiles, junctions) on drive_path(start, place_id), memoized: (0, 0) at the entry, (65535, 0) when the
+        place cannot be reached. Junctions are the crossings a car may wait at; the start tile does not count."""
+        key = (start[0], start[1], place_id)
+        got = self._drives.get(key)
+        if got is None:
+            path = self.drive_path(start, place_id)
+            if not path and key[:2] != self.places[place_id].entry:
+                got = (UNREACHABLE, 0)
+            else:
+                got = (len(path), sum(1 for tile in path if tile in self.junctions))
+            self._drives[key] = got
+        return got
 
     def warm(self) -> None:
-        """Build the walk field of every place entry now, so no tick pays for one."""
+        """Build every field a tick may need now, so no tick pays for one: the walk and road fields of every
+        place entry and the walk fields of the bus stops. Calling it again builds nothing."""
+        from .transit import STOP_XY  # transit imports nothing from the town; only the stop tiles are needed
+
         for place in self.places.values():
             self.walk_field(place.entry)
+            self.road_field(place.entry)
+        for xy in STOP_XY.values():
+            self.walk_field(xy)
 
     # --- snapshot -------------------------------------------------------------
 
