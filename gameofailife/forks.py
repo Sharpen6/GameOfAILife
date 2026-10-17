@@ -26,6 +26,7 @@ WORK_LEAD = 45  # minutes before a shift the work fork opens (more if the walk i
 WORK_LATE = 60  # minutes after a shift starts that the work fork still opens, for a late arrival
 SHOP_MINUTES = 45  # how long the payday shopping trip takes (sim.ACTIVITIES["shopping"])
 HANG_OUT_MINUTES = 90  # how long hanging out at a cafe takes (sim.ACTIVITIES["hang_out"])
+COFFEE_MINUTES = 15  # how long a coffee takes (sim.ACTIVITIES["coffee"])
 
 _ids = itertools.count(1)
 
@@ -207,16 +208,21 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
                       tags={"diligence": 0.7, "health": 0.5, "adventure": 0.2},
                       outcomes=[_late(0.03), Outcome("ankle", "Twists an ankle", 0.03, -1, {"health": -8, "fun": -6}),
                                 Outcome("buzz", "Arrives buzzing with energy", 0.3, +1, {"energy": 6, "fun": 4})])
-    if _open_on_arrival(sim, agent, "cafe"):
+    coffee_tags = {"social": 0.4, "diligence": -0.5, "thrift": -0.3}
+    spill = Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})
+    if _open_on_arrival(sim, agent, "cafe", stay=COFFEE_MINUTES):
         coffee = Option("Grab a coffee at Corner Cafe first", [("coffee", "cafe"), ("work", "job")], cost=4, base=0.35,
-                        tags={"social": 0.4, "diligence": -0.5, "thrift": -0.3},
-                        gains={"energy": 10, "social": 5},
-                        outcomes=[_late(0.7), _meet_new(0.12), Outcome("barista", "Friendly chat at the counter", 0.3, +1, {"social": 6}),
-                                  Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})])
-    else:  # an early start: Corner Cafe would still be shut on the way, so a cup before setting off instead
-        coffee = Option("Make a coffee before setting off", [("coffee", None), ("work", "job")], base=0.35,
-                        tags={"diligence": -0.3, "thrift": 0.2}, gains={"energy": 8},
-                        outcomes=[_late(0.4), Outcome("spill", "Spills coffee on their shirt", 0.05, -1, {"fun": -5})])
+                        tags=coffee_tags, gains={"energy": 10, "social": 5},
+                        outcomes=[_late(0.7), _meet_new(0.12),
+                                  Outcome("barista", "Friendly chat at the counter", 0.3, +1, {"social": 6}), spill])
+    else:  # PLAN decision 55: no cafe is open on the way (an early shift), so a cup at home first
+        home = sim.home_of(agent)
+        trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
+                + sim.town.walk_minutes(sim.town.places[home].entry, job.place_id))
+        late_by = trip - minutes_to_start  # lateness by timing: odds only when the trip overruns the start
+        coffee = Option("Make a coffee at home, then go", [("coffee", "home"), ("work", "job")], base=0.35,
+                        tags=coffee_tags, gains={"energy": 10},
+                        outcomes=[_late(max(0.0, min(0.5, late_by / 40))), spill])
     skip = Option(f"Call in sick and stay home" if not school else "Pretend to be sick and stay home",
                   [("rest", "home")], tags={"diligence": -1.0, "health": 0.3, "adventure": 0.2}, base=-0.4,
                   gains={"energy": 30, "fun": 25},

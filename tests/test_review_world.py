@@ -136,20 +136,33 @@ class OpeningHoursForksTest(unittest.TestCase):
         self.sim.household(agent).groceries = 0
         return agent
 
+    def last_minute(self, agent, place_id: str, activity: str) -> int:
+        """The last minute of the day a trip to the place is offered: the walk there and the whole activity
+        still end before it shuts (walk and hours come from the city)."""
+        closes = self.sim.town.places[place_id].hours[1] * 60
+        return closes - self.sim.walk_minutes(agent, place_id) - sim_module.ACTIVITIES[activity].minutes - 1
+
     def test_no_cafe_meal_when_it_shuts_before_arrival(self):
-        at(self.sim, 2, 22, 45)  # Wed; Ari's walk is 22 minutes, the cafe shuts at 23:00
         ari = self.hungry("ari")
+        last = self.last_minute(ari, "cafe", "eat_out")
+        at(self.sim, 2, 0, last + 1)  # Wed; Corner Cafe would shut before Ari's meal there is over
         self.assertNotIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
+        at(self.sim, 2, 0, last)  # a minute earlier the meal still fits
+        self.assertIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
         at(self.sim, 2, 12, 0)
         self.assertIn("Eat at Corner Cafe", labels(hunger_fork(self.sim, ari)))
 
     def test_no_groceries_trip_when_the_market_shuts_before_arrival(self):
-        at(self.sim, 2, 20, 50)  # Eli's walk is 13 minutes, the market shuts at 21:00
         eli = self.hungry("eli")
+        last = self.last_minute(eli, "market", "buy_groceries")
+        at(self.sim, 2, 0, last + 1)  # Wed; Fresh Market would shut before Eli's shopping there is done
         fork = hunger_fork(self.sim, eli)
         self.assertNotIn("Buy groceries, then cook", labels(fork))
         self.assertEqual(len(fork.options), 4)
         self.assertIsNone(groceries_fork(self.sim, eli))
+        at(self.sim, 2, 0, last)  # a minute earlier the shop still fits
+        self.assertIn("Buy groceries, then cook", labels(hunger_fork(self.sim, eli)))
+        self.assertIn("Buy groceries now", labels(groceries_fork(self.sim, eli)))
 
     def test_no_groceries_trip_that_arrives_before_opening(self):
         eli = self.hungry("eli")
@@ -269,7 +282,8 @@ class ShutOnArrivalTest(unittest.TestCase):
         at(self.sim, 2, 12, 0)
         fork = hunger_fork(self.sim, eli)
         self.sim._decide(eli, fork, labels(fork).index("Buy groceries, then cook"), "model", "")
-        self.run_until(eli, lambda a: a.activity == "eat_home" and a.state == "busy", limit=self.trip(eli, "market", 20))
+        self.run_until(eli, lambda a: a.activity == "eat_home" and a.state == "busy",
+                       limit=self.trip(eli, "market", 20))
         self.assertEqual(eli.money, 265.0)
         self.assertEqual(hh.groceries, 9)  # ten bought, one being cooked
 

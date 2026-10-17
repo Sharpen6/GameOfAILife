@@ -216,7 +216,9 @@ let drops = [];
 // Rain (or snow) drops for the whole canvas: about one for every 1,800 square pixels.
 function makeDrops() {
   const n = Math.round(canvas.width * canvas.height / 1800);
-  drops = Array.from({ length: n }, () => ({ x: Math.random() * canvas.width, y: Math.random() * canvas.height, s: 2 + Math.random() * 3 }));
+  drops = Array.from({ length: n }, () => ({
+    x: Math.random() * canvas.width, y: Math.random() * canvas.height, s: 2 + Math.random() * 3,
+  }));
 }
 
 function draw(now) {

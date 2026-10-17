@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import dataclasses
 import heapq
 import json
 import random
@@ -153,7 +154,8 @@ class TownJsonTest(unittest.TestCase):
             self.assertIn(h["id"], sim.homes)
             self.assertIn(h["place"], sim.town.places)
         self.assertEqual(set(town["housing"]), {"tiers", "stages", "landlord"})
-        self.assertEqual([s["name"] for s in town["housing"]["stages"]], ["kept", "worn", "shabby", "neglected", "derelict"])
+        self.assertEqual([s["name"] for s in town["housing"]["stages"]],
+                         ["kept", "worn", "shabby", "neglected", "derelict"])
         for d in town["districts"]:
             self.assertEqual(set(d), {"id", "name", "about", "rects"})
         for s in town["streets"]:
@@ -269,19 +271,22 @@ class ForkMessageTest(unittest.TestCase):
             here = sim.town.places.get(agent.inside or "")
             self.assertEqual(you["where_name"], here.name if here else "outside")
             self.assertEqual(you["home_name"], sim.homes[sim.household(agent).home_id].name)
-            self.assertEqual(set(you["home"]), {"name", "tier", "tenure", "weekly_cost", "condition", "stage_name", "value"})
+            self.assertEqual(set(you["home"]),
+                             {"name", "tier", "tenure", "weekly_cost", "condition", "stage_name", "value"})
             self.assertEqual(find_secret_keys(msg), [])
         self.assertGreater(checked, 50)
 
     def test_travel_minutes_come_from_travel(self):
         sim = Simulation(seed=SEED)
         dana = sim.agents["dana"]
-        opts = [Option("Walk to the office", [("idle", "office")]), Option("Drive to the office", [("idle", "office")], vehicle="car"),
+        opts = [Option("Walk to the office", [("idle", "office")]),
+                Option("Drive to the office", [("idle", "office")], vehicle="car"),
                 Option("Stay in", [("idle", "home")]), Option("Wait here", [("idle", None)])]
         fork = Fork(dana.id, "test", "?", opts, sim.clock.tick)
         msg = sim.fork_message(dana, fork)
         self.assertEqual([o.get("travel_minutes") for o in msg["options"]],
-                         [travel.travel_minutes(sim, dana, "office", "walk"), travel.travel_minutes(sim, dana, "office", "car"),
+                         [travel.travel_minutes(sim, dana, "office", "walk"),
+                          travel.travel_minutes(sim, dana, "office", "car"),
                           None, None])  # she is at home already
         with mock.patch.object(travel, "travel_minutes", return_value=99) as tm:
             msg = sim.fork_message(dana, fork)
@@ -327,7 +332,8 @@ class SummaryTest(unittest.TestCase):
         sim.controller_joined("bot", "test-model", ["dana"])
         fork = tied_fork(dana.id, sim.clock.tick)
         sim.director(dana, fork)
-        self.assertEqual((fork.status, fork.controller, fork.model, fork.profile_choice), ("asked", "bot", "test-model", 0))
+        self.assertEqual((fork.status, fork.controller, fork.model, fork.profile_choice),
+                         ("asked", "bot", "test-model", 0))
         clock.advance(2.34)
         self.assertEqual(sim.answer(fork.id, 2, "because", controller="bot"), {"accepted": True, "applied": True})
         s = dana.forks[-1]
@@ -370,7 +376,8 @@ class SummaryTest(unittest.TestCase):
         sim = Simulation(seed=SEED)
         dana = sim.agents["dana"]
         for _ in range(sim_module.LLM_LOG_SIZE + 5):
-            sim._decide(dana, tied_fork(dana.id, sim.clock.tick), 0, "timeout", "No answer in time; played the default.")
+            sim._decide(dana, tied_fork(dana.id, sim.clock.tick), 0, "timeout",
+                        "No answer in time; played the default.")
         self.assertEqual(len(sim.llm_log), 500)
         self.assertEqual(len(dana.llm_forks), 30)
         self.assertEqual(dana.llm_forks[-1], sim.llm_log[-1])
@@ -433,8 +440,8 @@ class EventsTest(unittest.TestCase):
             sim._apply_outcome(dana, {"fork": "f0", "outcome": Outcome("x", "Something", 1.0, 0, effects), "due": None})
             self.assertEqual((sim.events[-1]["tag"], sim.events[-1]["kind"]), (tag, "outcome"))
             texts.append(sim.events[-1]["text"])
-        self.assertEqual(texts, ["Dana Cohen: Something (−$150).", "Dana Cohen: Something.", "Dana: Something (+$40).",
-                                 "Dana: Something."])
+        self.assertEqual(texts, ["Dana Cohen: Something (−$150).", "Dana Cohen: Something.",
+                                 "Dana: Something (+$40).", "Dana: Something."])
 
 
 # --- hook seams (PLAN 3.10) --------------------------------------------------------------------------------
@@ -477,8 +484,9 @@ class HookTest(unittest.TestCase):
         self.sim._log_roll = lambda agent, what, *a, **k: (order.append(what), real_roll(agent, what, *a, **k))
         self.sim.stats.count("habit")
         habit = self.sim.stats.total["habit"]
+        reset = lambda: (order.append("reset"), real_reset())  # noqa: E731
         with mock.patch.object(housing, "nightly", side_effect=lambda sim: order.append("nightly")), \
-                mock.patch.object(self.sim.stats, "reset_day", side_effect=lambda: (order.append("reset"), real_reset())):
+                mock.patch.object(self.sim.stats, "reset_day", side_effect=reset):
             self.at(1, -1)
             self.sim.step()  # midnight
         self.assertIn("old_age", order)
@@ -546,7 +554,8 @@ class HookTest(unittest.TestCase):
             self.sim._bump(self.dana, "yossi", 5)
         hook.assert_called_once_with(self.sim, "dana", "yossi", before, rel.affinity)
         self.assertAlmostEqual(rel.affinity, min(100.0, before + 5))
-        stranger = next(a for a in self.sim.agents.values() if a.id not in self.dana.relationships and a is not self.dana)
+        stranger = next(a for a in self.sim.agents.values()
+                        if a.id not in self.dana.relationships and a is not self.dana)
         with mock.patch.object(chronicle, "on_affinity") as hook:
             self.sim._bump(self.dana, stranger.id, 3)
         hook.assert_called_once_with(self.sim, "dana", stranger.id, 10, 13)  # a new acquaintance starts at 10
@@ -686,6 +695,57 @@ class HiddenEmergencyTest(unittest.TestCase):
                 self.assertEqual(find_secret_keys(msg), [])
                 self.assertNotIn("boiler", json.dumps(msg))
 
+    def test_a_running_city_never_shows_secrets(self):
+        """PLAN 3.13's walk over a running city: the welcome before and after, every state frame of twelve hours
+        (one a minute, as the server flushes), every fork message pushed to a controller with its ack, every agent
+        page and every home, and every controller query. A pending emergency is planted in every third home, and
+        a controller plays everyone who lives in one, so every fork message comes with a planted emergency."""
+        kind = "planted_test_emergency"
+        clock = FakeClock()
+        sim = Simulation(seed=SEED, now=clock)
+        planted = [h for n, h in enumerate(sim.homes.values()) if n % 3 == 0 and h.household]
+        for home in planted:
+            home.pending_emergency = {"kind": kind, "due": sim.clock.tick + 30 * MINUTES_PER_DAY}
+        played = sorted(m for h in planted for m in sim.households[h.household].member_ids)
+        server = GameServer(sim)
+        server.god, bot = object(), object()
+        server.controllers["bot"] = bot
+        for aid in played:
+            self.assertTrue(sim.claim(aid, "bot"))
+        pushed: list = []
+        server._push = lambda ws_, text, inbox=None: pushed.append((ws_, text))
+        shown = [("welcome", server._welcome_god())]
+        counts = collections.Counter()
+        for _ in range(12 * 60):
+            sim.step()
+            clock.advance(1 / TICKS_PER_REAL_SECOND)
+            server._flush(True)
+            for ws_, text in pushed:
+                msg = json.loads(text)
+                counts[msg["type"]] += 1
+                shown.append((msg["type"], msg))
+                if ws_ is bot and msg["type"] == "fork" and counts["fork"] % 2:  # the rest time out
+                    shown.append(("ack", server._controller("bot", {"type": "choose", "fork_id": msg["fork_id"],
+                                                                    "choice": 0, "reason": "test"})))
+            pushed.clear()
+        shown.append(("welcome", server._welcome_god()))
+        for home_id in sim.homes:
+            shown.append((f"get_home {home_id}", server._god({"type": "get_home", "home_id": home_id})))
+        for aid in sim.agents:
+            shown.append((f"get_agent {aid}", server._god({"type": "get_agent", "agent_id": aid})))
+        for aid in played:
+            for what in ("possessions", "attributes", "relationships", "memory", "inbox", "world", "people", "market"):
+                shown.append((f"query {what}", server._controller("bot", {"type": "query", "agent_id": aid,
+                                                                          "what": what})))
+        self.assertGreaterEqual(counts["state"], 12)
+        self.assertGreater(counts["fork"], 10)
+        self.assertEqual(len([s for s in shown if s[0].startswith("get_home")]), len(sim.homes))
+        self.assertTrue(all(h.pending_emergency for h in planted))  # still pending: never shown
+        for what, msg in shown:
+            text = json.dumps(msg)
+            if find_secret_keys(msg) or kind in text:
+                self.fail(f"{what}: {find_secret_keys(msg)} {kind in text}")
+
 
 # --- fork shape over whole days -------------------------------------------------------------------------------
 
@@ -791,7 +851,10 @@ class ServerMessagesTest(unittest.TestCase):
 
     def test_controller_queries(self):
         self.sim.claim("tom", "bot")
-        ask = lambda what: self.server._controller("bot", {"type": "query", "agent_id": "tom", "what": what})  # noqa: E731
+
+        def ask(what):
+            return self.server._controller("bot", {"type": "query", "agent_id": "tom", "what": what})
+
         self.assertEqual(ask("market")["data"], self.sim.market_json())
         self.assertEqual(set(ask("market")["data"]), {"for_sale", "for_rent"})
         world = ask("world")["data"]
@@ -868,7 +931,8 @@ class ControllerEventsTest(unittest.IsolatedAsyncioTestCase):
         await bot.close()
         await self.wait_until(lambda: "bot" not in self.sim.controllers)
         gone = self.controller_events()[-1]
-        self.assertEqual((gone["tag"], gone["importance"], gone["agents"]), ("controller_left", 1, ["dana", "yossi", "ari"]))
+        self.assertEqual((gone["tag"], gone["importance"], gone["agents"]),
+                         ("controller_left", 1, ["dana", "yossi", "ari"]))
         self.assertEqual(gone["text"], "Dana Cohen, Yossi Cohen and Ari Ben-David are no longer played by bot.")
         self.assertEqual(len(self.controller_events()), 4)
         for agent in self.sim.agents.values():
@@ -1106,6 +1170,99 @@ class ErrandTest(unittest.TestCase):
                 self.assertEqual(other.money, 300.0 - sim_module.GROCERY_COST if sent else 300.0)
 
 
+class WorkCoffeeTest(unittest.TestCase):
+    """PLAN decision 55: the work fork's third option is a coffee at Corner Cafe when the cafe is open on the way
+    for the whole cup, otherwise "Make a coffee at home, then go" with the cafe option's tags, lateness by timing
+    and no meet_new."""
+
+    def setUp(self):
+        self.sim = Simulation(seed=SEED)
+        self.cafe = self.sim.town.places["cafe"]
+        self.assertEqual(sim_module.ACTIVITIES["coffee"].minutes, forks.COFFEE_MINUTES)
+        # Shifts that start so early that, when the fork first comes, Corner Cafe is still shut on arrival.
+        self.early = [a for a in self.sim.living() if a.job and a.job.hourly_wage
+                      and a.job.start_hour * 60 - forks.WORK_LEAD + self.sim.walk_minutes(a, "cafe")
+                      < self.cafe.hours[0] * 60]
+        self.assertTrue(self.early)  # the 06:00 hospital cleaner in seed 1
+
+    def at(self, agent, minute: int) -> None:
+        day = min(agent.job.workdays)
+        self.sim.clock.tick = day * MINUTES_PER_DAY + minute
+        agent.worked_today, agent.state, agent.plan = -1, "idle", []
+
+    def options(self, agent, minute: int):
+        self.at(agent, minute)
+        fork = forks.work_fork(self.sim, agent)
+        if fork is not None:
+            self.assertEqual(len({o.label for o in fork.options}), 4, [o.label for o in fork.options])
+        return fork
+
+    def expected_late(self, agent) -> float:
+        home = self.sim.home_of(agent)
+        trip = (self.sim.walk_minutes(agent, home) + forks.COFFEE_MINUTES
+                + self.sim.town.walk_minutes(self.sim.town.places[home].entry, agent.job.place_id))
+        late_by = trip - (agent.job.start_hour * 60 - self.sim.clock.minute_of_day)
+        return max(0.0, min(0.5, late_by / 40))
+
+    def test_an_early_shift_makes_its_coffee_at_home(self):
+        for agent in self.early:
+            with self.subTest(agent=agent.id):
+                fork = self.options(agent, agent.job.start_hour * 60 - forks.WORK_LEAD)
+                coffee = fork.options[2]
+                self.assertEqual(coffee.label, "Make a coffee at home, then go")
+                self.assertEqual(coffee.steps, [("coffee", "home"), ("work", "job")])
+                self.assertEqual((coffee.cost, coffee.vehicle), (0, "walk"))
+                self.assertNotIn("meet_new", [o.id for o in coffee.outcomes])
+                late = {o.id: o.p for o in coffee.outcomes}["late"]
+                self.assertEqual(late, self.expected_late(agent))
+                # Later, once the cafe is open on the way, the same slot is the cafe, with the same tags.
+                minute = self.cafe.hours[0] * 60 - self.sim.walk_minutes(agent, "cafe")
+                cafe = self.options(agent, minute).options[2]
+                self.assertEqual(cafe.label, "Grab a coffee at Corner Cafe first")
+                self.assertEqual(cafe.tags, coffee.tags)
+                self.assertNotEqual(self.options(agent, minute - 1).options[2].label, cafe.label)
+
+    def test_lateness_follows_the_timing(self):
+        """The late odds are 0 while the cup at home still gets the character in on time, and rise by a fortieth
+        a minute of overrun (at most 0.5): checked at home and standing at the cafe door, far from home."""
+        agent = self.early[0]
+        start = agent.job.start_hour * 60
+        seen = []
+        for where in ("home", "cafe door"):
+            if where == "cafe door":
+                agent.inside, (agent.x, agent.y) = None, self.cafe.entry
+            for minute in range(start - 180, start + forks.WORK_LATE + 1):
+                fork = self.options(agent, minute)
+                if fork is None or fork.options[2].steps[0] != ("coffee", "home"):
+                    continue
+                late = {o.id: o.p for o in fork.options[2].outcomes}["late"]
+                self.assertEqual(late, self.expected_late(agent), (where, minute))
+                seen.append(late)
+        self.assertIn(0.0, seen)
+        self.assertTrue(any(0 < p for p in seen), seen)
+        self.assertLessEqual(max(seen), 0.5)
+
+    def test_the_cup_must_fit_before_the_cafe_shuts(self):
+        """With a shift starting an hour before Corner Cafe shuts, the cafe is offered up to the last minute the
+        15-minute cup still fits on arrival; after that it is the coffee at home, though the cafe is still open
+        when they walk in."""
+        agent = self.early[0]
+        agent.job = dataclasses.replace(agent.job, start_hour=self.cafe.hours[1] - 1)
+        walk = self.sim.walk_minutes(agent, "cafe")
+        last = self.cafe.hours[1] * 60 - walk - forks.COFFEE_MINUTES - 1
+        start = agent.job.start_hour * 60
+        cafe_minutes, home_minutes = [], []
+        for minute in range(start - 180, start + forks.WORK_LATE + 1):
+            fork = self.options(agent, minute)
+            if fork is not None:
+                (cafe_minutes if fork.options[2].steps[0] == ("coffee", "cafe") else home_minutes).append(minute)
+        self.assertTrue(cafe_minutes)
+        self.assertEqual(cafe_minutes[-1], last)
+        self.assertEqual(home_minutes[0], last + 1)
+        self.at(agent, last + 1)
+        self.assertTrue(forks._open_on_arrival(self.sim, agent, "cafe"))  # open on arrival, but not for the cup
+
+
 class CastDumpTest(unittest.TestCase):
     def test_the_dump_command_runs_cast_once(self):
         """`python3 -m gameofailife.cast --dump 1`: no runpy warning that the package had already imported cast."""
@@ -1125,7 +1282,8 @@ class MapInvariantsTest(unittest.TestCase):
         districts = {d["id"] for d in town.map_json()["districts"]}
         for p in town.places.values():
             x, y = p.entry
-            self.assertTrue(any(town.tiles[ny][nx] == ROAD for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+            around = ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+            self.assertTrue(any(town.tiles[ny][nx] == ROAD for nx, ny in around
                                 if 0 <= nx < town.w and 0 <= ny < town.h), p.id)
             self.assertIn(p.district, districts)
         self.assertEqual(len(town.junctions), 24)

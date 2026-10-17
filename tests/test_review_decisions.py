@@ -154,7 +154,7 @@ class TestChoiceHappensAtLeaveTime(Case):
         self.assertEqual(fork.options[0].label, "Walk in Riverside Park")
         self.sim._decide(ari, fork, 0, "timeout", "No answer in time; played the default.")
         self.step_until(lambda: ari.state == "busy" and ari.activity == "walk_park")
-        self.assertGreater(self.sim.clock.minute_of_day, 10 * 60)  # he reaches the park after his shift began
+        self.assertGreater(self.sim.clock.minute_of_day, ari.job.start_hour * 60)  # at the park after his shift began
         self.assertEqual(ari.busy_until, self.sim.clock.tick + 1)  # still cut short
         self.step_until(lambda: ari.state == "busy" and ari.activity == "work", limit=60)
         self.assertEqual(ari.worked_today, self.sim.clock.day)
