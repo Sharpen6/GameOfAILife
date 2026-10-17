@@ -5,9 +5,28 @@
 // Classic script for client/dev/view.html only.
 "use strict";
 (function () {
-  const F = window.CityViewFixture;
   const hash = s => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
   const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  // The fixture is window.CITY_FIXTURE = {town, state, cast} (client/dev/fixture_town.js). People come from
+  // state.agents (name, age, home, car), households and listings from state.homes, conditions from
+  // state.lots, and workplaces and hours from cast; a fixture regenerated without cast gets jobs picked
+  // here: school for children, a workplace by hash for adults, none from 65.
+  const F = (function (X) {
+    const town = X.town, st = X.state || {}, extra = new Map((X.cast || []).map(c => [c.id, c]));
+    const work = town.places.filter(p => p.kind !== "home" && p.kind !== "park" && p.kind !== "school");
+    const school = town.places.find(p => p.kind === "school");
+    const cast = (st.agents || []).filter(a => a.alive !== false).map(a => {
+      const e = extra.get(a.id);
+      let job = e ? e.job : a.age < 18 ? (school ? school.id : null) : a.age >= 65 || !work.length ? null : work[hash(a.id + ":job") % work.length].id;
+      let hours = e ? e.hours : null;
+      if (job && !hours) { const h = (town.places.find(p => p.id === job) || {}).hours || [9, 17]; hours = [Math.max(7, h[0]), Math.min(h[0] + 8, h[1])]; }
+      return { id: a.id, name: a.name, age: a.age, home: a.home, car: !!a.car, job, hours };
+    });
+    const homes = {}, conditions = {};
+    for (const h of town.homes || []) { const s = (st.homes || {})[h.id] || {}; homes[h.id] = { hh: s.hh || null, owner: s.owner || "landlord", listing: s.listing || null }; }
+    for (const [id, l] of Object.entries(st.lots || {})) conditions[id] = l.condition;
+    return { town, cast, homes, conditions };
+  })(window.CITY_FIXTURE);
 
   window.CityViewFake = function (opt) {
     opt = opt || {};
@@ -181,7 +200,10 @@
     const moving = new Set(opt.conditions === "plan" ? [] : ["park_21", "cedar_court"]);
     function lots() {
       const out = {};
-      for (const p of town.places) if (p.kind === "home") out[p.id] = { condition: conditions[p.id] != null ? conditions[p.id] : 80, works: works.has(p.id), moving: moving.has(p.id) };
+      for (const p of town.places) if (p.kind === "home") {
+        const c = conditions[p.id] != null ? conditions[p.id] : 80;
+        out[p.id] = { condition: c, stage: c >= 80 ? 0 : c >= 60 ? 1 : c >= 40 ? 2 : c >= 20 ? 3 : 4, works: works.has(p.id), moving: moving.has(p.id) };
+      }
       return out;
     }
     function homes() {

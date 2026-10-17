@@ -140,8 +140,10 @@
     }, { passive: false });
     on(cv, "dblclick", ev => { const [x, y] = css(ev); step(1, x, y); });
     const typing = () => { const a = document.activeElement; return a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable); };
+    // The view's keys (PLAN 3.12): arrows and WASD pan, + / - / 0 zoom and fit, F follows, Esc deselects.
+    // Rotation has no key in v1. Keys typed into a field, or already handled by the page, are left alone.
     const onKey = ev => {
-      if (typing() || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+      if (ev.defaultPrevented || typing() || ev.metaKey || ev.ctrlKey || ev.altKey) return;
       const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key.toLowerCase();
       if (["arrowleft", "arrowright", "arrowup", "arrowdown", "w", "a", "s", "d"].includes(k)) { keys.add(k); keys.shift = ev.shiftKey; cancelFollow(); fly = null; ev.preventDefault(); }
       else if (k === "+" || k === "=") { step(1); ev.preventDefault(); }
@@ -149,7 +151,6 @@
       else if (k === "0") { cam.fit(); ev.preventDefault(); }
       else if (k === "f") { if (hooks.followKey) hooks.followKey(); }
       else if (k === "escape") { if (hooks.escape) hooks.escape(); }
-      else if ((k === "q" || k === "e") && hooks.rotate) hooks.rotate(k === "e" ? 1 : -1);
     };
     const offKey = ev => { keys.delete(ev.key.length === 1 ? ev.key.toLowerCase() : ev.key.toLowerCase()); keys.shift = ev.shiftKey; };
     const blur = () => keys.clear();

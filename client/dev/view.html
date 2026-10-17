@@ -41,6 +41,12 @@
     #hud .stats, #hud .wide { display: none; }
   }
   body.nohud #hud { display: none; }
+  #debug {
+    position: absolute; left: 12px; top: 56px; z-index: 6; margin: 0; padding: 8px 10px; min-width: 200px; border-radius: 8px;
+    background: rgba(8, 10, 16, 0.88); border: 1px solid var(--line); color: #b9f5c8;
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; pointer-events: none;
+  }
+  body.nohud #debug { top: 12px; }
 </style>
 </head>
 <body>
@@ -67,6 +73,7 @@
   </div>
   <div id="tooltip"></div>
   <div id="info" data-cv-avoid></div>
+  <pre id="debug" hidden data-cv-avoid></pre>
 </div>
 <script src="../view/proj.js"></script>
 <script src="../view/art.js"></script>
@@ -83,20 +90,25 @@
 "use strict";
 (function () {
   // URL: zoom, at=x,y (tile), fit=1, minute, day, weather, season, flat=1, speed, select=id, follow=0, freeze=1,
-  // conditions=plan, overlay=condition, hud=0, persist=0, dyn=0, minimap=0,
+  // conditions=plan, overlay=condition, hud=0, persist=0, dyn=0, minimap=0, debug=1 (frame-time HUD),
+  // drive=0 (no frames of its own: the smoke test sends them), housing=every (lots and homes in every frame;
+  // by default they go only when changed and in every 40th frame, as the server sends them),
   // specimen=1 (houses at stages 0-4), specimen=big (big houses), specimen=flats (blocks of flats),
   // specimen=street (a mixed residential street)
   const q = new URLSearchParams(location.search);
   const $ = id => document.getElementById(id);
   if (q.get("hud") === "0") document.body.classList.add("nohud");
-  let F = window.CityViewFixture;
+  let F = window.CITY_FIXTURE;
   const opts = { season: q.get("season") || "summer", weather: q.get("weather") || "clear", conditions: q.get("conditions") || "showcase" };
   const specimen = q.has("specimen") && q.get("specimen") !== "0";
   opts.style = { big: "big_house", flats: "apartments", street: "street" }[q.get("specimen")] || "house";
   let fake = specimen ? CityViewFake.specimen(opts) : CityViewFake(opts);
-  if (specimen) F = { town: fake.town, homes: {}, cast: [] };
+  if (specimen) F = { town: fake.town };
   let speed = +(q.get("speed") || 1), frozen = q.get("freeze") === "1", paused = frozen;
   let tick = (+(q.get("day") || 2)) * 1440 + (q.has("minute") ? +q.get("minute") : 8 * 60 + 15), acc = 0, last = null;
+  // the page keeps the last lots and homes it was sent, as every client does (PLAN 3.3)
+  let lots = {}, homes = {}, frames = 0, sentKey = "";
+  const calls = window.__calls = { pick: [], hover: [], select: [], camera: 0 };
   const hit2text = hit => {
     if (!hit || !last) return "";
     if (hit.kind === "agent") {
@@ -110,10 +122,10 @@
       if (!p) return hit.id;
       const inside = last.agents.filter(a => a.inside === p.id).map(a => a.name.split(" ")[0]);
       let s = `<b>${p.name}</b>`;
-      if (p.kind === "home" && last.lots && last.lots[p.id]) {
-        const c = last.lots[p.id].condition, st = CityView.STAGE_NAMES[CityView.stageOf(c)];
+      if (p.kind === "home" && lots[p.id]) {
+        const c = lots[p.id].condition, st = CityView.STAGE_NAMES[CityView.stageOf(c)];
         const hs = F.town.homes.filter(h => h.place === p.id);
-        const listed = hs.filter(h => last.homes[h.id] && last.homes[h.id].listing).map(h => (last.homes[h.id].listing === "for_sale" ? "for sale" : "to let") + (hs.length > 1 ? " " + h.unit : ""));
+        const listed = hs.filter(h => homes[h.id] && homes[h.id].listing).map(h => (homes[h.id].listing === "for_sale" ? "for sale" : "to let") + (hs.length > 1 ? " " + h.unit : ""));
         s += ` · ${st} (${c})` + (listed.length ? " · " + listed.join(", ") : "");
       } else if (p.hours) s += ` (${p.hours[0]}:00–${p.hours[1]}:00)`;
       if (inside.length) s += " · " + inside.slice(0, 5).join(", ") + (inside.length > 5 ? ` +${inside.length - 5}` : "");
@@ -124,7 +136,8 @@
   };
   const tip = $("tooltip");
   const view = CityView.create($("map"), {
-    onPick(hit) {
+    onPick(hit, ev) {
+      calls.pick.push({ hit, ev });
       const info = $("info");
       if (hit && hit.kind === "agent") { view.select(hit.id, { follow: q.get("follow") !== "0" }); view.highlight(null); }
       else if (hit && hit.kind === "place") { view.highlight({ places: [hit.id] }); }
@@ -134,27 +147,47 @@
       placeInfo();
     },
     onHover(hit, ev) {
+      calls.hover.push({ hit, ev });
+      if (calls.hover.length > 200) calls.hover.splice(0, 100);
       if (!hit || !ev || hit.kind === "tile") { tip.style.display = "none"; return; }
       tip.innerHTML = hit2text(hit); tip.style.display = "block";
       const r = $("world").getBoundingClientRect();
       tip.style.left = Math.min(r.width - tip.offsetWidth - 8, ev.cssX + 14) + "px"; tip.style.top = Math.max(50, ev.cssY + 14) + "px";
     },
-    onSelect(id) { $("info").style.display = id ? "block" : "none"; placeInfo(); },
+    onSelect(id) { calls.select.push(id); $("info").style.display = id ? "block" : "none"; placeInfo(); },
+    onCamera() { calls.camera++; },
   }, { persist: q.get("persist") !== "0" && !q.has("zoom") && !q.has("fit"), dynamicResolution: q.get("dyn") !== "0", minimap: q.get("minimap") !== "0", eager: q.has("eager") });
   const hudH = () => document.body.classList.contains("nohud") ? 0 : $("hud").offsetHeight;
-  // The info card sits bottom-left; when it would run into the minimap (narrow screens), it rises above it.
+  // The info card sits bottom-left; when it would run into the minimap or the follow chip (narrow
+  // screens), it rises above them.
   function placeInfo() {
-    const info = $("info"), mm = document.querySelector(".cv-minimap");
+    const info = $("info");
     info.style.bottom = "12px";
-    if (!mm || info.style.display === "none") return;
-    const a = info.getBoundingClientRect(), b = mm.getBoundingClientRect(), r = $("world").getBoundingClientRect();
-    if (a.right > b.left - 6 && a.bottom > b.top - 6) info.style.bottom = (r.bottom - b.top + 8) + "px";
+    if (info.style.display === "none") return;
+    const r = $("world").getBoundingClientRect();
+    for (const e of [document.querySelector(".cv-follow.cv-show"), document.querySelector(".cv-minimap")]) {
+      if (!e) continue;
+      const a = info.getBoundingClientRect(), b = e.getBoundingClientRect();
+      if (b.width && a.right > b.left - 6 && a.left < b.right + 6 && a.bottom > b.top - 6) info.style.bottom = (r.bottom - b.top + 8) + "px";
+    }
   }
   view.setInset({ top: hudH() });
   if (q.get("flat") === "1") view.setMode({ projection: "flat" });
   else if (q.has("rot")) view.setMode({ projection: "iso", rot: +q.get("rot") });
   view.setTown(F.town);
-  const send = () => { last = fake.state(tick); view.setState(last, speed); $("time").textContent = last.time; };
+  // One frame. Like the server, lots and homes ride along only when they changed and in every 40th frame.
+  const every = q.get("housing") === "every";
+  const frameOf = st => {
+    if (st.lots) lots = st.lots;
+    if (st.homes) homes = st.homes;
+    const key = JSON.stringify([st.lots, st.homes]);
+    if (every || key !== sentKey || frames % 40 === 0) { sentKey = key; frames++; return st; }
+    frames++;
+    const out = Object.assign({}, st); delete out.lots; delete out.homes;
+    return out;
+  };
+  const push = st => { last = st; view.setState(frameOf(st), speed); $("time").textContent = st.time; };
+  const send = () => push(fake.state(tick));
   send();
   if (q.has("zoom") || q.has("at")) {
     const [x, y] = (q.get("at") || `${F.town.w / 2},${F.town.h / 2}`).split(",").map(Number);
@@ -165,7 +198,9 @@
   if (q.get("select")) view.select(q.get("select"), { follow: q.get("follow") !== "0" });
   view.start();
   // frames every 50 ms, ticks every 417 ms / speed (like the server)
+  let drive = q.get("drive") !== "0";
   setInterval(() => {
+    if (!drive) return;
     if (!paused) { acc += 50 * speed; while (acc >= 417) { tick++; acc -= 417; } }
     send();
   }, 50);
@@ -192,7 +227,7 @@
     if (!name) { view.setOverlay(null); return; }
     const colors = {};
     if (name === "condition") {
-      for (const [id, l] of Object.entries(last.lots || {})) colors[id] = ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"][CityView.stageOf(l.condition)];
+      for (const [id, l] of Object.entries(lots)) colors[id] = ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"][CityView.stageOf(l.condition)];
     } else {
       for (const a of last.agents) { const h = F.town.homes.find(x => x.id === a.home); const pid = h ? h.place : a.home; colors[pid] = `hsl(${Math.round(a.mood * 1.2)} 70% 50%)`; }
     }
@@ -206,6 +241,35 @@
   // hooks for the screenshot and bench scripts
   window.__view = view; window.__fake = fake;
   window.__setTick = t => { tick = t; send(); };
+  window.__state = t => fake.state(t == null ? tick : t);   // a full frame (with lots and homes) for the tick
+  window.__push = st => push(st);                            // send this frame (housing maps as the server would)
+  window.__drive = on => { drive = !!on; };                   // start or stop the page's own frames
+
+  // ?debug: frame times. fps from the gaps between animation frames; the view's own draw time (JS, median
+  // and 90th percentile over the last 120 frames); items drawn; ground chunks on screen and cached.
+  if (q.has("debug")) {
+    const box = $("debug"), gaps = [], draws = [];
+    box.hidden = false;
+    let prev = 0, shown = 0;
+    const pct = (a, f) => { const v = a.slice().sort((x, y) => x - y); return v.length ? v[Math.min(v.length - 1, Math.floor(v.length * f))] : 0; };
+    const tickHud = now => {
+      const s = view.scene();
+      if (prev) { gaps.push(now - prev); if (gaps.length > 120) gaps.shift(); }
+      prev = now;
+      if (s) { draws.push(s.stats.draw); if (draws.length > 120) draws.shift(); }
+      if (s && now - shown > 250) {
+        shown = now;
+        const cam = view.camera(), gap = pct(gaps, 0.5);
+        box.textContent = [`fps      ${gap ? (1000 / gap).toFixed(0) : "-"}  (frame ${gap.toFixed(1)} ms, p90 ${pct(gaps, 0.9).toFixed(1)})`,
+          `draw     ${pct(draws, 0.5).toFixed(2)} ms  (p90 ${pct(draws, 0.9).toFixed(2)}, max ${Math.max(0, ...draws).toFixed(1)})`,
+          `items    ${s.stats.items}`, `chunks   ${s.stats.chunks} on screen, ${(s.stats.cacheMP || 0).toFixed(1)} MP cached, ${s.stats.built} built`,
+          `canvas   ${$("map").width} x ${$("map").height} (dpr ${s.dpr.toFixed(2)}, ${s.quality})`,
+          `camera   ${cam.projection} zoom ${cam.zoom.toFixed(2)} at ${cam.x.toFixed(1)}, ${cam.y.toFixed(1)}`].join("\n");
+      }
+      requestAnimationFrame(tickHud);
+    };
+    requestAnimationFrame(tickHud);
+  }
   window.__bench = n => new Promise(res => {
     const out = [];
     const step = () => { const s = view.scene(); out.push(s.stats.draw); if (out.length < (n || 120)) requestAnimationFrame(step); else { const v = out.slice(5).sort((a, b) => a - b); res({ median: v[v.length >> 1], p90: v[Math.floor(v.length * 0.9)], n: v.length }); } };

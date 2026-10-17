@@ -141,7 +141,7 @@
         poly(g, quad(F, u0 + 0.025, u1 - 0.025, 2, h - 2), shade("#7fb0d8", k));
         poly(g, quad(F, uc - 0.012, uc + 0.012, 0, h), shade(o.color || "#3a4a5a", k));
         poly(g, quad(F, u0 + 0.025, u1 - 0.025, h - 5, h - 2), shade("#b8dcf2", k));
-        ctx.windows.push(quad(F, u0 + 0.025, u1 - 0.025, 2, h - 2));
+        if (!o.boarded) ctx.windows.push(quad(F, u0 + 0.025, u1 - 0.025, 2, h - 2));
       } else {
         poly(g, quad(F, u0 + 0.03, u1 - 0.03, h - 6, h - 3), shade(mix(o.color || "#6b4226", "#000000", 0.25), k));
         poly(g, quad(F, u1 - 0.06, u1 - 0.045, h * 0.45, h * 0.45 + 2), "#e3b54a");
@@ -563,11 +563,14 @@
     }
 
     // --- per-style facades ------------------------------------------------------------------------------
+    // A home at stage 3 or 4 always has a boarded window on a wall facing the camera, the other one from its
+    // door's where it can (PLAN decision 83): with the boarded door it reads even when the door faces away.
+    const cueFace = ctx => FACES.find(f => f !== ctx.p.face) || FACES[0];
     const windowState = (ctx, i, face, n) => {
       const st = ctx.isHome ? ctx.stage : 0, s = hash(ctx.p.id + ":" + face + ":" + i);
       return {
         state: st,
-        boarded: ctx.isHome && (st === 4 ? s % 4 !== 3 : st === 3 && s % 5 === 0),
+        boarded: ctx.isHome && ((st === 4 ? s % 4 !== 3 : st === 3 && s % 5 === 0) || (st >= 3 && i === 0 && face === cueFace(ctx))),
         cracked: ctx.isHome && st >= 3 && (s >>> 4) % 3 === 1,
         dirty: ctx.isHome && st === 2 && i === (ctx.h0 + face.charCodeAt(0)) % Math.max(1, n),
       };
@@ -610,7 +613,7 @@
         });
         if (isDoor) {
           const uc = F.len / 2;
-          door(ctx, F, uc, 0.22, 18, { color: stage >= 3 ? "#6a5238" : DOOR[(ctx.h0 >>> 3) % DOOR.length], frame: ctx.trim, boarded: stage >= 4, step: true });
+          door(ctx, F, uc, 0.22, 18, { color: stage >= 3 ? "#6a5238" : DOOR[(ctx.h0 >>> 3) % DOOR.length], frame: ctx.trim, boarded: stage >= 3, step: true });
           // little porch roof over the door, and the porch light
           poly(g, [F.at(uc - 0.2, 22), F.at(uc + 0.2, 22), F.out(uc + 0.2, 19, 0.16), F.out(uc - 0.2, 19, 0.16)], shade(ctx.roofC, f === LIT ? 1 : 0.8));
           poly(g, [F.out(uc - 0.2, 19, 0.16), F.out(uc + 0.2, 19, 0.16), F.out(uc + 0.2, 18, 0.16), F.out(uc - 0.2, 18, 0.16)], shade(ctx.trim, 0.85));
@@ -655,7 +658,7 @@
           if (stage <= 2) poly(g, quad(F, uc - 0.16, uc + 0.16, fl * fh + 21, fl * fh + 23), f === LIT ? "#ffffff" : "#d8d8d8"); // lintel
         }
         if (isDoor) {
-          door(ctx, F, doorU, 0.26, 19, { color: stage >= 3 ? "#5a4a38" : "#4a2a1a", frame: "#ffffff", boarded: stage >= 4, step: true });
+          door(ctx, F, doorU, 0.26, 19, { color: stage >= 3 ? "#5a4a38" : "#4a2a1a", frame: "#ffffff", boarded: stage >= 3, step: true });
           // garage door with panels
           const gu0 = garageU - 0.42, gu1 = garageU + 0.42;
           poly(g, quad(F, gu0 - 0.03, gu1 + 0.03, 0, 19), "#ffffff");
@@ -799,7 +802,7 @@
           }
         }
         if (isDoor) {
-          door(ctx, F, mid, 0.34, 19, { color: "#3a4a5a", frame: "#cfc8bb", glazed: true, step: true, boarded: stage >= 4 });
+          door(ctx, F, mid, 0.34, 19, { color: "#3a4a5a", frame: "#cfc8bb", glazed: true, step: true, boarded: stage >= 3 });
           const r = F.rect(mid - 0.3, mid + 0.3, 0, 0.28);
           boxAt(g, r[0], r[1], r[2], r[3], 21, 23, stage >= 2 ? "#4e525c" : "#5a6070");
           if (name) wallSign(ctx, F, name, mid, 33, stage >= 3 ? "#c8bc98" : "#f6e7b8", "#2a2f3a", 2);
