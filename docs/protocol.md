@@ -1273,7 +1273,76 @@ town alone). R1a writes this section.
 
 ## Trains
 
-The region's railway: `state.trains` and `town.timetable.train`. R2 writes this section.
+The railway runs in the region world only (`town.world` is `"region"`). In
+Millbrook `state.trains` is `[]` and the timetable has no `train` key. Everything
+here comes from `gameofailife/rail.py`: trains are a pure function of the tick
+(no dice, no state), so a client can also compute them from `town.rail` and
+`timetable.train`.
+
+Two double-track lines run every 10 minutes each way: the Riverton Line `R`
+(`millbrook_station`, `northgate_station`, `quayside_station`,
+`central_station`, `midtown_station`, `ironworks_station`; trains `R1` to `R6`)
+and the Southfield Line `S` (`central_station`, `southfield_station`,
+`fairview_station`, `willow_hills_station`; trains `S1` to `S4`). A train starts
+at its first station on the `out` track, moves up to `speed` tiles a minute,
+stands `dwell` more minutes with its doors open at each stop, lays over
+`layover` minutes at the far end, crosses to the `in` track and runs back. The
+round trip is padded to `trains` x `every` minutes (`cycle_minutes`: 60 for `R`,
+40 for `S`), and train k is k x `every` minutes ahead of train 1. A rider on a
+platform boards the first train on their track with its doors open there, and
+gets off at the first stand of that train at their station. Changing lines at
+Riverton Central takes 2 minutes (free; the fare is paid once).
+
+### `town.rail`
+
+`{"lines": [line, ...]}`, one line:
+
+| Field | Meaning |
+|-------|---------|
+| `id`, `name` | `"R"` / `"Riverton Line"`, `"S"` / `"Southfield Line"`. |
+| `cars` | Cars a train draws (4): the head at track index `i`, the cars behind it at `i-1` to `i-3`. |
+| `tracks` | `{"out": corners, "in": corners}`: each track's tile corners `[x, y]` in driving order, buffer to buffer. Every tile between two corners is track; draw them at the tile centres (corner + 0.5). |
+| `track_tiles` | `{"out": n, "in": n}`: tiles on each track (index `i` runs 0 to n - 1). |
+| `trains` | The train ids, e.g. `["R1", ..., "R6"]`. |
+| `every` | Minutes between two trains in each direction (10). |
+| `speed`, `dwell`, `layover` | Tiles a minute (10), extra minutes at a stop (1), minutes at each terminus (3). |
+| `capacity`, `fare` | Riders a train holds (240; reported, not enforced) and the fare in dollars (3 for ages 18 to 64, else free). |
+| `stations` | `[{"id", "name", "i", "platforms", "exits"}]` in `out` order: `i` is `{"out": index, "in": index}`, the track index where a train's head stands with its doors open; `platforms` the platform rectangles `[x, y, w, h]` (the first beside `out`, the second beside `in`); `exits` the street tiles `[x, y]` where riders enter and leave, a minute's walk from the trains. The station's place (same id, kind `station`) is in `town.places`. |
+
+### `state.trains`
+
+Sent in every state frame: one row per train, line `R` first, about 1.2 KB.
+
+```json
+{"id": "R3", "line": "R", "track": "out", "i": 91, "x": 127, "y": 68, "dir": "e", "at_station": "central_station", "riders": 4}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `id`, `line` | Train id and line id. |
+| `track`, `i` | The track (`out` or `in`) and the head's index on it (`i - 3 >= 0` always). |
+| `x`, `y` | The head's tile. |
+| `dir` | The heading: `n`, `s`, `e` or `w`. |
+| `at_station` | The station id while the train stands there with its doors open, else `null`. |
+| `riders` | Townsfolk on board this minute. |
+
+### `timetable.train`
+
+```json
+{"lines": [{"id": "R", "name": "Riverton Line", "stations": ["millbrook_station", "northgate_station",
+  "quayside_station", "central_station", "midtown_station", "ironworks_station"], "trains": 6,
+  "every_minutes": 10, "cycle_minutes": 60, "fare": 3, "capacity": 240,
+  "minutes": {"out": [0, 3, 8, 12, 19, 24], "in": [0, 4, 11, 15, 20, 24]}}, "..."],
+ "transfer": {"central_station": 2}}
+```
+
+Per line: `stations` in `out` order, how many `trains`, a train `every_minutes`
+each way, `cycle_minutes` for one train's round trip, `fare`, `capacity`, and
+`minutes`: for each track, the minutes from the departure at its first station
+(`stations` in order for `out`, reversed for `in`) to the doors opening at each
+station. `transfer` gives the minutes to change lines at each station two lines
+serve (`central_station`). The longest wait for a train is 8 minutes at a
+through station and 9 at a terminus.
 
 ## Townsfolk
 
