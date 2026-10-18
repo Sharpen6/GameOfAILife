@@ -253,7 +253,7 @@ Sending `hello` again after the welcome does not change your role; it gets
 ## God messages
 
 Sent by a connection whose hello had `role: "god"`. `get_agent`, `get_home`,
-`get_stats` and `get_decisions` read and change nothing, and also work from a
+`get_stats`, `get_folk` and `get_decisions` read and change nothing, and also work from a
 watching (demoted) view; the others are God's alone (see
 [One God per city](#one-god-per-city)).
 
@@ -362,6 +362,36 @@ The city's statistics now, with every kept sample.
 Reply: the [stats object](#stats-object) itself, `{"type": "stats", "full": true, ...}`,
 the same shape as the welcome's `stats` and the [`stats` push](#stats-push).
 Asking does not change what the next push carries.
+
+### `get_folk`
+
+The roster of the townsfolk (see [Townsfolk](#townsfolk)): one row for every
+townsperson ever generated, alive or not, in `i` order.
+
+```json
+{"type": "get_folk"}
+```
+
+Reply: `{"type": "folk", "v": 12, "rows": [ ...rows... ]}`. `v` is the folk
+version, the same number as `stats.folk.v`: it goes up when someone is born,
+dies, arrives, leaves or moves home, so a view asks again only on a new `v`.
+Without townsfolk (`--folk 0` or the `millbrook` world) `v` is 0 and `rows` is
+`[]`. Each row:
+
+| Field      | Meaning |
+|------------|---------|
+| `i`        | The townsperson's index: the `i` of `state.crowd` and the position in the `stats.folk` arrays. |
+| `id`       | Their id, `"f"` and `i` (`"f17"`), for `get_agent` and `set_luck`. |
+| `name`     | Their full name. |
+| `age`      | Age in years. |
+| `child`    | `true` under 18. |
+| `hh`       | Their household's id (`"fh3"`). |
+| `home`     | The household's home id (a `town.homes` id), or `null`. |
+| `place`    | The place id they are in or heading for now, or `null`. |
+| `district` | The district id of their home, or `null`. |
+| `job`      | Job title, or `null`. |
+| `work`     | The place id of the job, or `null`. |
+| `alive`    | `false` once they have died or left the region. |
 
 ### `get_decisions`
 
@@ -980,7 +1010,7 @@ is promoted; the next God hello takes over.
 
 A watching view can only watch: `set_luck`, `set_speed`, `pause`, `resume` and
 `set_profile` from it get `only God can do that; this view is watching` and
-change nothing, while `get_agent`, `get_home`, `get_stats` and
+change nothing, while `get_agent`, `get_home`, `get_stats`, `get_folk` and
 `get_decisions` still work.
 
 Controllers are not limited: any number can connect, each holding its own set of
@@ -1312,8 +1342,47 @@ The welcome's `stats`, the `get_stats` reply and every [`stats` push](#stats-pus
 
 ## Region map
 
-The `region` world's `welcome.town` (the default for `python3 -m gameofailife`; `--world millbrook` is the 80 x 50
-town alone). R1a writes this section.
+In region world (`--world region`, the default of the server, `__main__` and the port page) the God welcome's
+`town` is the 256 x 192 region with Millbrook in its north-west corner. It keeps every key of [Town](#town) except
+`road_rows`, `road_cols` and `road_col_end`, which only the millbrook world sends; `w`, `h` are 256, 192. It adds:
+
+| Field | Meaning |
+|-------|---------|
+| `world` | `"region"`; the millbrook world (v2's 80 x 50 map) sends `"millbrook"` and none of the keys below. |
+| `millbrook` | `[0, 0, 80, 50]`: Millbrook's own 80 x 50 as `[x, y, w, h]`. Tiles at x < 69, y < 50 are exactly the millbrook world's for the same seed. |
+| `rail` | `{"lines": [...]}`, the railway, see below. `timetable.train` and `state.trains` are in [Trains](#trains). |
+| `highways` | `[{"name", "line", "width"}]`: `line` is the corner tiles `[[x, y], ...]` of the road and `width` its width in tiles (Route 9 along y 155, Route 9 North along x 231). Cars only. |
+| `interchanges` | `[[x, y], ...]`: where streets join a highway. |
+| `decor` | `[[x, y, w, h, style, floors, variant], ...]`: 656 buildings with no part in the simulation, standing on `B` tiles; `style` is a renderer model as for places, `variant` 0-7. |
+
+More tile codes: `b` road bridge and `x` level crossing (streets, walkable), `F` farmland (walkable), `=` railway,
+`r` rail bridge and `S` platform (not walkable), `H` highway and `h` highway bridge (cars only).
+
+`districts` lists Millbrook's 7, then the region's 10: `northgate`, `the_heights`, `north_woods`, `quayside`,
+`downtown_riverton`, `midtown`, `ironworks`, `willow_hills`, `southfield`, `greenacre`. A region district also has
+`parking_minutes`, the minutes a driver spends parking there (10 Downtown, 8 Midtown, else 0). `junctions` are the
+street tiles with three or more street neighbours.
+
+Every place except a home has `capacity`, how many people fit inside at once (no place has it in the millbrook
+world). Region places add the kinds `station` and `venue`; a restaurant is kind `cafe` with style `restaurant`.
+Region ids are never integer-like and never one of Millbrook's.
+
+A line in `rail.lines`: `{"id", "name", "cars", "tracks", "track_tiles", "stations", "trains", "every", "speed",
+"dwell", "layover", "capacity", "fare"}`.
+
+| Field | Meaning |
+|-------|---------|
+| `id`, `name` | `"R"`, the Riverton Line (6 stations), or `"S"`, the Southfield Line (4). |
+| `tracks` | `{"out": [[x, y], ...], "in": [...]}`: each track's corner tiles, buffer to buffer. A train's `i` indexes its track's tiles walked from the first corner. |
+| `track_tiles` | `{"out": n, "in": n}`: the tiles on each track. |
+| `stations` | In line order, `{"id", "name", "i", "platforms", "exits"}`: `id` is the station's place id; `i` is `{"out": k, "in": k}`, the track index where a train's head stops; `platforms` the platform rects `[x, y, w, h]` beside the out and the in track; `exits` the street tiles where riders come and go, a minute from the trains. |
+| `trains` | The line's train ids: `R1` to `R6`, `S1` to `S4`. |
+| `every` | Minutes between trains each way. |
+| `speed` | Tiles a minute. |
+| `dwell`, `layover` | Minutes at a stop and at the end of the line. |
+| `cars` | Cars a train draws, at `i-1` to `i-3`. |
+| `capacity` | Riders a train holds (reported, not enforced). |
+| `fare` | Dollars a ride for ages 18-64 (others ride free); the change at Central is free. |
 
 ## Trains
 
@@ -1395,16 +1464,47 @@ About 1,000 townsfolk live default lives in the region around Millbrook (`--folk
 digits; the 60 named characters' ids have no digits). God may read a townsperson's page with `get_agent` and change
 their luck with `set_luck`, exactly as for a named character.
 
+**Who they are.** The 1,000 live in about 420 households in the region's homes. Ids: `f<i>` for a townsperson (i is their index, newborns continue it) and `fh<j>` for a
+household; a region home's `household` is an `fh` id and its `owner` is `"landlord"`, `"market"` or the
+household's id. Each townsperson has a unique name across all 1,060, `age`, `sex` (`"f"`/`"m"`), six traits
+(thrift, family, social, diligence, health, adventure, 0-1), v2's needs, `health`, `money` and `savings` (dollars,
+two decimals), `owns_car`, a `job` (title, place, hourly wage, start and end hour, workdays; pupils are
+`"student"` at a school with wage 0) and a `commute` `[place_id, minutes, "walk" | "car" | "train"]`. Folk money:
+take-home pay at the end of each shift, the $400 pension on Friday 09:00 to 65+ without a paid job, and on Sunday
+23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Three
+Sundays in the red move a household to a cheaper rental or out of town (`left_town`, its `agents` the folk ids).
+Folk homes have their own damp, chills and emergencies (`damp_chill`, `emergency`, `emergency_settled` naming
+folk only). With `folk_isolated`, no townsperson has a tie to the 60, a job at Millbrook's places or a seat at
+Millbrook's school.
+
 | Where | Field | Meaning |
 |-------|-------|---------|
-| State | `crowd` | `[i, x, y, k, ...]`: one quadruple per townsperson outdoors and not aboard a train or bus, sorted by `i` (the number in the id). `k` is `mode + 8 x child` (child: under 16); mode 0 walk, 1 run, 2 car, 3 bike, 4 taxi, 5 ambulance, 6 waiting, 7 other outdoors. Car passengers are left out. |
+| State | `crowd` | `[i, x, y, k, ...]`: one quadruple per townsperson outdoors and not aboard a train or bus, sorted by `i` (the number in the id). `k` is `mode + 8 x child` (child: under 18); mode 0 walk, 1 run, 2 car, 3 bike, 4 taxi, 5 ambulance, 6 waiting, 7 other outdoors. Car passengers are left out. |
 | State | `occ` | One integer per place in `town.places` order: the townsfolk and named inside it (or strolling in a park). In the welcome; then in a frame once 10 game minutes have passed since the last one sent, at most every 40th frame. |
 | State | `folk_n` | The number of townsfolk ids. |
 | Stats | `folk` | Only with townsfolk: `{"v", "worth", "worth_24h", "mood", "health", "luck"}`: `v` the roster version (it changes on births, deaths, moves and new jobs); the rest lists of `folk_n` integers by index, `null` for the dead or gone. `stats.people` and the richest-person headline stay the 60 named. |
 | Stats | `region` | Only in the `region` world: `{"population", "named", "folk", "births", "deaths", "births_today", "deaths_today", "jobs", "commute", "train", "bus"}` with `jobs` `{"total", "filled", "open"}`, `commute` `{"walk", "car", "bus", "train", "bike"}`, `train` `{"riders_now", "riders_today", "lines": [{"id", "riders_today"}]}` and `bus` `{"riders_now", "riders_today"}`. |
 
 `city` and `districts` in the stats count the townsfolk too (the region's districts follow Millbrook's in the
-`region` world).
+`region` world): the counts (`population`, `adults`, `children`, `working`, `students`, `retired`, `out_of_work`),
+the `mood`, `health` and `needs` means, `luck` (God's changes on townsfolk included), and `wealth` (`total` is
+everyone's worth; `median`, `top10_share`, `gini` and `in_debt` cover every adult), and each district's `people`,
+`mood` and `median_worth`. `recent_deaths`, `homes` and `life` keep their own rules. [`get_folk`](#get_folk) lists every townsperson; a view asks for it again when `stats.folk.v`
+changes.
+
+The invariant every frame keeps: `len(crowd) / 4` + the townsfolk inside places + those aboard a train or bus + car
+passengers = the townsfolk alive and in the region. In the `region` world, frames compare `lots` and `homes` every
+20th frame and send them when they changed or every 200th frame (the `millbrook` world keeps checking every frame
+and sending every 40th).
+
+Townsfolk are not characters: no `fork` is ever about one and no controller can `claim` one. A townsperson's page (`get_agent` with a folk id) is
+`{"kind": "folk", "luck_settable", "id", "name", "age", "sex", "alive", "gone", "state", "activity", "place",
+"inside", "x", "y", "luck", "money", "savings", "worth", "health", "mood", "reputation", "needs", "job", "commute",
+"home", "household_id", "household", "vehicle", "relationships", "memory", "choices", "traits", "life"}`: `gone`
+is true once they have left the region, `commute` `[work place id, minutes, mode]` or `null`, `home` `{"id", "name", "place"}`,
+`household` their household's living members' names, `choices` the settled choices of their life so far
+(the named get forks instead), `life` as on a named page (see [Life](#life)). A named character's page has
+`"kind": "named"`.
 
 ## Life
 

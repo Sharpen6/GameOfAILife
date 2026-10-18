@@ -183,6 +183,100 @@
   const PART_COUNTS = ["population", "start_population", "adults", "children", "working", "students", "retired",
     "out_of_work"];
 
+  // F2a's Folk.city_parts keys that name the same thing as _add_parts's (its mood and health are sums).
+  const PART_ALIASES = { employed: "working", pupils: "students", mood: "mood_sum", health: "health_sum",
+    money: "money_sum" };
+  const DISTRICT_ALIASES = { population: "people", mood: "mood_sum", money: "money_sum" };
+
+  // Folk.city_parts(sim) with F2a's key names mapped onto _add_parts's and _districts's.
+  function canon_parts(parts) {
+    if (!parts) return parts;
+    const rename = (row, names) => {
+      const o = {};
+      for (const [k, v] of Object.entries(row)) o[hasOwn(names, k) ? names[k] : k] = v;
+      return o;
+    };
+    const out = rename(Object.fromEntries(Object.entries(parts).filter(([k]) => k !== "districts")), PART_ALIASES);
+    out.districts = {};
+    for (const [did, row] of Object.entries(parts.districts ?? {})) out.districts[did] = rename(row, DISTRICT_ALIASES);
+    return out;
+  }
+
+  const CITY_NEEDS = ["hunger", "energy", "social", "fun"];
+
+  // The townsfolk's part of `city` and `districts`, or null without townsfolk: Folk.city_parts(sim) (F2a, through
+  // canon_parts) plus what it leaves out, over the same people (sim.folk.living()); see the Python twin. `hourly`
+  // is CityStats.sample's call, right after folk.sample_hour at the same tick: each worth comes from the ring just
+  // filled, and the needs, luck and district worths, which a sample does not keep, are left out.
+  function folk_parts(sim, hourly = false) {
+    const f = sim.folk;
+    if (!f.n) return null;
+    const NEED_DECAY = G.agent.NEED_DECAY;
+    const DECAY_SCALE = G.folk_model.DECAY_SCALE;
+    const parts = canon_parts(f.city_parts(sim)) || { districts: {} };
+    const tick = sim.clock.tick;
+    const places = sim.town.places;
+    const rings = hourly && f.rings ? f.rings : null;
+    const full = !hourly;
+    const needs = {};
+    for (const n of CITY_NEEDS) needs[n] = 0.0;
+    const luck = { touched: 0, raised: 0, lowered: 0, sum: 0.0 };
+    const worths = [];
+    const by_district = new Map();
+    let worth_sum = 0, in_debt = 0, retired = 0, out_of_work = 0;
+    for (const p of f.living()) {
+      if (full) {
+        const raw = p._needs; // the lazy raw needs as of p._nt, projected to now and never written (no settling)
+        const dt = tick - p._nt;
+        if (dt > 0 && p.age >= 5) {
+          const scale = DECAY_SCALE[p.state === "busy" ? p.activity : ""] || {};
+          for (const n of CITY_NEEDS) {
+            const v = raw[n] - NEED_DECAY[n] * (n in scale ? scale[n] : 1.0) * dt;
+            needs[n] += v < 0.0 ? 0.0 : v > 100.0 ? 100.0 : v;
+          }
+        } else {
+          for (const n of CITY_NEEDS) needs[n] += raw[n];
+        }
+        const x = p.luck;
+        luck.sum += x;
+        if (x !== 50) {
+          luck.touched += 1;
+          luck[x > 50 ? "raised" : "lowered"] += 1;
+        }
+      }
+      const ring = rings !== null ? rings.get(p.i) : undefined;
+      const w = ring && ring.length ? ring[ring.length - 1] : f.worth(sim, p);
+      worth_sum += w;
+      if (p.age >= 18) {
+        worths.push(w);
+        if (p.money + p.savings < 0) in_debt += 1;
+        if (p.job === null) {
+          if (p.age >= 65) retired += 1;
+          else out_of_work += 1;
+        }
+        if (full) {
+          const home = f.home_place(p);
+          const place = home ? places.get(home) : undefined;
+          const d = place ? place.district : "";
+          if (!by_district.has(d)) by_district.set(d, []);
+          by_district.get(d).push(w);
+        }
+      }
+    }
+    const extra = { adult_worths: worths, worth_sum, in_debt, retired, out_of_work };
+    if (full) {
+      extra.needs_sum = needs;
+      extra.luck = luck;
+    }
+    for (const [k, v] of Object.entries(extra)) if (!hasOwn(parts, k)) parts[k] = v;
+    if (!parts.districts) parts.districts = {};
+    for (const [d, ws] of by_district) {
+      if (!hasOwn(parts.districts, d)) parts.districts[d] = { people: 0, mood_sum: 0.0 };
+      if (!hasOwn(parts.districts[d], "adult_worths")) parts.districts[d].adult_worths = ws;
+    }
+    return parts;
+  }
+
   // Add the townsfolk to a city block (Folk.city_parts(sim), F2a); every key is optional (see the Python twin).
   function _add_parts(block, people, parts) {
     const named_n = block.population;
@@ -192,23 +286,31 @@
       const alive = people.map(p => p.agent);
       block.mood = _int((sum(alive.map(a => a.mood)) + (parts.mood_sum ?? 0.0)) / n);
       block.health = _int((sum(alive.map(a => a.health)) + (parts.health_sum ?? 0.0)) / n);
-      const needs = parts.needs_sum ?? {};
-      const out = {};
-      for (const k of Object.keys(block.needs)) out[k] = _int((sum(alive.map(a => a.needs[k])) + (needs[k] ?? 0.0)) / n);
-      block.needs = out;
-      const luck = parts.luck ?? {};
-      for (const k of ["touched", "raised", "lowered"]) block.luck[k] += pyInt(luck[k] ?? 0);
-      block.luck.mean = _int((sum(alive.map(a => a.luck)) + (luck.sum ?? 50.0 * (n - named_n))) / n);
+      const needs = parts.needs_sum;
+      if (needs !== undefined && needs !== null) { // without the townsfolk's needs the named means stand
+        const out = {};
+        for (const k of Object.keys(block.needs)) {
+          out[k] = _int((sum(alive.map(a => a.needs[k])) + (needs[k] ?? 0.0)) / n);
+        }
+        block.needs = out;
+      }
+      const luck = parts.luck;
+      if (luck !== undefined && luck !== null) {
+        for (const k of ["touched", "raised", "lowered"]) block.luck[k] += pyInt(luck[k] ?? 0);
+        block.luck.mean = _int((sum(alive.map(a => a.luck)) + (luck.sum ?? 50.0 * (n - named_n))) / n);
+      }
     }
     const worths = parts.adult_worths;
     if (worths && worths.length) {
       const adults = people.filter(p => p.agent.is_adult).map(p => p.worth).concat(worths);
       const w = block.wealth;
-      w.total += sum(worths);
+      w.total += pyInt(parts.worth_sum ?? sum(worths));
       w.median = _int(median(adults));
       w.top10_share = top_share(adults);
       w.gini = gini(adults);
       w.in_debt += pyInt(parts.in_debt ?? 0);
+    } else if (parts.money_sum) { // no worths: the townsfolk's cash and savings still count in the total
+      block.wealth.total += pyInt(parts.money_sum);
     }
   }
 
@@ -287,7 +389,7 @@
   // the samples recorded since the previous push, and each sample goes in one push only.
   function stats_json(sim, full = false) {
     const people = _people(sim);
-    const parts = sim.folk.n ? sim.folk.city_parts(sim) : null;
+    const parts = folk_parts(sim);
     const samples = full ? sim.stats.samples.slice() : sim.stats.take_new_samples();
     const out = { type: "stats", full: Boolean(full), tick: sim.clock.tick, time: sim.clock.stamp(),
       day: sim.clock.day, city: _city_block(sim, people, parts), llm: _llm_block(sim),
@@ -401,7 +503,8 @@
     sample(sim) {
       if (!sim.agents || !sim.agents.size) return null;
       const people = _people(sim);
-      const city = _city_block(sim, people, sim.folk.n ? sim.folk.city_parts(sim) : null);
+      sim.folk.sample_hour(sim); // the townsfolk's worth rings (stats.folk.worth_24h); folk_parts reads them
+      const city = _city_block(sim, people, folk_parts(sim, true));
       const homes = city.homes;
       this.samples.push({
         tick: sim.clock.tick, day: sim.clock.day, pop: city.population, mood: city.mood,
@@ -420,7 +523,6 @@
         keepLast(ring, WORTH_HOURS);
       }
       this._check_richest(sim, people.filter(p => p.agent.is_adult));
-      sim.folk.sample_hour(sim); // the townsfolk's worth rings (stats.folk.worth_24h)
       return null;
     }
 
@@ -451,6 +553,8 @@
     RECENT_DEATHS, LOG_DECIDERS, DECISIONS_LIMIT, DECISIONS_MAX, _zeros, avg_seconds, _int, _mean, median, gini,
     top_share, _money, _Person, _people, _district_of_place, _homes_at, _wealth_block, _homes_block, _city_block,
     _counter_json, _llm_block, _districts, _households, _people_rows, stats_json, region_block, PART_COUNTS,
+    canon_parts,
+    folk_parts,
     _add_parts, decisions, CityStats,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

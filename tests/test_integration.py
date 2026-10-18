@@ -289,6 +289,8 @@ async def record_session() -> tuple[list, dict]:
         g["home_house"] = await god.request({"type": "get_home", "home_id": "main_20"})
         g["unknown_home"] = await god.request({"type": "get_home", "home_id": "birch_court"})
         g["stats"] = await god.request({"type": "get_stats"})
+        g["folk"] = await god.request({"type": "get_folk"})  # v3: Millbrook at folk 0 has no townsfolk to list
+        g["folk_agent"] = await god.request({"type": "get_agent", "agent_id": "f0"})  # ... so f0 is unknown
         g["decisions"] = await god.request({"type": "get_decisions"})
         g["decisions_agent"] = await god.request({"type": "get_decisions", "agent_id": second["agent_id"],
                                                   "limit": 5})
