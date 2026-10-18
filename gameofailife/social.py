@@ -27,7 +27,7 @@ TALK_P = {"home": 0.13, "block": 0.027, "work": 0.06, "school": 0.08, "cafe": 0.
 STRANGER_W = {"home": 0.3, "block": 0.6, "work": 0.25, "school": 0.4, "cafe": 0.5, "park": 0.5}
 CLASS_OF_KIND = {"cafe": "cafe", "venue": "cafe", "park": "park", "school": "school", "station": "block"}
 STEP = {"warm": 1.6, "pleasant": 0.5, "awkward": -1.5, "argument": -5.0}
-SOCIAL_GAIN = {"warm": 10, "pleasant": 6, "awkward": 6, "argument": 2}
+SOCIAL_GAIN = {"warm": 10, "pleasant": 6, "awkward": 6, "argument": 2}  # named: g * (1 - need/100)**2
 TONE_CODE = {"warm": 1, "pleasant": 0, "awkward": -1, "argument": -1}
 TALKS_A_DAY = 10
 CANDIDATES = 6
@@ -373,8 +373,12 @@ def converse(sim, a, b, cls, place_id, t, rr) -> str | None:
             r.trust = max(0.0, r.trust - 3)
         on_affinity(sim, me.id, other.id, before, r.affinity)
     g = SOCIAL_GAIN[tone]
-    a.adjust("social", g)
-    b.adjust("social", g)
+    for x in (a, b):  # a named's gain shrinks as the need fills, so a chatty day can still end lonely (v2's forks)
+        if people.is_named(x):
+            f = 1 - x.needs["social"] / 100
+            x.adjust("social", g * f * f)
+        else:
+            x.adjust("social", g)
     if tone == "argument":
         a.adjust("fun", -4)
         b.adjust("fun", -4)

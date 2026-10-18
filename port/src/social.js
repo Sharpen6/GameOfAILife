@@ -16,7 +16,7 @@
   const STRANGER_W = { home: 0.3, block: 0.6, work: 0.25, school: 0.4, cafe: 0.5, park: 0.5 };
   const CLASS_OF_KIND = { cafe: "cafe", venue: "cafe", park: "park", school: "school", station: "block" };
   const STEP = { warm: 1.6, pleasant: 0.5, awkward: -1.5, argument: -5.0 };
-  const SOCIAL_GAIN = { warm: 10, pleasant: 6, awkward: 6, argument: 2 };
+  const SOCIAL_GAIN = { warm: 10, pleasant: 6, awkward: 6, argument: 2 }; // a named gets g * (1 - need/100)**2 of it (converse)
   const TONE_CODE = { warm: 1, pleasant: 0, awkward: -1, argument: -1 };
   const TALKS_A_DAY = 10;
   const CANDIDATES = 6;
@@ -341,8 +341,12 @@
       on_affinity(sim, me.id, other.id, before, r.affinity);
     }
     const g = SOCIAL_GAIN[tone];
-    a.adjust("social", g);
-    b.adjust("social", g);
+    for (const x of [a, b]) { // a named's gain shrinks as the need fills, so a chatty day can still end lonely (v2's forks)
+      if (P().is_named(x)) {
+        const f = 1 - x.needs.social / 100;
+        x.adjust("social", g * f * f);
+      } else x.adjust("social", g);
+    }
     if (tone === "argument") {
       a.adjust("fun", -4);
       b.adjust("fun", -4);
