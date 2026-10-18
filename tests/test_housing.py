@@ -13,6 +13,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import unittest
@@ -3042,6 +3043,8 @@ def notice_trace(dice: int, legs: list) -> dict:
                     [a.id, a.x, a.y, a.state, a.activity, a.inside, round(a.money, 2), round(a.savings, 2),
                      round(a.health, 2), [round(a.needs[n], 2) for n in NEEDS], a.household_id,
                      sim.households[a.household_id].home_id, a.vehicle, a.riding] for a in sim.agents.values()]])
+    notice, mizrahi = sim.homes["main_13"], sim.households["mizrahi"]
+    out["end"] = [notice.owner, notice.listing, notice.household, mizrahi.home_id, mizrahi.weekly_rent]
     return json.loads(json.dumps(out))
 
 
@@ -3088,35 +3091,59 @@ class NoticeLockstepTest(unittest.TestCase):
         }
       }
     }
+    const notice = sim.homes.get("main_13"), mizrahi = sim.households.get("mizrahi");
+    out.end = [notice.owner, notice.listing, notice.household, mizrahi.home_id, mizrahi.weekly_rent];
     process.stdout.write(JSON.stringify(out));
     """
 
-    def assertLockstep(self, dice: int, legs: list) -> dict:
+    def assertLockstep(self, dice: int, legs: list) -> tuple[dict, dict]:
         case = {"dice": dice, "start": at(60, 18, 30), "buyers": FIVE_BUYERS, "legs": legs}
         run = subprocess.run([NODE, "-e", self.JS, str(ROOT / "port" / "tools" / "engine.cjs")],
                              input=json.dumps(case), capture_output=True, text=True, timeout=300, check=False)
         self.assertEqual(run.returncode, 0, run.stderr)
         js, py = json.loads(run.stdout), notice_trace(dice, legs)
-        for name in ("events", "forks", "asked", "hours"):
+        for name in ("events", "forks", "asked", "hours", "end"):
             a, b = py[name], js[name]
             first = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             self.assertEqual(a[first:first + 1], b[first:first + 1], f"{name} differ first at #{first} (Python first)")
             self.assertEqual(len(a), len(b), f"{name}: Python has {len(a)}, JS {len(b)}")
-        self.assertIn(f"{at(120, 9)} home_listed Millbrook Homes is selling 13 Main Street and gives the Mizrahis 2 "
-                      "weeks' notice.", py["events"])
-        sale = f"{at(134, 9)} home_listed Millbrook Homes puts 13 Main Street up for sale ($"
-        self.assertTrue(any(e.startswith(sale) for e in py["events"]), py["events"][-20:])
-        return py
+        for trace in (py, js):
+            self.assertIn(f"{at(120, 9)} home_listed Millbrook Homes is selling 13 Main Street and gives the Mizrahis 2 "
+                          "weeks' notice.", trace["events"])
+            sale = f"{at(134, 9)} home_listed Millbrook Homes puts 13 Main Street up for sale ($"
+            self.assertTrue(any(e.startswith(sale) for e in trace["events"]), trace["events"][-20:])
+        return py, js
 
     def test_they_move_and_it_is_sold(self):
-        py = self.assertLockstep(3, [[at(120, 8, 59), 15 * 60], [at(134, 8, 59), 15 * 60]])
+        # The tenants under notice move out before the notice runs out, into a rental the notice fork offered them
+        # (every rental it offers passed housing.affordable), and when it runs out the landlord sells the empty house:
+        # it goes to the market, for sale. Both engines alike. Which rental they take is their profile's pick among
+        # those offered (package D's scores took the house to let, option 0; v2's took the cheaper flat), so it is
+        # not pinned.
+        py, js = self.assertLockstep(3, [[at(120, 8, 59), 15 * 60], [at(134, 8, 59), 15 * 60]])
         notice = [r for r in py["asked"] if r[0] == "house_hunt" and r[1][3]["label"].startswith("Ask Millbrook")]
-        self.assertEqual(len(notice), 1)  # asked once, and they take the cheaper flat
-        self.assertIn(f"{at(120, 18, 10)} home_rented The Mizrahis move into Birch Court, flat 1B (flat) at $220/week.",
-                      py["events"])
+        self.assertEqual(len(notice), 1)  # asked once
+        offered = {}
+        for o in notice[0][1]:
+            m = re.match(r"Rent (?:the cheaper )?(.+?) \(.*\) for \$(\d+)/week$", o["label"])
+            if m:
+                offered[m.group(1)] = int(m.group(2))
+        self.assertTrue(offered, notice[0][1])
+        due = at(134, 9)
+        for trace in (py, js):
+            moves = [m for m in (re.match(r"(\d+) home_rented The Mizrahis move into (.+?) \(.*\) at \$(\d+)/week\.$", e)
+                                 for e in trace["events"]) if m]
+            self.assertEqual(len(moves), 1, [e for e in trace["events"] if "Mizrahis" in e])
+            tick, name, rent = int(moves[0].group(1)), moves[0].group(2), int(moves[0].group(3))
+            self.assertLess(tick, due)
+            self.assertEqual(offered.get(name), rent, (name, rent, offered))
+            owner, listing, household, home_id, weekly_rent = trace["end"]
+            self.assertEqual((owner, listing, household), ("market", "for_sale", None))  # the landlord sold it
+            self.assertNotEqual(home_id, "main_13")
+            self.assertEqual(weekly_rent, rent)
 
     def test_they_stay_and_are_moved_out(self):
-        py = self.assertLockstep(3, [[at(120, 8, 59), 120], [at(134, 8, 59), 15 * 60]])
+        py, _ = self.assertLockstep(3, [[at(120, 8, 59), 120], [at(134, 8, 59), 15 * 60]])
         self.assertIn(f"{at(134, 9)} evicted Millbrook Homes evicts the Mizrahis from 13 Main Street. They move into "
                       "Birch Court, flat 1B at $220/week.", py["events"])
 
