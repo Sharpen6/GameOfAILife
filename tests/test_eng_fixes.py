@@ -378,7 +378,10 @@ class TestServerLimit(ServerCase):
         god = self.server.god
         before = self.sim.agents["tom"].profile.prompt
         await sock.send(json.dumps({"type": "set_profile", "agent_id": "tom", "prompt": "x" * 70_000, "req_id": 1}))
-        reply = json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))
+        while True:  # past God's state and stats pushes
+            reply = json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))
+            if reply["type"] not in ("state", "stats"):
+                break
         self.assertEqual(reply, {"type": "error", "error": TOO_LARGE})
         self.assertIs(self.server.god, god, "still God")
         self.assertEqual(self.sim.agents["tom"].profile.prompt, before, "nothing in it was done")
@@ -471,6 +474,8 @@ class TestPreambleLimits(ServerCase):
     async def test_headers_that_never_end_are_cut_off(self):
         # A header line every 0.1 s, forever: the time limit is for the whole preamble, not for each line.
         with mock.patch.object(server_module, "HEADER_SECONDS", 0.5):
+            loop = asyncio.get_running_loop()
+            start = loop.time()  # the server (in this loop) starts its clock once it has the connection
             reader, writer = await self.open()
             writer.write(b"GET / HTTP/1.1\r\n")
 
@@ -485,7 +490,11 @@ class TestPreambleLimits(ServerCase):
 
             dripping = asyncio.create_task(trickle())
             try:
-                self.assertEqual(await asyncio.wait_for(reader.read(), TIMEOUT), b"")
+                try:
+                    self.assertEqual(await asyncio.wait_for(reader.read(), TIMEOUT), b"")
+                except ConnectionResetError:
+                    pass  # closed with a header line on its way in, which may reset the connection: closed all the same
+                self.assertGreaterEqual(loop.time() - start, 0.49, "by the time limit, not before")
             finally:
                 dripping.cancel()
 
