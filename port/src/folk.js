@@ -1146,7 +1146,7 @@
       const home = home_id && sim.homes ? sim.homes.get(home_id) : undefined;
       const [x, y] = this.xy(p, sim.clock.tick);
       const rels = {};
-      const entries = Object.entries(p.relationships).sort((a, b) => b[1].affinity - a[1].affinity ||
+      const entries = Array.from(p.relationships.entries()).sort((a, b) => b[1].affinity - a[1].affinity ||
         (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
       for (const [oid, r] of entries) rels[oid] = people.rel_row(sim, oid, r);
       const members = [];
