@@ -52,7 +52,8 @@ slow = unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "runs with GOAL_S
 
 # PLAN 3.12: what client/index.html loads, in this order.
 PLAN_STYLES = ["style.css", "view/view.css", "dashboard.css"]
-PLAN_SCRIPTS = [f"view/{name}.js" for name in ("proj", "art", "buildings", "actors", "scene", "movers", "camera",
+PLAN_SCRIPTS = [f"view/{name}.js" for name in ("proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod",
+                                                "lowart", "scene", "movers", "crowd", "trains", "pings", "camera",
                                                 "minimap", "view")] + ["dashboard.js", "game.js"]
 
 # PLAN 3.8: the `stats` message's shape, which LocalHost's must have as well as Python's.
