@@ -82,19 +82,155 @@ def board(sim) -> JobBoard:
     return sim.life.board
 
 
+def _hit(sim, p, what: str, base: float, valence: int, rr) -> bool:
+    from . import life
+
+    return life._hit(sim, p, what, base, valence, rr)
+
+
+def _place_name(sim, job) -> str:
+    place = sim.town.places.get(job.place_id)
+    return place.name if place else job.place_id
+
+
+def _event(sim, p, text: str, tag: str, importance: int | None = None) -> None:
+    from . import life
+
+    life._event(sim, p, text, tag, importance)
+
+
+def worker(p) -> bool:
+    """An adult holding a paid job on the board."""
+    return p.job is not None and p.job.hourly_wage > 0 and getattr(p.job, "slot", -1) >= 0
+
+
 def on_shift_end(sim, p) -> None:
-    """A shift ends (named: `sim._end_activity`; folk: F2a's shift end, after `folk_life.pay_shift`): standing.
-    Skeleton: v2's flat +0.5 a shift for both tiers."""
-    p.reputation = min(100.0, p.reputation + 0.5)
+    """A shift ends (named: `sim._end_activity`; folk: F2a's shift end, after `folk_life.pay_shift`): standing
+    (life.md 5.7): a good shift `odds(.15 + .3 diligence, +1)` +1.2, a bad one `odds(.08, -1)` -1.5, else +.1."""
+    from . import dice, people
+
+    if not worker(p):
+        p.reputation = min(100.0, p.reputation + 0.5)  # a pupil's school day: v2's +0.5
+        return
+    rr = dice.stream(people.dice_seed(sim), dice.SHIFT, p.id, sim.clock.day)
+    good = dice.odds(STANDING_GOOD[0] + STANDING_GOOD[1] * people.traits(p)["diligence"], +1, p.luck)
+    bad = dice.odds(STANDING_BAD[0], -1, p.luck)
+    x = rr.random()
+    people.log_roll(sim, p, "shift", good, x)
+    if x < good:
+        delta = STANDING_GOOD[2]
+    elif x < good + bad:
+        delta = STANDING_BAD[1]
+    else:
+        delta = STANDING_PLAIN
+    p.reputation = max(0.0, min(100.0, p.reputation + delta))
 
 
 def daily(sim, p, rr) -> None:
-    """The person's daily career roll (life.tick, in their slot minute): standing drift, review, layoff, hiring.
-    Skeleton: nothing (v2)."""
-    return None
+    """The person's daily career roll (life.tick, in their slot minute): standing drifts toward 50; a worker may
+    be laid off (`odds(.03 x PACE / 360, -1)`); a seeker 18-64 may be hired (`odds(.035 + .0005 rep, +1)`)."""
+    from . import life
+
+    if not p.is_adult:
+        return
+    day = sim.clock.day
+    if worker(p):
+        p.reputation += STANDING_DRIFT * (50.0 - p.reputation)
+        if day % 90 == p.life.review_day and day - p.life.job_since >= 30:
+            review(sim, p, rr)
+            if not worker(p):
+                return
+        if _hit(sim, p, "layoff", LAYOFF_YEAR * life.PACE["career"] / life.YEAR_DAYS, -1, rr):
+            lose_job(sim, p, rr, "laid_off")
+    elif (p.job is None and p.life.jobless_since is not None and HIRE_AGES[0] <= p.age <= HIRE_AGES[1]
+          and life.can_work(sim, p)):
+        if _hit(sim, p, "hire", HIRE_BASE + HIRE_REP * p.reputation, +1, rr):
+            hire(sim, p, rr)
+
+
+def review(sim, p, rr) -> None:
+    """Every 90 days (life.md 5.7): 50+ a 4-7% raise at `odds(.5, +1)`; under 25 a warning; 40+ clears them;
+    under 20 with 2 warnings, fired."""
+    life = p.life
+    rep = p.reputation
+    if rep >= 50 and _hit(sim, p, "raise", 0.5, +1, rr):
+        pct = rr.int(4, 7)
+        p.job.hourly_wage = round(p.job.hourly_wage * (100 + pct) / 100, 2)
+        _event(sim, p, f"{p.name} gets a {pct}% raise at {_place_name(sim, p.job)}.", "raise",
+               None if p.id in sim.agents else 0)
+    if rep >= 40:
+        life.warnings = 0
+    elif rep < 25:
+        life.warnings += 1
+        if rep < 20 and life.warnings >= 2:
+            lose_job(sim, p, rr, "fired")
+            return
+        _event(sim, p, f"{p.name} gets a warning at work.", "warning", None if p.id in sim.agents else 0)
+
+
+def lose_job(sim, p, rr, why: str) -> None:
+    """`p` loses their job: the slot reopens 7-30 days later; benefit for 13 weeks; folk `on_job_change`."""
+    job = p.job
+    b = board(sim)
+    day = sim.clock.day
+    b.free(job.slot, day + rr.int(REOPEN_DAYS[0], REOPEN_DAYS[1]))
+    p.life.last_wage = job.hourly_wage
+    p.life.jobless_since = day
+    p.life.warnings = 0
+    p.job = None
+    place = _place_name(sim, job)
+    text = (f"{p.name} is laid off from the job as {job.title} at {place}." if why == "laid_off"
+            else f"{p.name} is fired from the job as {job.title} at {place}.")
+    _event(sim, p, text, "job_lost", None if p.id in sim.agents else 1)
+    if p.id not in sim.agents:
+        from . import folk
+
+        folk.on_job_change(sim, p)
+
+
+def hire(sim, p, rr) -> bool:
+    """`p` takes the best open slot paying at most 1.25x their last wage (a named: the best paid; folk: the
+    nearest by `sim.folk.commute_minutes`, None skipped). False when none will do."""
+    b = board(sim)
+    cap = PAY_CAP * p.life.last_wage if p.life.last_wage > 0 else None
+    best, best_key = None, None
+    named = p.id in sim.agents
+    for slot in b.vacant(sim, p):
+        job = b.jobs[slot]
+        if cap is not None and job.hourly_wage > cap:
+            continue
+        if named:
+            key = (-job.hourly_wage, slot)
+        else:
+            minutes = sim.folk.commute_minutes(p, job.place_id)
+            if minutes is None:
+                continue
+            key = (minutes, slot)
+        if best_key is None or key < best_key:
+            best, best_key = slot, key
+    if best is None:
+        return False
+    b.take(best, p.id)
+    p.job = b.jobs[best]
+    p.life.job_since = sim.clock.day
+    p.life.jobless_since = None
+    p.life.warnings = 0
+    p.reputation = 50.0
+    _event(sim, p, f"{p.name} starts a new job as {p.job.title} at {_place_name(sim, p.job)}.", "job_new",
+           None if named else 0)
+    if not named:
+        from . import folk
+
+        folk.on_job_change(sim, p)
+    return True
 
 
 def benefit(sim, p) -> float:
-    """This week's unemployment benefit for `p` (money.weekly pays it): BENEFIT for BENEFIT_WEEKS after a job loss.
-    Skeleton: none."""
-    return 0.0
+    """This week's unemployment benefit for `p` (money.weekly pays it): BENEFIT for BENEFIT_WEEKS after a job loss,
+    under 65."""
+    life = p.life
+    if p.job is not None or life is None or life.jobless_since is None or p.age >= 65 or not p.is_adult:
+        return 0.0
+    if sim.clock.day - life.jobless_since >= 7 * BENEFIT_WEEKS:
+        return 0.0
+    return BENEFIT

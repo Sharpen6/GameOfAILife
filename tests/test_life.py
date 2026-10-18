@@ -23,10 +23,66 @@ def node_eval(code: str) -> object:
     return json.loads(run.stdout)
 
 
+def _activities() -> None:
+    """Until F3's hooks add them, life's activities (ward, doctor, baby) are registered for the tests."""
+    from gameofailife import sim as sim_mod
+
+    for name, spec in life.ACTIVITIES_EXTRA.items():
+        if name not in sim_mod.ACTIVITIES:
+            sim_mod.ACTIVITIES[name] = sim_mod.Activity(spec.minutes, dict(spec.gains), spec.inside)
+
+
+def life_row(sim, a) -> list:
+    """parity_life.cjs `row` in Python."""
+    L = a.life
+
+    def r2(x):
+        return round(x, 2)
+    return json.loads(json.dumps([
+        a.id, a.age, a.alive, a.state, a.activity, a.inside, r2(a.money), r2(a.savings), r2(a.health),
+        r2(a.reputation), [a.job.title, a.job.slot, r2(a.job.hourly_wage)] if a.job else None, a.household_id,
+        [[[c.id, c.until, c.off_until, c.doctor] for c in L.conditions], list(L.chronic), list(L.treated),
+         L.ward_until, L.pregnant, L.trying, r2(L.lifestyle), r2(L.pay), L.jobless_since, L.warnings,
+         L.grief_until] if L else None]))
+
+
+def python_life_trace(seed: int, days: int, dice: int) -> dict:
+    """parity_life.cjs `trace` in Python, with the JS port's dice for v2's sim.rng (tests.test_port.DiceSim)."""
+    from gameofailife.clock import MINUTES_PER_DAY
+    from tests.test_port import DiceSim
+
+    _activities()
+    sim = DiceSim(seed, dice)
+    hooked = getattr(sim, "life", None) is not None
+    if not hooked:
+        life.pre_init(sim)
+        life.init(sim)
+    out = {"events": [], "hours": []}
+
+    def drain():
+        events, _, _ = sim.drain()
+        out["events"] += [f"{e['tick']} {e['tag']} {e['importance']} {e['text']}" for e in events]
+
+    drain()
+    end = sim.clock.tick + days * MINUTES_PER_DAY
+    while sim.clock.tick < end:
+        sim.step()
+        if not hooked:
+            life.tick(sim)
+        drain()
+        if sim.clock.minute_of_day % 60 == 0:
+            out["hours"].append([sim.clock.tick, [life_row(sim, a) for a in sim.agents.values()]])
+    out["counts"] = dict(sim.life.counts)
+    out["board"] = list(sim.life.board.holder)
+    out["block"] = life.stats_block(sim)
+    return json.loads(json.dumps(out))
+
+
 def life_sim(seed: int = 1) -> Simulation:
     """A v2 Simulation with life set up (until the hooks land, the tests call life's entry points themselves)."""
+    _activities()
     sim = Simulation(seed)
-    if not hasattr(sim, "life"):
+    if getattr(sim, "life", None) is None:
         life.pre_init(sim)
         life.init(sim)
     return sim
