@@ -3,7 +3,8 @@
 //
 // This module is folk's only reader of `G.roads` and `G.rail`. A trip is a list of legs [kind, t0, t1, data] in
 // absolute ticks: WALK and DRIVE legs carry a roads Route, WAIT the station's place id, RIDE the train id. Nothing
-// here draws dice; routes are built with keep=false, so they live only on active trips.
+// here draws dice; routes are built with keep=false (out of the road net's LRU) and a road leg's is kept in folk's own
+// cache of ROUTES_CAP, cleared when full: a Route is frozen, so the trips that take it share it.
 (function (G) {
   "use strict";
 
@@ -13,6 +14,7 @@
   const TRAIN_SAVES = 5; // ... and it must save at least this many minutes on it
   const PARK_RIDE_SLACK = 8; // a car owner rides when the train is within this many minutes of driving
   const REACH = { walk: 45, car: 45, train: 60 }; // the longest commute by each mode (commute_minutes; null beyond)
+  const ROUTES_CAP = 8192; // road-leg Routes kept in folk's cache (net.memo "folk_routes") before it is cleared
 
   const net = town => G.roads.roadnet(town);
 
@@ -24,7 +26,20 @@
 
   // One WALK or DRIVE leg from a to b leaving at t0.
   function road_leg(town, kind, a, b, t0) {
-    const route = net(town).route(a, b, kind === WALK ? "walk" : "car", false);
+    const mode = kind === WALK ? "walk" : "car";
+    const rn = net(town);
+    let cache = rn.memo.get("folk_routes");
+    if (cache === undefined) {
+      cache = new Map();
+      rn.memo.set("folk_routes", cache);
+    }
+    const key = `${G.roads.endKey(a)}|${G.roads.endKey(b)}|${mode}`;
+    let route = cache.get(key);
+    if (route === undefined) {
+      if (cache.size >= ROUTES_CAP) cache.clear();
+      route = rn.route(a, b, mode, false);
+      cache.set(key, route);
+    }
     return [kind, t0, t0 + Math.max(1, route.minutes), route];
   }
 
@@ -33,6 +48,16 @@
     const plan = G.rail && G.rail.trip_via_roads;
     if (!plan) return null;
     return plan(town, net(town), a, b, tick, car);
+  }
+
+  // The minutes of train_trip's trip without building its legs (rail.trip_minutes), or null as train_trip.
+  function train_minutes(town, a, b, tick, car) {
+    const fn = G.rail && G.rail.trip_minutes;
+    if (!fn) {
+      const trip = train_trip(town, a, b, tick, car);
+      return trip === null ? null : trip.minutes;
+    }
+    return fn(town, net(town), a, b, tick, car);
   }
 
   // A TrainTrip's legs as absolute ticks (the planner gives them from the departure tick).
@@ -56,10 +81,9 @@
     if (walk <= WALK_MAX) return ["walk", [road_leg(town, WALK, a, b, tick)]];
     const drive = car ? minutes(town, a, b, "car") : null;
     if (walk > TRAIN_WALK) {
-      const trip = train_trip(town, a, b, tick, car);
-      if (trip !== null && trip.minutes + TRAIN_SAVES <= walk && (
-        drive === null || trip.minutes <= drive + PARK_RIDE_SLACK)) {
-        return ["train", _legs_of(trip, tick)];
+      const train = train_minutes(town, a, b, tick, car); // weighed first: the legs are built only for a train taken
+      if (train !== null && train + TRAIN_SAVES <= walk && (drive === null || train <= drive + PARK_RIDE_SLACK)) {
+        return ["train", _legs_of(train_trip(town, a, b, tick, car), tick)];
       }
     }
     if (drive !== null && drive < walk) return ["car", [road_leg(town, DRIVE, a, b, tick)]];
@@ -114,7 +138,8 @@
   }
 
   G.folk_transit = {
-    WALK, DRIVE, WAIT, RIDE, WALK_MAX, TRAIN_WALK, TRAIN_SAVES, PARK_RIDE_SLACK, REACH, net, minutes, road_leg,
-    train_trip, _legs_of, choose, best_minutes, end_of, leg_at, boardings, fare, station_xy, train_xy,
+    WALK, DRIVE, WAIT, RIDE, WALK_MAX, TRAIN_WALK, TRAIN_SAVES, PARK_RIDE_SLACK, REACH, ROUTES_CAP, net, minutes,
+    road_leg, train_trip, train_minutes, _legs_of, choose, best_minutes, end_of, leg_at, boardings, fare, station_xy,
+    train_xy,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

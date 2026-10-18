@@ -19,11 +19,14 @@ either; the 3 best stations are kept (ties by station order), egress likewise on
 serving both ("out" when the board station comes first) or changes at a station both lines serve (Central:
 TRANSFER_MINUTES, then a second wait). The fastest wins, ties by (minutes, board order, alight order).
 `worst_minutes` is the same search with each ride's worst wait-plus-ride over the cycle, so it is never shorter
-than the trip of any departure tick.
+than the trip of any departure tick. The search depends on the departure only through its phase in the timetables
+(`tick % period`, the lcm of the lines' cycles), so it is memoized by phase; `trip_minutes` is its minutes without
+the legs (no Route built), for a caller that is only weighing the train.
 """
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 WALK, DRIVE, WAIT, RIDE = 0, 1, 2, 3  # leg kinds, as folk_model's
@@ -227,6 +230,9 @@ class _Rail:
         self.hubs = tuple(s for s in self.order if len(self.serving[s]) > 1)  # where riders change lines
         self.plans = {}  # (s, t) -> _plans(self, s, t)
         self.pair_worst = {}  # (s, t) -> (the least worst wait + ride over the plans, or None,)
+        self.period = 1  # minutes after which every line's timetable repeats: the lcm of their cycles
+        for ln in self.lines.values():
+            self.period = self.period * ln.cycle_minutes // math.gcd(self.period, ln.cycle_minutes)
 
 
 def _rail(town) -> _Rail:
@@ -389,6 +395,39 @@ def _find_plans(r: _Rail, s: str, t: str) -> tuple:
     return tuple(out)
 
 
+def _search(r: _Rail, net, a, b, tick: int, car: bool):
+    """trip_via_roads' search: (minutes, (station, via, mode) of the access, (station, via) of the egress, rides)
+    with each ride's (t0, t1, train id, board station) in minutes after the departure, or None. Memoized by the
+    departure's phase (tick % r.period), the only way the tick enters it."""
+    cache = net.memo.setdefault("rail_trip", {})
+    phase = tick % r.period
+    key = (a, b, car, phase)
+    got = cache.get(key)
+    if got is not None:
+        return got[0]
+    best = None
+    for am, arank, s, avia, amode in _access(r, net, a, car):
+        for em, erank, t, evia, _ in _egress(r, net, b):
+            if s == t:
+                continue
+            for plan in _plans(r, s, t):
+                now = phase + am
+                rides = []
+                for n, (ln, track, x, y) in enumerate(plan):
+                    if n:
+                        now += TRANSFER_MINUTES
+                    k, w = ln.board[(track, x)][now % ln.cycle_minutes]
+                    t0 = now + w
+                    now = t0 + ln.ride(track, y, k, t0)
+                    rides.append((t0 - phase, now - phase, ln.train_ids[k], x))
+                rank = (now + em - phase, arank, erank)
+                if best is None or rank < best[0]:
+                    best = (rank, (s, avia, amode), (t, evia), tuple(rides))
+    got = None if best is None else (best[0][0], best[1], best[2], best[3])
+    _store(cache, key, (got,))
+    return got
+
+
 def trip_via_roads(town, net, a, b, tick: int, car: bool = False) -> TrainTrip | None:
     """The fastest train trip from end a to end b leaving at `tick`, or None (no railway, or no pair of stations).
     Its legs are chained from `tick` to `tick + minutes`."""
@@ -399,43 +438,37 @@ def trip_via_roads(town, net, a, b, tick: int, car: bool = False) -> TrainTrip |
         a = tuple(a)
     if b.__class__ is list:
         b = tuple(b)
-    acc = _access(r, net, a, car)
-    egr = _egress(r, net, b)
-    best = None
-    for am, arank, s, avia, amode in acc:
-        for em, erank, t, evia, _ in egr:
-            if s == t:
-                continue
-            for plan in _plans(r, s, t):
-                now = tick + am
-                rides = []
-                for n, (ln, track, x, y) in enumerate(plan):
-                    if n:
-                        now += TRANSFER_MINUTES
-                    k, w = ln.board[(track, x)][now % ln.cycle_minutes]
-                    t0 = now + w
-                    now = t0 + ln.ride(track, y, k, t0)
-                    rides.append((t0, now, ln.train_ids[k], x))
-                key = (now + em - tick, arank, erank)
-                if best is None or key < best[0]:
-                    best = (key, (am, s, avia, amode), (em, t, evia), rides)
+    best = _search(r, net, a, b, tick, car)
     if best is None:
         return None
-    (minutes, _, _), (am, s, avia, amode), (em, t, evia), rides = best
+    minutes, (s, avia, amode), (t, evia), rides = best
     legs = []
     route = net.route(a, avia, amode, keep=False)
     legs.append((DRIVE if amode == "car" else WALK, tick, tick + route.minutes, route))
     now = tick + route.minutes
     for t0, t1, tid, x in rides:
-        legs.append((WAIT, now, t0, x))
-        legs.append((RIDE, t0, t1, tid))
-        now = t1
+        legs.append((WAIT, now, tick + t0, x))
+        legs.append((RIDE, tick + t0, tick + t1, tid))
+        now = tick + t1
     if not isinstance(evia, str):
         legs.append((WAIT, now, now + PLATFORM_MINUTES, t))
         now += PLATFORM_MINUTES
     route = net.route(evia, b, "walk", keep=False)
     legs.append((WALK, now, now + route.minutes, route))
     return TrainTrip(minutes, s, t, tuple(legs))
+
+
+def trip_minutes(town, net, a, b, tick: int, car: bool = False) -> int | None:
+    """`trip_via_roads(...).minutes` without building the trip's legs, or None."""
+    r = _rail(town)
+    if not r.lines:
+        return None
+    if a.__class__ is list:
+        a = tuple(a)
+    if b.__class__ is list:
+        b = tuple(b)
+    best = _search(r, net, a, b, tick, car)
+    return None if best is None else best[0]
 
 
 def worst_minutes(town, net, a, b, car: bool = False) -> int | None:

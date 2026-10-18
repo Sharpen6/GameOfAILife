@@ -3,8 +3,9 @@
 This module is folk's only importer of `roads` and `rail`. A trip is a list of legs `(kind, t0, t1, data)` in
 absolute ticks: WALK and DRIVE legs carry a `roads.Route`, WAIT the station's place id, RIDE the train id. A
 person's position is a pure function of the tick: `Route.at(now - t0)` on a road leg, the station during a wait,
-aboard (not on the street) during a ride. Nothing here draws dice; routes are built with `keep=False`, so they
-live only on active trips.
+aboard (not on the street) during a ride. Nothing here draws dice; routes are built with `keep=False` (out of the
+road net's LRU) and a road leg's is kept in folk's own cache of ROUTES_CAP, cleared when full: a Route is immutable,
+so the trips that take it share it, and folk's daily round takes the same ones day after day.
 
 The rule (folk.md 5): walk when the walk is at most WALK_MAX minutes; else drive when the person has a car and it
 is faster; else take the train when it saves TRAIN_SAVES minutes on a walk over TRAIN_WALK (a car owner rides when
@@ -22,6 +23,7 @@ TRAIN_WALK = 20  # the train is considered only when the walk is longer than thi
 TRAIN_SAVES = 5  # ... and it must save at least this many minutes on it
 PARK_RIDE_SLACK = 8  # a car owner rides when the train is within this many minutes of driving
 REACH = {"walk": 45, "car": 45, "train": 60}  # the longest commute by each mode (commute_minutes; None beyond)
+ROUTES_CAP = 8192  # road-leg Routes kept in folk's cache (net.memo["folk_routes"]) before it is cleared
 
 
 def net(town):
@@ -37,7 +39,17 @@ def minutes(town, a, b, mode: str = "walk") -> int:
 
 def road_leg(town, kind: int, a, b, t0: int) -> tuple:
     """One WALK or DRIVE leg from a to b leaving at t0."""
-    route = net(town).route(a, b, "walk" if kind == WALK else "car", keep=False)
+    mode = "walk" if kind == WALK else "car"
+    rn = net(town)
+    cache = rn.memo.get("folk_routes")
+    if cache is None:
+        cache = rn.memo["folk_routes"] = {}
+    key = (tuple(a) if a.__class__ is list else a, tuple(b) if b.__class__ is list else b, mode)
+    route = cache.get(key)
+    if route is None:
+        if len(cache) >= ROUTES_CAP:
+            cache.clear()
+        route = cache[key] = rn.route(a, b, mode, keep=False)
     return (kind, t0, t0 + max(1, route.minutes), route)
 
 
@@ -48,6 +60,18 @@ def train_trip(town, a, b, tick: int, car: bool):
         return None
     try:
         return plan(town, net(town), a, b, tick, car=car)
+    except NotImplementedError:
+        return None
+
+
+def train_minutes(town, a, b, tick: int, car: bool) -> int | None:
+    """The minutes of train_trip's trip without building its legs (rail.trip_minutes), or None as train_trip."""
+    fn = getattr(rail, "trip_minutes", None)
+    if fn is None:
+        trip = train_trip(town, a, b, tick, car)
+        return None if trip is None else trip.minutes
+    try:
+        return fn(town, net(town), a, b, tick, car=car)
     except NotImplementedError:
         return None
 
@@ -81,10 +105,9 @@ def choose(town, a, b, tick: int, car: bool, prefer: str | None = None) -> tuple
         return "walk", [road_leg(town, WALK, a, b, tick)]
     drive = minutes(town, a, b, "car") if car else None
     if walk > TRAIN_WALK:
-        trip = train_trip(town, a, b, tick, car)
-        if trip is not None and trip.minutes + TRAIN_SAVES <= walk and (
-                drive is None or trip.minutes <= drive + PARK_RIDE_SLACK):
-            return "train", _legs_of(trip, tick)
+        train = train_minutes(town, a, b, tick, car)  # weighed first: the legs are built only for a train taken
+        if train is not None and train + TRAIN_SAVES <= walk and (drive is None or train <= drive + PARK_RIDE_SLACK):
+            return "train", _legs_of(train_trip(town, a, b, tick, car), tick)
     if drive is not None and drive < walk:
         return "car", [road_leg(town, DRIVE, a, b, tick)]
     return "walk", [road_leg(town, WALK, a, b, tick)]
