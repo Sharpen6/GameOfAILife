@@ -113,7 +113,9 @@ class RegionMap(T.TownMap):
 
     def warm(self) -> None:
         """Build only what the 60 need (region.md 6.2): the walk and road fields of Millbrook's 39 places and the
-        walk fields of the bus stops. Calling it again builds nothing."""
+        walk fields of the bus stops; then, once a Simulation with townsfolk has built the road graph they travel on
+        (roads.roadnet), its trees toward every place, so a shift's end never pays for them. Calling it again builds
+        nothing."""
         from .transit import STOP_XY
 
         for place in self.places.values():
@@ -122,6 +124,9 @@ class RegionMap(T.TownMap):
                 self.road_field(place.entry)
         for xy in STOP_XY.values():
             self.walk_field(xy)
+        net = self.memo.get("roadnet")
+        if net is not None:
+            net.warm(self.places)
 
     def warm_next(self) -> bool:
         """One more region walk field per idle frame: not built tonight (PLAN 1, the 60 stay in Millbrook)."""

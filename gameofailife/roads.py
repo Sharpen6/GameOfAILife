@@ -199,6 +199,14 @@ class RoadNet:
         got = self._trees[key] = (dist, nxt)
         return got
 
+    def warm(self, places) -> None:
+        """Build the trees toward every place in `places` (ids), walking and driving: a pure cache fill (which tree
+        `minutes` reads never changes its answer), so no trip pays for a tree (about 0.4 ms each) on a busy tick."""
+        for pid in places:
+            road = self._end(pid)[0]
+            self._tree(road, "walk")
+            self._tree(road, "car")
+
     def _start(self, ra: int, rb: int, mode: str) -> tuple[int, int]:
         """(eighths from road tile ra to rb, start node; -1 when both lie on one run): min((cost, node))."""
         unit = WALK_T if mode == "walk" else CAR_T

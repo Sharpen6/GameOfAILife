@@ -17,6 +17,7 @@ Until F3's hooks land, the region town (region.build_region) is swapped into a m
 
 from __future__ import annotations
 
+import gc
 import inspect
 import json
 import os
@@ -133,7 +134,16 @@ class IdentityTest(unittest.TestCase):
                 sim = region_sim(seed, patched)
                 sim.town.warm()  # what the server does at start: Millbrook's fields (region.md 6.2)
                 cpu = []
-                got = trace(sim, days, cpu)
+                # A full collection over the two sims' objects (and every earlier test's) can land inside one
+                # timed tick and take it past the cap (128 ms once, F3's handoff) without the engine doing any
+                # more work: collect now and freeze what is left, so the timed loop's collections walk only what
+                # it allocates. The server does not call this; the cap is on the engine's own work.
+                gc.collect()
+                gc.freeze()
+                try:
+                    got = trace(sim, days, cpu)
+                finally:
+                    gc.unfreeze()
                 load = os.getloadavg()[0]
                 worst = max(cpu)
                 print(f"\n[R1b identity] seed {seed}, {days} d: {len(base['events'])} events, {len(base['forks'])} "

@@ -17,7 +17,8 @@ v3 (F3's hooks): `city.births` and `city.deaths` come from `sim.life.counts`, `c
 with townsfolk, `stats.folk` is `sim.folk.stats_json(sim)` (ints) and `city`/`districts` add `folk_parts(sim)`
 (`sim.folk.city_parts` plus the townsfolk's needs, luck, worths, retired and out of work; see `_add_parts`); in the
 region world `stats.region` (view.md 4.3). `stats.people` and the richest title stay
-the 60 named. The hourly sample calls `sim.folk.sample_hour(sim)`.
+the 60 named. The hourly sample calls `sim.folk.sample_hour(sim)`, which fills the townsfolk's worth rings and
+returns their share of the sample's numbers (`_sample_city`).
 """
 
 from __future__ import annotations
@@ -238,15 +239,13 @@ def canon_parts(parts: dict | None) -> dict | None:
 CITY_NEEDS = ("hunger", "energy", "social", "fun")
 
 
-def folk_parts(sim: Simulation, hourly: bool = False) -> dict | None:
+def folk_parts(sim: Simulation) -> dict | None:
     """The townsfolk's part of `city` and `districts`, or None without townsfolk: `Folk.city_parts(sim)` (F2a,
     through `canon_parts`) plus what it leaves out, over the same people (`sim.folk.living()`): `needs_sum` (each
     need brought forward to now without settling anyone), `luck` ({touched, raised, lowered, sum}), `adult_worths`
     (city-wide and per district), `in_debt`, `worth_sum` (everyone's worth, the wealth total), `retired` (65+
     without a job) and `out_of_work` (18-64 without a job). A key `city_parts` already sends is kept as sent.
-    stats_json and CityStats.sample both use this one helper. `hourly` is CityStats.sample's call, right after
-    `folk.sample_hour` at the same tick: each worth comes from the ring sample_hour just filled, and the needs,
-    luck and district worths, which a sample does not keep, are left out (the step stays within perf_folk's p99)."""
+    stats_json uses it; CityStats.sample takes the townsfolk's share from `Folk.sample_hour` (_sample_city)."""
     f = sim.folk
     if not f.n:
         return None
@@ -255,32 +254,28 @@ def folk_parts(sim: Simulation, hourly: bool = False) -> dict | None:
     parts = canon_parts(f.city_parts(sim)) or {"districts": {}}
     tick = sim.clock.tick
     places = sim.town.places
-    rings = getattr(f, "rings", None) if hourly else None
-    full = not hourly
     needs = {n: 0.0 for n in CITY_NEEDS}
     luck = {"touched": 0, "raised": 0, "lowered": 0, "sum": 0.0}
     worths: list[int] = []
     by_district: dict[str, list[int]] = {}
     worth_sum = in_debt = retired = out_of_work = 0
     for p in f.living():
-        if full:
-            raw = p._needs  # the lazy raw needs as of p._nt, projected to now and never written (no settling)
-            dt = tick - p._nt
-            if dt > 0 and p.age >= 5:
-                scale = DECAY_SCALE.get(p.activity if p.state == "busy" else "", {})
-                for n in CITY_NEEDS:
-                    v = raw[n] - NEED_DECAY[n] * scale.get(n, 1.0) * dt
-                    needs[n] += 0.0 if v < 0.0 else 100.0 if v > 100.0 else v
-            else:
-                for n in CITY_NEEDS:
-                    needs[n] += raw[n]
-            x = p.luck
-            luck["sum"] += x
-            if x != 50:
-                luck["touched"] += 1
-                luck["raised" if x > 50 else "lowered"] += 1
-        ring = rings.get(p.i) if rings is not None else None
-        w = ring[-1] if ring else f.worth(sim, p)
+        raw = p._needs  # the lazy raw needs as of p._nt, projected to now and never written (no settling)
+        dt = tick - p._nt
+        if dt > 0 and p.age >= 5:
+            scale = DECAY_SCALE.get(p.activity if p.state == "busy" else "", {})
+            for n in CITY_NEEDS:
+                v = raw[n] - NEED_DECAY[n] * scale.get(n, 1.0) * dt
+                needs[n] += 0.0 if v < 0.0 else 100.0 if v > 100.0 else v
+        else:
+            for n in CITY_NEEDS:
+                needs[n] += raw[n]
+        x = p.luck
+        luck["sum"] += x
+        if x != 50:
+            luck["touched"] += 1
+            luck["raised" if x > 50 else "lowered"] += 1
+        w = f.worth(sim, p)
         worth_sum += w
         if p.age >= 18:
             worths.append(w)
@@ -291,20 +286,50 @@ def folk_parts(sim: Simulation, hourly: bool = False) -> dict | None:
                     retired += 1
                 else:
                     out_of_work += 1
-            if full:
-                home = f.home_place(p)
-                place = places.get(home) if home else None
-                by_district.setdefault(place.district if place else "", []).append(w)
+            home = f.home_place(p)
+            place = places.get(home) if home else None
+            by_district.setdefault(place.district if place else "", []).append(w)
     extra = {"adult_worths": worths, "worth_sum": worth_sum, "in_debt": in_debt, "retired": retired,
-             "out_of_work": out_of_work}
-    if full:
-        extra["needs_sum"], extra["luck"] = needs, luck
+             "out_of_work": out_of_work, "needs_sum": needs, "luck": luck}
     for k, v in extra.items():
         parts.setdefault(k, v)
     districts = parts.setdefault("districts", {})
     for d, ws in by_district.items():
         districts.setdefault(d, {"people": 0, "mood_sum": 0.0}).setdefault("adult_worths", ws)
     return parts
+
+
+def _sample_city(sim: Simulation, people: list[_Person], folk: dict | None) -> dict:
+    """The city numbers an hourly sample keeps (pop, mood, health, wealth, median, top10, in_debt, working, owned,
+    shabby_plus), each exactly as `_city_block(sim, people, folk_parts(sim))` gives it, without building the rest
+    of the block (life.stats_block, needs, luck, gini, deaths, the districts' parts), so the whole-hour step stays
+    within perf_folk's p99. `folk` is the townsfolk's share, from `Folk.sample_hour` at this tick (None without
+    townsfolk). tests/test_folk_protocol.py checks both ways agree at every hour, in both engines."""
+    alive = [p.agent for p in people]
+    n = len(alive)
+    mood = _int(_mean([a.mood for a in alive]))
+    health = _int(_mean([a.health for a in alive]))
+    adults = [p.worth for p in people if p.agent.is_adult]
+    total = sum(p.worth for p in people)
+    in_debt = sum(1 for p in people if p.agent.is_adult and p.cash + p.savings < 0)
+    working = sum(1 for a in alive if a.job and a.job.hourly_wage > 0)
+    if folk:  # as _add_parts adds them
+        n += folk["population"]
+        working += folk["working"]
+        if n and folk["population"]:
+            mood = _int((sum(a.mood for a in alive) + folk["mood_sum"]) / n)
+            health = _int((sum(a.health for a in alive) + folk["health_sum"]) / n)
+        worths = folk["adult_worths"]
+        if worths:
+            adults += worths
+            total += int(folk["worth_sum"])
+            in_debt += folk["in_debt"]
+        elif folk["money_sum"]:
+            total += int(folk["money_sum"])
+    homes = _homes_block(sim)
+    return {"pop": n, "mood": mood, "health": health, "wealth": total, "median": _int(median(adults)),
+            "top10": top_share(adults), "in_debt": in_debt, "working": working, "owned": homes["owned"],
+            "shabby_plus": sum(homes["lots_by_stage"][2:])}
 
 
 def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
@@ -555,14 +580,9 @@ class CityStats:
         if not getattr(sim, "agents", None):
             return None
         people = _people(sim)
-        sim.folk.sample_hour(sim)  # the townsfolk's worth rings (stats.folk.worth_24h); folk_parts reads them
-        city = _city_block(sim, people, folk_parts(sim, hourly=True))
-        homes = city["homes"]
+        folk = sim.folk.sample_hour(sim)  # the townsfolk's worth rings (stats.folk.worth_24h) and sample share
         self.samples.append({
-            "tick": sim.clock.tick, "day": sim.clock.day, "pop": city["population"], "mood": city["mood"],
-            "health": city["health"], "wealth": city["wealth"]["total"], "median": city["wealth"]["median"],
-            "top10": city["wealth"]["top10_share"], "in_debt": city["wealth"]["in_debt"], "working": city["working"],
-            "owned": homes["owned"], "shabby_plus": sum(homes["lots_by_stage"][2:]),
+            "tick": sim.clock.tick, "day": sim.clock.day, **_sample_city(sim, people, folk),
             "asked": self.total["asked"] - self._hour_asked, "in_time": self.total["in_time"] - self._hour_in_time,
         })
         del self.samples[:-SAMPLES_KEPT]

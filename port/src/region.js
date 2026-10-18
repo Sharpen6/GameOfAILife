@@ -104,7 +104,9 @@
     }
 
     // Build only what the 60 need (region.md 6.2): the walk and road fields of Millbrook's 39 places and the walk
-    // fields of the bus stops. Calling it again builds nothing.
+    // fields of the bus stops; then, once a Simulation with townsfolk has built the road graph they travel on
+    // (roads.roadnet), its trees toward every place, so a shift's end never pays for them. Calling it again builds
+    // nothing.
     warm() {
       const { STOP_XY } = G.transit;
       for (const place of this.places.values()) {
@@ -114,6 +116,8 @@
         }
       }
       for (const at of Object.values(STOP_XY)) this.walk_field(at);
+      const net = this.memo.get("roadnet");
+      if (net !== undefined) net.warm(this.places.keys());
     }
 
     // One more region walk field per idle frame: not built tonight (PLAN 1, the 60 stay in Millbrook).

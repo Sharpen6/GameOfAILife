@@ -182,6 +182,24 @@ class Person:
             total += self._needs[n]
         return total / len(NEEDS)
 
+    def peek(self, tick: int | None = None) -> tuple[float, float]:
+        """(mood, health) exactly as `settle(tick)` then a read would give them, settling nobody: settle runs on a
+        copy of the raw needs and what it writes (the needs, `_nt`, health) is put back. The hourly sample reads the
+        townsfolk this way, so watching them never moves the ticks at which their lazy needs are brought forward,
+        and the peek can never drift from settle, whatever settle does (tests/test_folk_protocol.py's
+        TestHourlySample checks the two agree, in both engines)."""
+        needs, nt, health = self._needs, self._nt, self.health
+        self._needs = dict(needs)
+        try:
+            self.settle(tick)
+            got = self._needs
+            total = 0.0
+            for n in NEEDS:
+                total += got[n]
+            return total / len(NEEDS), self.health
+        finally:
+            self._needs, self._nt, self.health = needs, nt, health
+
     def remember(self, stamp: str, text: str) -> None:
         self.memory.append(f"{stamp}: {text}")
         del self.memory[:-MEMORY_KEEP]

@@ -299,7 +299,7 @@
     weekly(sim) {}
     stats_json(sim) { return null; }
     city_parts(sim) { return {}; }
-    sample_hour(sim) {}
+    sample_hour(sim) { return null; } // no townsfolk: no share of the hourly sample
     roster_rows(sim) { return []; }
     page_json(sim, fid) { return null; }
     set_luck(fid, luck) { return false; }

@@ -256,6 +256,16 @@
 
     _has_tree(road, mode) { return this._trees.has(road * 2 + (mode === "walk" ? 0 : 1)); }
 
+    // Build the trees toward every place in `places` (ids), walking and driving: a pure cache fill (which tree
+    // `minutes` reads never changes its answer), so no trip pays for a tree (about 0.4 ms each) on a busy tick.
+    warm(places) {
+      for (const pid of places) {
+        const road = this._end(pid)[0];
+        this._tree(road, "walk");
+        this._tree(road, "car");
+      }
+    }
+
     // [eighths from road tile ra to rb, start node; -1 when both lie on one run]: min([cost, node])
     _start(ra, rb, mode) {
       const unit = mode === "walk" ? WALK_T : CAR_T;
