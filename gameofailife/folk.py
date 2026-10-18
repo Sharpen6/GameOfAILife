@@ -32,7 +32,8 @@ NOISE = 0.08  # otherwise each option gets uniform(0, NOISE) and the best wins (
 TRAVEL_COST = 0.004  # forks.TRAVEL_COST: value lost per minute an option adds to the day's travel
 NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL = 2, 20, 7  # forks' night rate
 STYLE = 0.6  # forks.default_scores' style weight
-SHIFT_MARGIN = 10  # minutes spare before a shift
+SHIFT_MARGIN = 10  # minutes spare before a shift, on average: each person keeps 10 +- SHIFT_SPREAD of their own
+SHIFT_SPREAD = 5
 LATE_GRACE = 5  # minutes late before reputation suffers
 EVENING = 19 * 60  # choices after this are "evening" ones
 STROLL_EVERY = 5  # minutes between a park stroller's hops
@@ -104,7 +105,8 @@ def _folk_life():
 
 
 def urgency(level: float) -> float:
-    return ((100 - level) / 100) ** 2
+    u = (100 - level) / 100
+    return u * u
 
 
 class Option:
@@ -135,7 +137,8 @@ class Folk:
         self.luck_log = deque(maxlen=5000)
         self.counters = {"steps": 0, "choices": 0, "habit": 0, "shifts": 0, "school_days": 0, "trips": 0,
                          "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0}
-        self.today = {"boardings": 0, "train_trips": 0}
+        self.today = {"boardings": 0, "train_trips": 0, "lines": {}}  # since midnight
+        self._lines = None  # train id -> line id
         self.cpu = deque(maxlen=CPU_KEEP)  # process_time per tick, seconds
         self.cpu_total = 0.0
         self.ticks = 0
@@ -153,6 +156,7 @@ class Folk:
         self._park_tiles: dict = {}
         self._bed: dict[int, int] = {}
         self._wake: dict[int, int] = {}
+        self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
         Person.clock = sim.clock
         Person.town = town
         Person.locate = self._locate
@@ -174,6 +178,27 @@ class Folk:
         return self.people[i] if 0 <= i < len(self.people) else None
 
     get = person
+
+    def _line_of(self, train_id):
+        m = self._lines
+        if m is None:
+            m = self._lines = {t: ln["id"] for ln in ((self.town.rail or {}).get("lines") or []) for t in ln["trains"]}
+        return m.get(train_id, train_id)
+
+    def region_parts(self, sim) -> dict:
+        """The townsfolk's part of `stats.region` (stats.region_block): how many, how commuters (workers and
+        pupils) go, and today's train boardings in all and by line."""
+        commute: dict[str, int] = {}
+        folk = 0
+        for p in self.people:
+            if not p.alive or p.gone:
+                continue
+            folk += 1
+            if p.job is not None and p.commute is not None:
+                mode = p.commute[2]
+                commute[mode] = commute.get(mode, 0) + 1
+        return {"folk": folk, "commute": commute, "train_riders_today": self.today["boardings"],
+                "train_lines_today": dict(self.today["lines"]), "bus_riders_today": 0}
 
     def living(self) -> list:
         return [p for p in self.people if p.alive and not p.gone]
@@ -236,7 +261,7 @@ class Folk:
         t0 = time.process_time()
         now = sim.clock.tick
         if now % DAY == 0:
-            self.today = {"boardings": 0, "train_trips": 0}
+            self.today = {"boardings": 0, "train_trips": 0, "lines": {}}
         b = self.wheel.pop(now, None)
         if b:
             people = self.people
@@ -280,7 +305,7 @@ class Folk:
         p.activity_place = place_id
         self.where[p.i] = place_id
         self.occupants.setdefault(place_id, {})[p.i] = None
-        if ACT.get(p.activity, ({}, False))[1] and p.activity == "walk_park":
+        if p.activity == "walk_park":
             self.strollers[p.i] = place_id
         else:
             k = self.pidx.get(place_id)
@@ -343,11 +368,21 @@ class Folk:
             base = self._wake[p.i] = 360 + _dice().key(self.sim.dice_seed, NS_FOLK, p.i, "wake") % 91
         job = p.job
         if job is not None and day % 7 in job.workdays:
-            leave = job.start_hour * 60 - self._commute_of(p)[0] - SHIFT_MARGIN
-            return min(base, leave - 40)
+            return min(base, self._set_off(p) - 40)
         if job is not None or p.age >= 18:
             return base + 90  # a day off (the jobless and retired every day)
         return base + 90 if day % 7 >= 5 else base
+
+    def _set_off(self, p) -> int:
+        """The minute of the day p sets off for today's shift or school: start - commute - their own margin."""
+        spare = self._spare.get(p.i)
+        if spare is None:
+            k = _dice().key(self.sim.dice_seed, NS_FOLK, p.i, "spare")
+            spare = self._spare[p.i] = SHIFT_MARGIN - SHIFT_SPREAD + k % (2 * SHIFT_SPREAD + 1)
+        minutes, mode = self._commute_of(p)
+        if mode == "train":
+            spare = SHIFT_MARGIN  # train commuters time it to the train, so they ride together
+        return p.job.start_hour * 60 - minutes - spare
 
     def _bed_minute(self, p) -> int:
         bed = self._bed.get(p.i)
@@ -435,7 +470,7 @@ class Folk:
         night = m >= bed or m < self._wake_minute(p, day)
         if job is not None and day % 7 in job.workdays and p.worked_day != day and m < job.end_hour * 60 - 60:
             commute, mode = self._commute_of(p)
-            leave = job.start_hour * 60 - commute - SHIFT_MARGIN
+            leave = self._set_off(p)
             early = m < leave
             if early and (p.inside == home or home is None) and not night:
                 self._begin(p, now, "relax_home", leave - m)
@@ -514,6 +549,11 @@ class Folk:
             self.counters["train_trips"] += 1
             self.today["boardings"] += rides
             self.today["train_trips"] += 1
+            per = self.today["lines"]
+            for leg in legs:
+                if leg[0] == RIDE:
+                    line = self._line_of(leg[3])
+                    per[line] = per.get(line, 0) + 1
             fare = folk_transit.fare(p.age)
             if fare:
                 p.money -= fare
@@ -782,7 +822,6 @@ class Folk:
         if home is None:
             self._begin(p, now, "relax_home", 30)
             return
-        net = folk_transit.net(self.town)
         turn = None
         for pid in self._favs(p, "shopping") + self._favs(p, "coffee"):
             if pid != home:
@@ -800,7 +839,6 @@ class Folk:
         p.activity_place = home
         self.out[p.i] = None
         self.counters["trips"] += 1
-        del net
         self.stay[p.i] = (now, back[2])
         self.schedule(p, back[2])
 
@@ -817,6 +855,27 @@ class Folk:
                                               for x in range(place.x, place.x + place.w)] or [place.entry]
         return tiles[_dice().key(self.sim.dice_seed, NS_STROLL, p.i, tick // STROLL_EVERY) % len(tiles)]
 
+    def xy(self, p, tick: int) -> tuple[int, int]:
+        """The person's tile at tick: on a trip leg (a train's tile while aboard), strolling, else the entry of the
+        place they are at (or home)."""
+        trip = p.trip
+        if trip is not None:
+            leg = folk_transit.leg_at(trip.legs, tick)
+            if leg is not None:
+                kind, t0, t1, data = leg
+                if kind == WALK or kind == DRIVE:
+                    x, y, _ = data.at(max(0, tick - t0))
+                    return x, y
+                if kind == WAIT:
+                    return folk_transit.station_xy(self.town, data)
+                return folk_transit.train_xy(self.town, data, tick)
+        if p.i in self.strollers:
+            return self._locate(p, tick)
+        place = self.town.places.get(self.where.get(p.i) or self.home_place(p) or "")
+        if place is None:
+            return 0, 0
+        return place.entry[0], place.entry[1]
+
     def _leg_xy(self, p, tick: int):
         """(x, y, mode) of a traveller at tick, or None while aboard a train or a passenger."""
         trip = p.trip
@@ -831,13 +890,27 @@ class Folk:
                 return x, y, K_WALK
             if trip.mode == "ambulance":
                 return x, y, K_AMBULANCE
-            if p.age < 18:
-                return None  # a passenger: the driver's car is the one on the street
+            if p.age < 18 and self._passenger(p, leg):
+                return None  # a passenger: the school run's car is an older sibling's
             return x, y, K_CAR
         if kind == WAIT:
             x, y = folk_transit.station_xy(self.town, data)
             return x, y, K_WAIT
         return None  # RIDE: aboard
+
+    def _passenger(self, p, leg) -> bool:
+        """A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one."""
+        hh = self.hh_of(p)
+        if hh is None:
+            return False
+        for mid in hh.member_ids:
+            q = self.people[int(mid[1:])]
+            if q.i >= p.i:
+                continue
+            if q.trip is not None and q.trip.dest == p.trip.dest and q.age < 18 and q.trip.mode == p.trip.mode:
+                if q.trip.legs and q.trip.legs[0][1] == p.trip.legs[0][1] and q.trip.legs[0][0] == leg[0]:
+                    return True
+        return False
 
     def crowd(self, sim) -> list[int]:
         """[i, x, y, k, ...] for folk outdoors and not aboard, sorted by i; k = mode | child << 3."""
@@ -931,10 +1004,11 @@ class Folk:
                     q = self.person(mid)
                     if q is not None and q.alive and not q.gone and q.age >= 18:
                         adults += 1
-                try:
+                lots = getattr(sim, "lots", None)
+                if lots is not None and home.place in lots:
                     from . import housing
                     value = housing.value(sim, hh.home_id)
-                except Exception:  # noqa: BLE001 - a home without a lot: its base value
+                else:  # a home without a lot (a test world): its base value
                     value = home.base_value
                 w += value / max(1, adults)
         return int(w // 1)
@@ -1018,7 +1092,7 @@ class Folk:
         hh = self.hh_of(p)
         home_id = hh.home_id if hh is not None else None
         home = getattr(sim, "homes", {}).get(home_id) if home_id else None
-        x, y = p.position(sim.clock.tick)
+        x, y = self.xy(p, sim.clock.tick)
         rels = {}
         for oid, r in sorted(p.relationships.items(), key=lambda kv: (-kv[1].affinity, kv[0])):
             rels[oid] = people.rel_row(sim, oid, r)
@@ -1098,7 +1172,7 @@ def is_free(sim, p) -> bool:
         now = sim.clock.tick
         day, m = divmod(now, DAY)
         if day % 7 in job.workdays and p.worked_day != day:
-            leave = job.start_hour * 60 - f._commute_of(p)[0] - SHIFT_MARGIN
+            leave = f._set_off(p)
             if leave - 60 <= m < job.end_hour * 60:
                 return False
     return True
