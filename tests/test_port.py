@@ -67,7 +67,9 @@ STATS_SCHEMA = {
              "homes": {"total": 0, "owned": 0, "rented": 0, "for_sale": 0, "for_rent": 0, "lots_by_stage": [0],
                        "neglected_lived_in": 0},
              "luck": {"touched": 0, "raised": 0, "lowered": 0, "mean": 0},
-             "recent_deaths": [{"id": "", "name": "", "age": 0, "time": "", "how": ""}]},
+             "recent_deaths": [{"id": "", "name": "", "age": 0, "time": "", "how": ""}],
+             "life": {"ill_now": 0, "in_hospital": 0, "couples": 0, "births": 0, "deaths": 0, "jobless": 0,
+                      "in_debt": 0, "talks_today": 0, "friendships_today": 0}},  # v3: life.md 8.2
     "llm": {"controllers": [{"name": "", "model": "", "characters": 0}], "playing": 0, "thinking": 0,
             "today": _COUNTERS, "total": _COUNTERS, "habit_today": 0, "default_today": 0},
     "districts": [{"id": "", "name": "", "people": 0, "mood": 0, "median_worth": 0, "homes": 0, "vacant": 0,
@@ -389,7 +391,7 @@ class DiceSim(Simulation):
 
     def __init__(self, seed: int, dice: int):
         self._dice = dice
-        super().__init__(seed=seed)
+        super().__init__(seed=seed, dice_seed=dice)  # the keyed streams take the JS port's dice too (PLAN 2.1)
 
     def _roll_weather(self) -> None:
         if not isinstance(self.rng, MulberryDice):

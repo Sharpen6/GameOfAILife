@@ -138,6 +138,7 @@
     _welcome_god() {
       const sim = this.sim;
       const state = sim.state_json(true);
+      state.occ = sim.folk.occ(); // who is in each place, folk and named (PLAN 2.11; frames send it now and then)
       return { type: "welcome", role: "god", town: sim.town_json(), state,
         history: sim.history.slice(-WELCOME_HISTORY), news: sim.news.slice(-WELCOME_NEWS),
         headlines: sim.headlines.slice(-WELCOME_HEADLINES), llm_log: sim.llm_log.slice(-WELCOME_LLM_LOG),
@@ -232,7 +233,7 @@
         if (typeof luck !== "number" || !Number.isFinite(luck)) throw new PyError("TypeError", "luck must be a number");
         const ok = sim.set_luck(pyStr(getd(msg, "agent_id", null)), pyFloat(luck));
         return { type: "luck_set", ok, agent_id: getd(msg, "agent_id", null),
-          luck: ok ? sim.agents.get(item(msg, "agent_id")).luck : null };
+          luck: ok ? sim.luck_of(pyStr(item(msg, "agent_id"))) : null };
       }
       if (t === "set_speed") {
         const speed = pyInt(getd(msg, "speed", 1));
