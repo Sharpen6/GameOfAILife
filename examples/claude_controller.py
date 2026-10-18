@@ -238,6 +238,27 @@ def past_decisions(history: list[dict], memory: list[str]) -> list[str]:
             f"Then: {'; '.join(r) if r else 'nothing notable'}." for d, r in rows]
 
 
+def life_line(life: dict) -> str:
+    """`Your life:` from a fork's `you.life` (partner, children, illnesses, work, debt)."""
+    partner = life.get("partner")
+    if isinstance(partner, dict):
+        first = str(partner.get("name") or "?").split()[0]
+        bits = [f"married to {first}" if partner.get("married") else
+                f"going out with {first}" if partner.get("kind") == "dating" else f"living with {first}"]
+    else:
+        bits = ["single"]
+    kids = life.get("children") or 0
+    if kids:
+        bits.append(f"{kids} child" if kids == 1 else f"{kids} children")
+    if life.get("conditions"):
+        bits.append("unwell: " + ", ".join(str(c) for c in life["conditions"]))
+    if life.get("jobless_days") is not None:
+        bits.append(f"out of work for {life['jobless_days']} days")
+    if life.get("debt"):
+        bits.append(f"owing {_dollars(life['debt'])}")
+    return "Your life: " + "; ".join(bits) + "."
+
+
 def decision_page(msg: dict, about: dict | None = None, history: list[dict] | None = None,
                   order: list[int] | None = None, show_hints: bool = False) -> str:
     """The one page a fork is decided from. `about` holds query answers for the character ("attributes",
@@ -260,6 +281,8 @@ def decision_page(msg: dict, about: dict | None = None, history: list[dict] | No
         who.append(f"Personality: {personality(attrs['traits'])}.")
     if home_line(you):
         who.append(home_line(you))
+    if isinstance(you.get("life"), dict):
+        who.append(life_line(you["life"]))
     rels = about.get("relationships") or {}
     close = sorted(rels.values(), key=lambda r: -(r.get("affinity") or 0))[:5]
     if close:
@@ -291,7 +314,7 @@ def decision_page(msg: dict, about: dict | None = None, history: list[dict] | No
     tags = hints(msg.get("profile_scores")) if show_hints else []
     lines = [option_line(options[i], LETTERS[k], tags[i] if i < len(tags) else "") for k, i in enumerate(order)]
     sections = [("WHO YOU ARE", who), ("RIGHT NOW", now), ("YOUR RECENT DECISIONS", decisions or ["- none yet"]),
-                ("ON YOUR MIND", mind)]
+                ("ON YOUR MIND", mind), ("ABOUT THIS", [str(x) for x in msg.get("about") or []])]
     body = "\n\n".join(f"{title}\n" + "\n".join(rows) for title, rows in sections if rows)
     return (f"{body}\n\nDECISION: {msg.get('question')}\n" + "\n".join(lines) + "\n\n"
             f"Decide quickly. Reply on one line: the letter ({', '.join(LETTERS[:len(order)])}), "
