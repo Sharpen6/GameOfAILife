@@ -5,9 +5,11 @@
 // corners. When no L is clear, a walker steps straight across a blocked corner (between two park trees,
 // through their shared corner point), and a walker or a car goes the shortest way round what is in the way.
 // Cars keep to the right-hand lane. Buses keep to a wider one and swing from lane to lane through the lane
-// corners; of two buses that would touch, one waits where it was until the other has gone by. Walkers keep
-// to the pavement (a household's members one behind another), and idle people on one tile stand in a small
-// ring.
+// corners; of two buses that would touch, one waits where it was until the other has gone by, checked on
+// every frame and again on each new tick before the next moves start (at 8x or 16x a tick may get only a
+// frame or two). Walkers keep to the pavement, each household at its own place along it (its members one
+// behind another), and walkers bound for one spot of pavement on the same tick are spread apart along it;
+// idle people on one tile stand in a small ring.
 // Also the housing look adapter (state.lots / state.homes -> per-place looks) and occupancy counts.
 // Classic script on window.CityView.
 "use strict";
@@ -22,8 +24,10 @@
   // Buses keep 0.23 tiles right of the centre line, so two passing each other (0.42 wide) never touch. A
   // bus waiting for another to cross keeps BUS_AIR from it where it can, and never less than BUS_TOUCH.
   const BUS_LANE = 0.23, BUS_HL = 1.45 / 2, BUS_HW = 0.42 / 2, BUS_AIR = 0.18, BUS_TOUCH = 0.01;
-  // A walker's place along the pavement, by rank in their household: 0, ahead, behind, further ahead...
-  const STAGGER = [0, 1, -1, 2, -2, 3, -3], STEP = 0.18;
+  // A walker's place along the pavement: their household's own place (hashed from the home, AL_MAX tiles
+  // at most from the tile's middle) plus their rank in it: 0, ahead, behind, further ahead... STEP apart.
+  // Walkers bound for one spot of pavement keep at least STEP apart too, whatever their homes.
+  const STAGGER = [0, 1, -1, 2, -2, 3, -3], STEP = 0.18, AL_MAX = 0.45;
   // A walker's straight step across a blocked corner skips this share of the move either side of the corner
   // point itself (a pixel or two), which lies on all four tiles at once.
   const CORNER = 0.02;
@@ -135,7 +139,7 @@
     const placeOf = id => id == null ? null : scene.placeById.has(id) ? id : homeToPlace.get(id) || null;
     const tracks = new Map();
     const M = { placeOf, tickMs: 417, lots: null, homes: null, state: null };
-    let lastTick = null, tickAt = 0, recs = new Map(), rankKey = "", ranks = new Map();
+    let lastTick = null, tickAt = 0, recs = new Map(), rankKey = "", alongOf = new Map();
     const tile = (x, y) => (x < 0 || y < 0 || x >= town.w || y >= town.h) ? null : town.tiles[y][x];
     // where a vehicle may cut a corner (roads, which run off the map) and where a person may (open ground)
     const roadOk = (x, y) => { const c = tile(x, y); return c === null || c === "#"; };
@@ -180,7 +184,10 @@
       if (!fresh) return tr;
       // a bus held short of another starts its next move from where it was last drawn, lane point and all
       const t = tr.hold != null ? tr.hold : share(tr, now), s = at(tr, t), lp = tr.bus ? busAt(tr, t) : null;
-      tr.hold = null; tr.lane = null; tr.lp0 = lp && [lp.x, lp.y];
+      tr.hold = null; tr.lane = null; tr.lp0 = lp && [lp.x, lp.y]; tr.seen = 0;
+      // a walker's spread along the pavement (spread) carries on from where it was shown
+      tr.adj0 = (tr.adj0 || 0) + ((tr.adj1 || 0) - (tr.adj0 || 0)) * s.t;
+      if (s.t >= 0.5) tr.ax0 = tr.ax1;
       if (tr.cur[0] === x && tr.cur[1] === y) { // no new tile: the rest of the move shown, the same way
         if (tr.via) tr.via = tr.via.slice(s.seg || 0);
         tr.prev = [s.x, s.y]; tr.t0 = now; return tr;
@@ -206,25 +213,74 @@
       return tr;
     }
     // Lane, kerb and jitter offsets inside a tile. Walkers on a road keep to the pavement on their side
-    // and, along it, to their place in the household (stagger), so a family walks one behind another.
+    // and, along it, to their household's place and their own in it (stagger), so a family walks one
+    // behind another and two households apart; at a junction they keep to a kerb corner. adj is the walker's
+    // spread from others bound for the same spot (spread), eased in over the move: along the pavement, or
+    // at a corner along ax, the way the walker came in.
     const isRoad = (x, y) => scene.isRoad(x, y);
-    function offset(kind, id, x, y, d, vehicle, lane) {
+    // A road tile that is not a junction, where walkers keep to a pavement along it: "ew", "ns" or null.
+    function pavement(x, y) {
+      if (!isRoad(x, y)) return null;
+      const ew = isRoad(x - 1, y) || isRoad(x + 1, y), ns = isRoad(x, y - 1) || isRoad(x, y + 1);
+      return ew && ns ? null : ns ? "ns" : "ew";
+    }
+    const sideOf = id => hash(id) % 2 ? 1 : -1;
+    const cornerOf = id => hash(id + "k") % 2 ? 1 : -1;
+    function offset(kind, id, x, y, d, vehicle, lane, adj, ax) {
       x = Math.round(x); y = Math.round(y);
       if (vehicle) { const L = lane || LANE; const o = [[0, L], [-L, 0], [0, -L], [L, 0]][d] || [0, 0]; return o; }
       if (isRoad(x, y)) {
-        const ew = isRoad(x - 1, y) || isRoad(x + 1, y), ns = isRoad(x, y - 1) || isRoad(x, y + 1);
-        const side = hash(id) % 2 ? 1 : -1, side2 = hash(id + "k") % 2 ? 1 : -1;
-        if (ew && ns) return [side2 * KERB, side * KERB];
-        const al = stagger(id);
-        if (ns) return [side * KERB, al];
-        return [al, side * KERB];
+        const side = sideOf(id), pv = pavement(x, y);
+        if (!pv) { // a junction: a kerb corner
+          const o = [cornerOf(id) * KERB, side * KERB];
+          if (adj && ax) o[ax === "x" ? 0 : 1] += adj;
+          return o;
+        }
+        const al = Math.max(-AL_MAX, Math.min(AL_MAX, stagger(id) + (adj || 0)));
+        return pv === "ns" ? [side * KERB, al] : [al, side * KERB];
       }
       const h = hash(id + ":j");
       return [((h % 7) - 3) * 0.04, (((h >>> 8) % 7) - 3) * 0.04];
     }
-    // A walker's place along the pavement: fixed per person (so moves stay smooth), and different for each
-    // member of a household (rank by id), who walk the same tiles together.
-    function stagger(id) { const k = ranks.get(id); return k == null ? 0 : STAGGER[k % STAGGER.length] * STEP; }
+    // A walker's place along the pavement: fixed per person (so moves stay smooth), their household's place
+    // plus their rank in it (by id), so the members of a household, who walk the same tiles together, keep
+    // STEP apart and two households seldom share a place.
+    function stagger(id) { const al = alongOf.get(id); return al == null ? 0 : al; }
+    // On a new tick: walkers bound for one spot of pavement (the same road tile and kerb, or the same kerb
+    // corner of a junction) whose places are nearer than STEP are spread apart along it, in the order of
+    // their places (ids on a tie), keeping within AL_MAX, so two people from two homes walking together
+    // are drawn one behind the other, never as one figure. At a corner the group is centred on it and each
+    // keeps to the way they came in. Each walker's spread (adj1) is eased in over the move from what was
+    // shown (adj0).
+    function spread() {
+      const by = new Map();
+      for (const [key, tr] of tracks) {
+        const a = tr.agent, [x, y] = tr.cur;
+        tr.adj1 = 0; tr.ax1 = null;
+        if (!a || a.alive === false || a.inside || a.riding || VEHICLES[a.vehicle] || !isRoad(x, y)) continue;
+        const corner = !pavement(x, y), k = x + "," + y + (sideOf(a.id) > 0 ? "+" : "-") + (corner ? (cornerOf(a.id) > 0 ? "+" : "-") : "");
+        if (!by.has(k)) by.set(k, []);
+        by.get(k).push({ tr, id: key, al: stagger(a.id), corner });
+      }
+      for (const g of by.values()) {
+        if (g.length < 2) continue;
+        g.sort((p, q) => p.al - q.al || (p.id < q.id ? -1 : 1));
+        const gap = Math.min(STEP, 2 * AL_MAX / (g.length - 1)), v = g.map(q => q.al);
+        for (let i = 1; i < v.length; i++) v[i] = Math.max(v[i], v[i - 1] + gap);
+        if (v[v.length - 1] > AL_MAX) { v[v.length - 1] = AL_MAX; for (let i = v.length - 2; i >= 0; i--) v[i] = Math.min(v[i], v[i + 1] - gap); }
+        const mid = (v[0] + v[v.length - 1]) / 2;
+        g.forEach((q, i) => {
+          if (!q.corner) { q.tr.adj1 = v[i] - q.al; return; }
+          q.tr.adj1 = v[i] - mid; q.tr.ax1 = inAxis(q.tr);
+        });
+      }
+    }
+    // The axis of the last leg of a track's move into its tile ("x" or "y"); standing, the way it last went.
+    function inAxis(tr) {
+      const [cx, cy] = tr.cur, px = Math.round(tr.prev[0]), py = Math.round(tr.prev[1]);
+      const from = tr.via && tr.via.length ? tr.via[tr.via.length - 1] : px !== cx && py !== cy ? (tr.first === "x" ? [cx, py] : [px, cy]) : [px, py];
+      return from[0] !== cx ? "x" : from[1] !== cy ? "y" : tr.ax0 || tr.axis || "x";
+    }
 
     // A state frame: retarget tracks on a new tick, refresh looks when lots/homes came, count occupants.
     M.setState = function (st, speed, now) {
@@ -242,16 +298,24 @@
         const tr = track(a.id, a.x, a.y, now, fresh, VEHICLES[a.vehicle] ? roadOk : walkOk, VEHICLES[a.vehicle] ? "drive" : "walk");
         tr.agent = a;
       }
-      // each person's rank in their household, by id, for the pavement stagger (redone when people move
-      // house, arrive or die)
+      // each person's place along the pavement (stagger): their household's, hashed from the home and kept
+      // far enough in that the whole household stays within AL_MAX, plus their rank in it by id (redone when
+      // people move house, arrive or die)
       const live = (st.agents || []).filter(a => a.alive !== false), rk = live.map(a => a.id + ":" + (a.home || "")).join(",");
       if (rk !== rankKey) {
-        rankKey = rk; ranks = new Map();
+        rankKey = rk; alongOf = new Map();
         const by = new Map();
         for (const a of live) { const h = a.home || ""; if (!by.has(h)) by.set(h, []); by.get(h).push(a.id); }
-        for (const ids of by.values()) ids.sort().forEach((id, k) => ranks.set(id, k));
+        for (const [h, ids] of by) {
+          ids.sort();
+          const own = ids.map((_, k) => STAGGER[k % STAGGER.length] * STEP), reach = Math.max(...own.map(Math.abs));
+          const base = ((hash(h + ":al") % 1001) / 500 - 1) * Math.max(0, AL_MAX - reach);
+          ids.forEach((id, k) => alongOf.set(id, Math.max(-AL_MAX, Math.min(AL_MAX, base + own[k]))));
+        }
       }
+      if (fresh) spread();
       const buses = busesOf(st);
+      if (fresh) settleBuses(now);
       for (const b of buses) { const key = "bus:" + b.id; seen.add(key); const tr = track(key, b.x, b.y, now, fresh, roadOk); tr.bus = b; }
       for (const k of [...tracks.keys()]) if (!seen.has(k)) tracks.delete(k);
       let looksChanged = false;
@@ -309,7 +373,7 @@
       const a = pts[i - 1], b = pts[i], seg = P.cum[i] - P.cum[i - 1], k = seg > 1e-6 ? Math.min(1, Math.max(0, (s - P.cum[i - 1]) / seg)) : 1;
       const ux = b[0] - a[0], uy = b[1] - a[1];
       const d = Math.abs(ux) >= Math.abs(uy) ? (ux > 0 ? 0 : 2) : (uy > 0 ? 1 : 3);
-      return { tr, t, moving: t < 1, d, x: a[0] + ux * k, y: a[1] + uy * k };
+      return { tr, t, moving: t < 1, d, x: a[0] + ux * k, y: a[1] + uy * k, seg: i };
     }
     // Do two bus bodies overlap, with air between them (wide: BUS_AIR when they cross each other's road,
     // else BUS_TOUCH; side by side in opposite lanes they are 0.04 apart)?
@@ -334,10 +398,11 @@
     }
     // Hold bus B's move at the furthest point of it so far that is clear of bus P (with BUS_AIR across a
     // crossing where that can be had, else just clear): its track's clock is set back, so the next frames
-    // carry on from there. False when B is standing, or was in P's way all along its move.
+    // carry on from there. False when B is standing (or has stood at the end of its move on an earlier
+    // frame: it is never pulled back from there), or was in P's way all along its move.
     function holdBus(B, P, now) {
       const tr = B.tr, t = B.t;
-      if (!B.moving) return false;
+      if (lanePath(tr).len < 1e-6 || (t >= 1 && !(tr.seen < 1))) return false;
       for (const wide of [true, false]) {
         const free = k => !clash(busAt(tr, k), P, wide);
         if (free(t)) return true;
@@ -352,15 +417,46 @@
       }
       return false;
     }
-    // A bus not drawn yet (the first frame after the page loads, say) standing on another bus: it is put
-    // back along its lane, behind its heading, as far as it takes to clear the other (2 tiles at most), and
-    // its next move starts there.
-    function backUp(B, P) {
-      const tr = B.tr, ux = [1, 0, -1, 0][B.d], uy = [0, 1, 0, -1][B.d];
-      let k = 0;
-      while (k < 40 && clash({ d: B.d, x: B.x - ux * k * 0.05, y: B.y - uy * k * 0.05 }, P, true)) k++;
-      tr.lp0 = [B.x - ux * k * 0.05, B.y - uy * k * 0.05]; tr.lane = null;
-      Object.assign(B, busAt(tr, B.t));
+    // On a new tick, before the buses take their next moves: of two buses that would touch where this tick
+    // leaves them, the one that gives way is held where it was last clear, as a frame drawn late in the tick
+    // would have held it, so the next moves start apart. At 8x or 16x (or on a slow device) a tick gets
+    // only a frame or two, and none may come late enough (review ART-3).
+    function settleBuses(now) {
+      const bl = [];
+      for (const tr of tracks.values()) if (tr.bus && tr.drawn) bl.push(busAt(tr, tr.hold != null ? tr.hold : share(tr, now)));
+      for (let i = 0; i < bl.length; i++) for (let j = i + 1; j < bl.length; j++) {
+        const a = bl[i], b = bl[j];
+        if (!clash(a, b, true)) continue;
+        const W = waiter(a, b), F = W === a ? b : a;
+        if (!holdBus(W, F, now) && !holdBus(F, W, now)) backUp(W, F, now);
+      }
+    }
+    // A bus on another bus that no hold can part (the first frame after the page loads, say, two buses that
+    // came to a stand on one spot, or a burst of ticks with no frame between them, so both moves start where
+    // the two touch): it is put back along its lane path, then on behind where the path starts, as far as it
+    // takes to clear the other (2 tiles at most). A standing bus stays there; a moving one waits there and
+    // carries on along the rest of its path.
+    function backUp(B, P, now) {
+      const tr = B.tr, L = lanePath(tr), pts = L.pts, standing = L.len < 1e-6;
+      const U = [[1, 0], [0, 1], [-1, 0], [0, -1]], head = (a, b) => Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1]) ? (b[0] > a[0] ? 0 : 2) : (b[1] > a[1] ? 1 : 3);
+      const back = r => { // B put back r tiles: where, its heading there, and the index of the path point it is past
+        if (standing) return [B.x - U[B.d][0] * r, B.y - U[B.d][1] * r, B.d, -1];
+        let x = B.x, y = B.y;
+        for (let j = B.seg - 1; j >= 0; j--) {
+          const l = Math.hypot(pts[j][0] - x, pts[j][1] - y);
+          if (l >= r && l > 1e-9) return [x + (pts[j][0] - x) * r / l, y + (pts[j][1] - y) * r / l, head(pts[j], [x, y]), j];
+          r -= l; x = pts[j][0]; y = pts[j][1];
+        }
+        const d = busAt(tr, 0).d; // behind the start, along the heading the path starts with
+        return [pts[0][0] - U[d][0] * r, pts[0][1] - U[d][1] * r, d, -1];
+      };
+      let k = 0, at = back(0);
+      while (k < 40 && clash({ d: at[2], x: at[0], y: at[1] }, P, true)) at = back(++k * 0.05);
+      const lane = [[at[0], at[1]], ...(standing ? [] : pts.slice(at[3] + 1))], cum = [0];
+      for (let i = 1; i < lane.length; i++) cum.push(cum[i - 1] + Math.hypot(lane[i][0] - lane[i - 1][0], lane[i][1] - lane[i - 1][1]));
+      tr.lane = { pts: lane, cum, len: cum[cum.length - 1], out: L.out };
+      tr.lp0 = lane[0]; tr.t0 = now; tr.hold = 0;
+      Object.assign(B, busAt(tr, 0));
     }
 
     // Per frame: build the mover items into scene.movers (sorted by depth) and the lookup records.
@@ -393,12 +489,11 @@
         const a = bl[i], b = bl[j];
         if (!clash(a, b, true)) continue;
         const W = waiter(a, b), F = W === a ? b : a;
-        if (holdBus(W, F, now) || holdBus(F, W, now)) continue;
-        if (!W.tr.drawn && !W.moving) backUp(W, F); else if (!F.tr.drawn && !F.moving) backUp(F, W);
+        if (!holdBus(W, F, now) && !holdBus(F, W, now)) backUp(W, F, now);
       }
       for (const B of bl) {
         const tr = B.tr, b = tr.bus, s = at(tr, B.t);
-        tr.d = B.d; tr.drawn = true;
+        tr.d = B.d; tr.drawn = true; tr.seen = B.t;
         if (s.sx) tr.axis = "x"; else if (s.sy) tr.axis = "y";
         const tx = B.x, ty = B.y;
         busPos.push({ d: tr.d, x: tx, y: ty });
@@ -434,7 +529,7 @@
         }
         const veh = !!VEHICLES[a.vehicle];
         // lerp the in-tile offset between the two ends of the move
-        const o0 = offset("p", a.id, tr.prev[0], tr.prev[1], tr.d, veh), o1 = ring.get(key) || offset("p", a.id, tr.cur[0], tr.cur[1], tr.d, veh);
+        const o0 = offset("p", a.id, tr.prev[0], tr.prev[1], tr.d, veh, null, tr.adj0, tr.ax0), o1 = ring.get(key) || offset("p", a.id, tr.cur[0], tr.cur[1], tr.d, veh, null, tr.adj1, tr.ax1);
         // on a way round (or straight across a corner) a walker keeps to the way itself, off its kerb or
         // standing spot from half a tile after the start to half a tile before the end
         const k = s.t, f = !veh && tr.via && s.moving ? Math.max(0, 1 - 2 * Math.max(1, Math.round(s.len)) * Math.min(k, 1 - k)) : 1;

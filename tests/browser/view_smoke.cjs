@@ -25,7 +25,8 @@
 // - stages: all five neglect stages on screen at zoom 2, pixel-distinct on the one-palette specimen street;
 //   SALE / RENT / LET boards and moving vans on the camera-nearest road-touching lot tile where a board
 //   shows (a board steps off it only for the van, or for a car parked on the driveway while its owner is
-//   home); 55 Main Street's board and van, which the Grand Arcade hid, show at zoom 1, 2 and 3
+//   home); 55 Main Street's board and van, which the Grand Arcade hid, and 66 and 92 Park Avenue's, which bus
+//   shelters hid, show at zoom 1, 2 and 3
 // - persistence: localStorage["goal.view"] keeps the projection and camera (never the rotation), and a
 //   throwing localStorage costs nothing
 // - today's 40 x 25 town and its state (one bus at state.bus) load and draw in iso and flat
@@ -38,12 +39,13 @@
 //   map, and a page hook that throws in a frame reaches the page as an error but the map keeps drawing
 // - movers: a car turning a corner keeps to the road and a walker to the pavement and paths through every
 //   frame of an L-shaped move; a walker stepping between two park trees crosses at their shared corner, a
-//   walker and a car whose straight move is blocked go round; a household walking one street keeps apart;
-//   two buses meeting at a junction or head-on never overlap (one gives way) and both get through, in their
-//   own lanes
+//   walker and a car whose straight move is blocked go round; a household walking one street keeps apart,
+//   and so do three people from three homes walking it together; two buses meeting at a junction or
+//   head-on never overlap (one gives way) and both get through, in their own lanes
 // - buses: on the real timetable (transit.bus_rows, from python3) no two buses overlap in any frame where
 //   they turn across each other at Willow Lane and Main Street, none jumps (a lane change at a corner swings
-//   across), and two buses on one tile on the first frame after a page load are drawn apart
+//   across), and two buses on one tile on the first frame after a page load are drawn apart; drawn only 3
+//   times a tick (as at 8x or 16x) none overlaps either and each gets where the timetable puts it
 // - night: headlights behind a nearer building are hidden by it, like the lamp pools
 // - ticker: no name plate or badge is drawn under the page's ticker (it carries data-cv-avoid); without the
 //   mark the same sweep does draw there
@@ -890,49 +892,54 @@ async function runStages(browser) {
     check(car.parked.car && car.cars === 1 && car.parked.sign !== car.f0, "lots: a car parked on the driveway moves the board to the next road lot tile", car);
     check(!car.gone.car && car.gone.sign === car.f0, "lots: when the car leaves the board stands on the driveway tile again", car);
   }
-  // 55 Main Street (review H5): the Grand Arcade hides most of a board on its camera-nearest road lot tile,
-  // so the board and the moving van stand on the next one, where they read. The lot drawn with and without
-  // each at zoom 1, 2 and 3: at least 60% of the board's pixels, and of the van's, show
-  const sale = await page.evaluate(() => {
-    const v = __view, s = v.scene(), id = "main_55", home = s.town.homes.find(h => h.place === id);
-    if (!home || !s.lotSpots(id)) return null;
-    const area = spr => { const d = spr.c.getContext("2d").getImageData(0, 0, spr.c.width, spr.c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] >= 200) n++; return n; };
-    const front = s.lotSpots(id).front, road = front[0].road;
-    const out = { front, board: area(s.art.sign("sale")), van: area(s.art.van(road === "n" || road === "s" ? 0 : 1)), zooms: [] };
-    v.stop();
-    let n = 0;
-    const draw = (listing, moving) => {
-      const st = __t.quiet(30000 + n++);
-      st.homes[home.id] = Object.assign({}, st.homes[home.id], { listing });
-      st.lots[id] = Object.assign({}, st.lots[id], { moving });
-      __push(st); v.settle(); __t.warm(); v.frame(1e7);
-    };
-    const changed = (a, b) => { let c = 0; for (let i = 0; i < a.data.length; i += 4) if (Math.abs(a.data[i] - b.data[i]) + Math.abs(a.data[i + 1] - b.data[i + 1]) + Math.abs(a.data[i + 2] - b.data[i + 2]) >= 30) c++; return c; };
-    for (const zoom of [1, 2, 3]) {
-      const ws = front.map(t => s.proj.toWorld(t.x + 0.5, t.y + 0.5)), c = v.cam();
-      c.x = ws.reduce((m, w) => m + w[0], 0) / ws.length; c.y = ws.reduce((m, w) => m + w[1], 0) / ws.length; c.zoom = zoom;
-      draw(null, false);
-      const a = s.worldToCss(Math.min(...ws.map(w => w[0])) - 48, Math.min(...ws.map(w => w[1])) - 56), b = s.worldToCss(Math.max(...ws.map(w => w[0])) + 48, Math.max(...ws.map(w => w[1])) + 24);
-      const grab = () => __t.grab(a[0], a[1], b[0] - a[0], b[1] - a[1]);
-      const bare = grab();
+  // Boards that something nearer the camera would hide (review H5): 55 Main Street's camera-nearest road lot
+  // tile is behind the Grand Arcade, 66 and 92 Park Avenue's behind the City Hall and Hilltop bus shelters
+  // (roof and line plates). That tile goes after those where a board shows, so the board and the moving van
+  // stand on the next one, where they read. Each lot drawn with and without each at zoom 1, 2 and 3: at
+  // least 60% of the board's pixels, and of the van's, show
+  const HIDERS = [["main_55", "the Grand Arcade", null], ["park_66", "the City Hall bus shelter", [36, 13]], ["park_92", "the Hilltop bus shelter", [49, 13]]];
+  for (const [id, by, tile] of HIDERS) {
+    const sale = await page.evaluate(id => {
+      const v = __view, s = v.scene(), home = s.town.homes.find(h => h.place === id);
+      if (!home || !s.lotSpots(id)) return null;
+      const area = spr => { const d = spr.c.getContext("2d").getImageData(0, 0, spr.c.width, spr.c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] >= 200) n++; return n; };
+      const front = s.lotSpots(id).front, road = front[0].road;
+      const out = { front, board: area(s.art.sign("sale")), van: area(s.art.van(road === "n" || road === "s" ? 0 : 1)), zooms: [] };
+      v.stop();
+      let n = 0;
+      const draw = (listing, moving) => {
+        const st = __t.quiet(30000 + n++);
+        st.homes[home.id] = Object.assign({}, st.homes[home.id], { listing });
+        st.lots[id] = Object.assign({}, st.lots[id], { moving });
+        __push(st); v.settle(); __t.warm(); v.frame(1e7);
+      };
+      const changed = (a, b) => { let c = 0; for (let i = 0; i < a.data.length; i += 4) if (Math.abs(a.data[i] - b.data[i]) + Math.abs(a.data[i + 1] - b.data[i + 1]) + Math.abs(a.data[i + 2] - b.data[i + 2]) >= 30) c++; return c; };
+      for (const zoom of [1, 2, 3]) {
+        const ws = front.map(t => s.proj.toWorld(t.x + 0.5, t.y + 0.5)), c = v.cam();
+        c.x = ws.reduce((m, w) => m + w[0], 0) / ws.length; c.y = ws.reduce((m, w) => m + w[1], 0) / ws.length; c.zoom = zoom;
+        draw(null, false);
+        const a = s.worldToCss(Math.min(...ws.map(w => w[0])) - 48, Math.min(...ws.map(w => w[1])) - 56), b = s.worldToCss(Math.max(...ws.map(w => w[0])) + 48, Math.max(...ws.map(w => w[1])) + 24);
+        const grab = () => __t.grab(a[0], a[1], b[0] - a[0], b[1] - a[1]);
+        const bare = grab();
+        draw("for_sale", false);
+        const board = changed(bare, grab()), sign = s.lotSpots(id).sign;
+        draw(null, true);
+        const van = changed(bare, grab()), at = s.lotSpots(id).van;
+        out.zooms.push({ zoom, sign, board, at, van });
+      }
       draw("for_sale", false);
-      const board = changed(bare, grab()), sign = s.lotSpots(id).sign;
-      draw(null, true);
-      const van = changed(bare, grab()), at = s.lotSpots(id).van;
-      out.zooms.push({ zoom, sign, board, at, van });
-    }
-    draw("for_sale", false);
-    v.start();
-    return out;
-  });
-  if (check(!!sale, "lots: the fixture has 55 Main Street", sale)) {
-    check(sale.front.some(t => t.hidden) && !sale.front[0].hidden && sale.front.every((t, n) => !n || sale.front[n - 1].hidden <= t.hidden),
-      "lots main_55: the road lot tile the Grand Arcade hides goes after those where a board shows", sale.front);
-    console.log(`  main_55: board ${sale.board} px, van ${sale.van} px; shown at zoom 1, 2, 3: board ${sale.zooms.map(q => q.board).join(", ")}, van ${sale.zooms.map(q => q.van).join(", ")}`);
+      v.start();
+      return out;
+    }, id);
+    if (!check(!!sale, `lots: the fixture has ${id}`, sale)) continue;
+    const behind = tile ? sale.front.find(t => t.x === tile[0] && t.y === tile[1]) : null;
+    check(sale.front.some(t => t.hidden) && !sale.front[0].hidden && sale.front.every((t, n) => !n || sale.front[n - 1].hidden <= t.hidden) && (!tile || (behind && behind.hidden)),
+      `lots ${id}: the road lot tile ${by} hides goes after those where a board shows`, { tile, front: sale.front });
+    console.log(`  ${id}: board ${sale.board} px, van ${sale.van} px; shown at zoom 1, 2, 3: board ${sale.zooms.map(q => q.board).join(", ")}, van ${sale.zooms.map(q => q.van).join(", ")}`);
     for (const q of sale.zooms) {
       const z2 = q.zoom * q.zoom;
-      check(q.board >= 0.6 * sale.board * z2, `lots main_55: its SALE board shows at zoom ${q.zoom}`, { ...q, boardPx: sale.board });
-      check(q.van >= 0.6 * sale.van * z2, `lots main_55: its moving van shows at zoom ${q.zoom}`, { ...q, vanPx: sale.van });
+      check(q.board >= 0.6 * sale.board * z2, `lots ${id}: its SALE board shows at zoom ${q.zoom}`, { ...q, boardPx: sale.board });
+      check(q.van >= 0.6 * sale.van * z2, `lots ${id}: its moving van shows at zoom ${q.zoom}`, { ...q, vanPx: sale.van });
     }
   }
   noErrors(log, "stages");
@@ -1268,7 +1275,8 @@ async function runLongTask(browser) {
 //   trees (Eastgate Green, (67, 20) to (66, 19)) crosses at their shared corner point, never into a tree
 //   tile; one whose straight move runs through a tree ((65, 20) to (65, 22)) goes round it
 // - a car whose straight move from a driveway crosses a lawn ((6, 26) to (3, 26)) goes round by the road
-// - a household walking the same pavement together is drawn one behind another, never on one spot
+// - a household walking the same pavement together is drawn one behind another, never on one spot; so are
+//   three people from three homes who walk a street together (each alone in their flat, on the same kerb)
 // - two buses crossing at a junction on the same minute never overlap (one waits short of the crossing and
 //   catches up without a jump), and two passing head-on keep to their lanes
 async function runMovers(browser) {
@@ -1284,14 +1292,17 @@ async function runMovers(browser) {
       maya: { veh: "walk", path: [[67, 20], [66, 19], [67, 20], [66, 19]] }, // Eastgate Green, between the trees at (66, 20) and (67, 19)
       lior: { veh: "walk", path: [[65, 20], [65, 22], [65, 20]] },             // straight through the tree at (65, 21)
       avi: { veh: "car", path: [[6, 26], [3, 26]] },                           // a driveway at (6, 26), straight across the lawn to Willow Lane
+      // three people living alone in three flats, on the same kerb, walking Main Street together
+      ari: { veh: "walk", path: line(31, 25, 1, 0, 6) }, lea: { veh: "walk", path: line(31, 25, 1, 0, 6) }, efrat: { veh: "walk", path: line(31, 25, 1, 0, 6) },
     };
+    const homes = ["ari", "lea", "efrat"].map(id => { const a = __state().agents.find(q => q.id === id); return a.home + ":" + (CityView.hash(a.id) % 2); });
     const tl = (x, y) => T.tiles[y][x];
     const pre = [tl(66, 20), tl(67, 19), tl(67, 20), tl(66, 19), tl(65, 21), tl(65, 20), tl(65, 22), tl(6, 26), tl(5, 26), tl(4, 26), tl(3, 26), tl(6, 25), tl(3, 25)].join("");
     const buses = { "1a": { line: "1", dir: "e", path: line(-1, 25, 1, 0, 10) }, "2a": { line: "2", dir: "n", path: line(3, 29, 0, -1, 10) },
       "1b": { line: "1", dir: "w", path: line(51, 36, -1, 0, 10) }, "2b": { line: "2", dir: "e", path: line(43, 36, 1, 0, 10) } };
     const ext = d => d === "e" || d === "w" ? [0.725, 0.21] : [0.21, 0.725];
     const tileAt = p => (T.tiles[Math.floor(p[1])] || "")[Math.floor(p[0])];
-    const out = { car: [], walk: [], family: Infinity, junction: -Infinity, headon: -Infinity, step: 0, samples: 0, pre, corner: [], treeGap: Infinity, round: [], avi: [] };
+    const out = { car: [], walk: [], family: Infinity, others: Infinity, homes, junction: -Infinity, headon: -Infinity, step: 0, samples: 0, pre, corner: [], treeGap: Infinity, round: [], avi: [] };
     const last = {};
     for (let k = 0; k < 10; k++) {
       const st = __t.quiet(5000 + k), t = 1e7 + k * 417;
@@ -1319,6 +1330,8 @@ async function runMovers(browser) {
         if (k >= 1 && k <= 5) {
           const fam = ["dana", "yossi", "noa"].map(id => { const m = s.movers.find(q => q.id === id); return s.worldToCss(m.wx + 8, m.wy + 28); });
           for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) out.family = Math.min(out.family, Math.hypot(fam[a][0] - fam[b][0], fam[a][1] - fam[b][1]));
+          const three = ["ari", "lea", "efrat"].map(id => { const m = s.movers.find(q => q.id === id); return s.worldToCss(m.wx + 8, m.wy + 28); });
+          for (let a = 0; a < 3; a++) for (let b = a + 1; b < 3; b++) out.others = Math.min(out.others, Math.hypot(three[a][0] - three[b][0], three[a][1] - three[b][1]));
         }
         const P = {};
         for (const id of Object.keys(buses)) {
@@ -1342,6 +1355,9 @@ async function runMovers(browser) {
   check(r.round.length === 0 && Math.hypot(r.end.lior[0] - 65.5, r.end.lior[1] - 20.5) < 0.3, "movers: a walker whose straight move runs through a tree goes round it, and gets there", { round: r.round.slice(0, 6), end: r.end.lior });
   check(r.avi.length === 0 && Math.floor(r.end.avi[0]) === 3 && Math.floor(r.end.avi[1]) === 26, "movers: a car whose straight move from a driveway crosses a lawn goes round by the road", { off: r.avi.slice(0, 6), end: r.end.avi });
   check(r.family >= 8, "movers: a family walking the same pavement is drawn one behind another (8 px apart or more at zoom 2)", r.family);
+  check(new Set(r.homes.map(h => h.split(":")[0])).size === 3 && new Set(r.homes.map(h => h.split(":")[1])).size === 1,
+    "movers: (fixture) ari, lea and efrat live in three homes and keep to the same kerb", r.homes);
+  check(r.others >= 6, "movers: three people from three homes walking a street together are drawn apart (6 px or more at zoom 2), never as one figure", r.others);
   check(r.junction <= 0, "movers: two buses crossing at a junction on the same minute never overlap", r.junction);
   check(r.headon <= 0, "movers: two buses passing head-on keep to their lanes", r.headon);
   check(r.step < 0.1, "movers: a bus that waits at a crossing catches up without a jump (tiles per 10.5 ms)", r.step);
@@ -1368,43 +1384,75 @@ function busRows(t0, n) {
 //   catching up after a wait; a lane change at a corner swings across instead of jumping 0.33)
 // - a fresh view whose first frame has two buses on one tile (tick 0: 1a and 2a both at (3, 25)) draws them
 //   apart from that frame on
+// - at high game speed a tick gets only a few frames (8x or 16x at 60 fps, 4x on a slow device): drawn 3
+//   times a tick (at 0, 1/3 and 2/3 of it, so no frame comes late in a tick), or at 0, 1/2 and the very end
+//   of it (both buses arrived on one frame), no two buses overlap either, and every bus still gets where the
+//   timetable puts it; and a fresh view whose first frame comes only after two ticks (tick 0, then tick 1 a
+//   millisecond later, as at 16x), when the two buses on (3, 25) are both already moving off it, draws them
+//   apart
 async function runBuses(browser) {
   const rows = busRows(360, 41), first = busRows(0, 3);
   const { ctx, page, log } = await open(browser, "?persist=0&drive=0&follow=0&dyn=0&hud=0&minimap=0&zoom=1&at=4,24");
   const r = await page.evaluate(([rows, first]) => {
     const v = __view;
     v.stop();
-    const SUB = 40, ext = d => d % 2 === 0 ? [0.725, 0.21] : [0.21, 0.725];
-    const out = { overlap: -Infinity, worst: null, step: 0, stepAt: null, frames: 0, first: -Infinity, junction: {}, firstRows: null };
-    const run = (list, tick0, base) => {
-      const last = {};
+    const ext = d => d % 2 === 0 ? [0.725, 0.21] : [0.21, 0.725];
+    const out = { overlap: -Infinity, worst: null, step: 0, stepAt: null, frames: 0, first: -Infinity, junction: {}, firstRows: null, fast: {} };
+    // the rows drawn at shares `at` of each 417 ms tick; few: a high-speed run, kept apart in out.fast
+    const run = (list, tick0, base, at, few) => {
+      const last = {}, f = few ? (out.fast[few] = { overlap: -Infinity, worst: null, junction: {}, frames: 0, lag: 0, lagAt: null }) : out;
       for (let k = 0; k < list.length; k++) {
         const st = __t.quiet(base + k), t = 2e7 + base * 417 + k * 417;
         st.buses = list[k];
         __t.pushAt(st, t);
-        for (let j = 0; j < SUB; j++) {
-          v.frame(t + j * 417 / SUB);
-          out.frames++;
+        for (let j = 0; j < at.length; j++) {
+          v.frame(t + at[j] * 417);
+          f.frames++;
           const bs = v.scene().movers.filter(m => m.kind === "bus").map(m => ({ id: m.id, d: m.lights, p: v.scene().proj.toTile(m.cx, m.cy) }));
           for (const b of bs) {
-            if (last[b.id]) { const d = Math.hypot(b.p[0] - last[b.id][0], b.p[1] - last[b.id][1]); if (d > out.step) { out.step = d; out.stepAt = [tick0 + k, j, b.id]; } }
+            if (!few && last[b.id]) { const d = Math.hypot(b.p[0] - last[b.id][0], b.p[1] - last[b.id][1]); if (d > out.step) { out.step = d; out.stepAt = [tick0 + k, j, b.id]; } }
             last[b.id] = b.p;
-            if (Math.abs(b.p[0] - 3.5) < 0.6 && Math.abs(b.p[1] - 25.5) < 0.6) out.junction[b.id] = true;
+            if (Math.abs(b.p[0] - 3.5) < 0.6 && Math.abs(b.p[1] - 25.5) < 0.6) f.junction[b.id] = true;
           }
           for (let a = 0; a < bs.length; a++) for (let b = a + 1; b < bs.length; b++) {
             const A = bs[a], B = bs[b], ea = ext(A.d), eb = ext(B.d);
             const ov = Math.min(ea[0] + eb[0] - Math.abs(A.p[0] - B.p[0]), ea[1] + eb[1] - Math.abs(A.p[1] - B.p[1]));
             if (tick0 === 0) out.first = Math.max(out.first, ov);
-            else if (ov > out.overlap) { out.overlap = ov; out.worst = [tick0 + k, j, A.id, B.id]; }
+            else if (ov > f.overlap) { f.overlap = ov; f.worst = [tick0 + k, j, A.id, B.id]; }
           }
         }
       }
+      if (!few) return;
+      // a last frame well after the last tick: every bus stands on its tile (in its lane), none held back
+      v.frame(2e7 + base * 417 + list.length * 417 + 400);
+      for (const m of v.scene().movers.filter(q => q.kind === "bus")) {
+        const row = list[list.length - 1].find(b => b.id === m.id), p = v.scene().proj.toTile(m.cx, m.cy), d = Math.hypot(p[0] - row.x - 0.5, p[1] - row.y - 0.5);
+        if (d > f.lag) { f.lag = d; f.lagAt = m.id; }
+      }
     };
-    run(rows, 360, 3000);
+    const SUB40 = [...Array(40)].map((_, j) => j / 40);
+    run(rows, 360, 3000, SUB40);
     // a page load on a minute when two buses stand on one tile: a new town (new movers), tick 0 first
     v.setTown(window.CITY_FIXTURE.town);
     out.firstRows = first[0].filter(b => b.x === 3 && b.y === 25).map(b => b.id);
-    run(first, 0, 4000);
+    run(first, 0, 4000, SUB40);
+    // a few frames a tick, each on a fresh view
+    v.setTown(window.CITY_FIXTURE.town);
+    run(rows, 360, 5000, [0, 1 / 3, 2 / 3], "thirds");
+    v.setTown(window.CITY_FIXTURE.town);
+    run(rows, 360, 6000, [0, 1 / 2, 1], "halves");
+    // a page opened at high speed: ticks 0 and 1 come before its first frame
+    v.setTown(window.CITY_FIXTURE.town);
+    out.burst = -Infinity;
+    first.slice(0, 2).forEach((list, k) => { const st = __t.quiet(7000 + k); st.buses = list; __t.pushAt(st, 4e7 + k); });
+    for (let j = 0; j < 8; j++) {
+      v.frame(4e7 + 2 + j * 16.7);
+      const bs = v.scene().movers.filter(m => m.kind === "bus").map(m => ({ d: m.lights, p: v.scene().proj.toTile(m.cx, m.cy) }));
+      for (let a = 0; a < bs.length; a++) for (let b = a + 1; b < bs.length; b++) {
+        const A = bs[a], B = bs[b], ea = ext(A.d), eb = ext(B.d);
+        out.burst = Math.max(out.burst, Math.min(ea[0] + eb[0] - Math.abs(A.p[0] - B.p[0]), ea[1] + eb[1] - Math.abs(A.p[1] - B.p[1])));
+      }
+    }
     return out;
   }, [rows, first]);
   check(r.frames === 41 * 40 + 3 * 40, "buses: every frame drawn", r.frames);
@@ -1412,6 +1460,12 @@ async function runBuses(browser) {
   check(["1a", "2a", "1d", "2d", "1c", "2c"].every(id => r.junction[id]), "buses: the line 1 and line 2 buses that meet at (3, 25) all go through it", Object.keys(r.junction));
   check(r.step <= 0.2, "buses: no bus jumps from one frame to the next (0.2 tiles at most, 40 frames a tick)", { step: r.step, at: r.stepAt });
   check(r.firstRows.length === 2 && r.first <= 0, "buses: two buses on one tile on a fresh view's first frame are drawn apart", { onTile: r.firstRows, overlap: r.first });
+  for (const [few, what] of [["thirds", "at 0, 1/3 and 2/3 of each tick"], ["halves", "at 0, 1/2 and the end of each tick"]]) {
+    const f = r.fast[few];
+    check(f.frames === 41 * 3 && f.overlap <= 0, `buses: drawn only 3 times a tick (${what}, as at 8x or 16x) no two buses overlap in any frame`, { overlap: f.overlap, at: f.worst });
+    check(f.lag < 0.5, `buses: drawn 3 times a tick (${what}) every bus gets where the timetable puts it`, { lag: f.lag, at: f.lagAt });
+  }
+  check(r.burst <= 0, "buses: a fresh view whose first frame comes two ticks in (at 16x) draws the two buses leaving one tile apart", r.burst);
   noErrors(log, "buses");
   await ctx.close();
 }
