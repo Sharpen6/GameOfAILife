@@ -66,6 +66,7 @@
       for (const row of tiles) for (const c of row) cells.push(c);
       this._ok = Uint8Array.from(cells, c => (_WALK.has(c) ? 1 : 0));
       this._road = Uint8Array.from(cells, c => (_STREET.has(c) ? 1 : 0));
+      this._tile_district = new Map(); // tile index -> district of the region place there (build_region fills it)
       const w = this.w, h = this.h, road = this._road;
       this.junctions = new Set();
       for (let i = 0; i < w * h; i++) {
@@ -84,9 +85,14 @@
     // Inside the rectangle whose tiles are exactly build_map(seed)'s (Rule R's test).
     in_frozen(x, y) { return x < FROZEN[0] && y < FROZEN[1]; }
 
-    // Millbrook's district for a tile of its 80 x 50 (v2's blocks), else the region district whose rect holds it,
-    // else "" (a street, the river, a highway).
+    // The district of the region place whose footprint or entry is the tile (so it always matches the place's own
+    // district, which car_extra and the prices use), else Millbrook's district for a tile of its 80 x 50 (v2's
+    // blocks), else the region district whose rect holds it, else "" (a street, the river, a highway).
     district_at(x, y) {
+      if (0 <= x && x < this.w && 0 <= y && y < this.h) {
+        const own = this._tile_district.get(y * this.w + x);
+        if (own !== undefined) return own;
+      }
       const [mx, my, mw, mh] = MILLBROOK;
       if (mx <= x && x < mx + mw && my <= y && y < my + mh) return T.district_at(x, y);
       for (const d of this.districts) {
@@ -150,6 +156,27 @@
     return region;
   }
 
+  // Tile index -> district for the region places' footprints, then their entry tiles (first place wins), so
+  // district_at agrees with each place's own district where the rects do not (quayside_station's footprint and
+  // entry lie in downtown_riverton's rect). Millbrook's places keep v2's blocks.
+  function _tile_districts(m) {
+    const out = new Map();
+    const mine = Array.from(m.places.values()).filter(p => !m.millbrook_ids.has(p.id));
+    for (const p of mine) {
+      for (let y = p.y; y < p.y + p.h; y++) {
+        for (let x = p.x; x < p.x + p.w; x++) {
+          const i = y * m.w + x;
+          if (!out.has(i)) out.set(i, p.district);
+        }
+      }
+    }
+    for (const p of mine) {
+      const i = p.entry[1] * m.w + p.entry[0];
+      if (!out.has(i)) out.set(i, p.district);
+    }
+    return out;
+  }
+
   function _build_region(seed) {
     const d = load_data();
     const [fw, fh] = d.frozen;
@@ -165,6 +192,7 @@
     }
     const m = new RegionMap(tiles, places);
     m.millbrook_ids = new Set(mb.places.keys());
+    m._tile_district = _tile_districts(m);
     m.home_specs = priced_specs(d, places);
     m.lot_conditions = Object.assign({}, d.lots);
     m.job_slots = d.jobs.map(([t, pid, w, s, e, days, n]) => [t, pid, w, s, e, days.slice(), n]);
