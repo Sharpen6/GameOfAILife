@@ -11,33 +11,13 @@
 //   node port/tools/parity_rail.cjs boarding            every (line, track, station) boarding table and run minutes
 //   node port/tools/parity_rail.cjs bench N             report-only timings (minutes hits, routes, train_rows)
 //
-// The map is G.region.build_region(1) (REGION_DATA comes from engine.cjs); while R1a's loader is absent it is
-// built here from RAIL_REGION_JSON (or gameofailife/data/region.json) over build_map(1), as region_load.py does.
+// The map is G.region.build_region(1) (engine.cjs sets REGION_DATA from gameofailife/data/region.json).
 "use strict";
-const fs = require("fs");
-const path = require("path");
 const G = require("./engine.cjs").load();
 
-function regionTown() {
-  if (G.region && G.region.build_region) return G.region.build_region(1);
-  const file = process.env.RAIL_REGION_JSON || path.join(__dirname, "..", "..", "gameofailife", "data", "region.json");
-  const d = JSON.parse(fs.readFileSync(file, "utf8"));
-  const [fw, fh] = d.frozen;
-  const mb = G.town.build_map(1);
-  const tiles = d.rows.map(r => Array.from(r));
-  for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) tiles[y][x] = mb.tiles[y][x];
-  const places = new Map(mb.places);
-  for (const p of d.places) {
-    places.set(p.id, new G.town.Place(p.id, p.name, p.kind, p.x, p.y, p.w, p.h, p.hours ? Array.from(p.hours) : null,
-      Array.from(p.entry), p.face, p.district, p.style, p.floors, p.tier, p.units));
-  }
-  return {
-    tiles, places, memo: new Map(), rail: d.rail, world: "region", w: tiles[0].length, h: tiles.length,
-    highway_edges: d.highway_edges, interchanges: d.interchanges,
-  };
-}
+const regionTown = () => G.region.build_region(1);
 
-// The same pairs as test_rail_contract.pairs: homes and destinations in place order, strided.
+// The same pairs as tests/test_roads.pairs: homes and destinations in place order, strided.
 function pairs(town, n) {
   const homes = [], dest = [];
   for (const [pid, p] of town.places) {
