@@ -621,7 +621,7 @@ Version 3 answers what the owner asked for next: as realistic as possible, peopl
 **Trains**
 
 - Two railway lines run on a fixed timetable, a train every 10 minutes each way: the Riverton Line (Millbrook, Northgate, Quayside, Central, Midtown and the Ironworks; trains R1 to R6) and the Southfield Line (Central, Southfield, Fairview and Willow Hills; S1 to S4). A ride costs $3 for ages 18 to 64 and is free for children and pensioners; changing lines at Central takes 2 minutes and costs nothing.
-- Townsfolk walk to the station, wait on the platform, ride and walk on from the station where they get off; drivers park and ride when the station is close. You see the four-car trains glide along their tracks with their doors open at the platforms, and hovering over one says how many ride it.
+- Townsfolk walk to the station, wait on the platform, ride and walk on from the station where they get off; drivers park and ride when the station is close. You see the two-car trains glide along their tracks with their doors open at the platforms, and hovering over one says how many ride it.
 
 **1,000 townsfolk**
 
@@ -657,7 +657,7 @@ Version 3 answers what the owner asked for next: as realistic as possible, peopl
 
 **Measured on this build**
 
-Seeds 1 to 3, the region with 1,000 townsfolk, on a 4-CPU machine at a load average under 3:
+Seeds 1 to 3, the region with 1,000 townsfolk, on a 4-CPU machine at a load average under 3. These numbers come from the build before the last round of fixes (see **Fixed last** below), which changes the hunger, street and train figures; those have not been measured again over 30 days.
 
 - **Trains:** 319 to 382 boardings each weekday over 30 days (seed 1: 319-344, seed 2: 348-382, seed 3: 330-371).
 - **Friends and couples:** by the end of day 7, 35 to 45 new friendships (3 or 4 of them with one of the 60) and 2 to 5 new couples on top of the 292-296 a city starts with; one birth (Shira Peretz's baby) and no deaths.
@@ -669,19 +669,31 @@ Seeds 1 to 3, the region with 1,000 townsfolk, on a 4-CPU machine at a load aver
 - **Speed:** with 1,000 townsfolk a game minute costs 0.99 ms of CPU on average and 6.3 ms at the 99th percentile (0.31 and 1.2 ms without them); the server runs speed 16 (38.4 ticks a second) on 2.65 ms of CPU a tick with God watching; the browser version runs a game day in 1.2 s. God's first message is 431 KB.
 - **Long runs (soaks) on this build:** 60 game days of life on seed 1 (and the same with every Luck at 0), 7 days of the townsfolk's days, 120 days of Millbrook's housing market on seeds 1 to 3, 7 days on seeds 1 to 3 checking that the 60 live exactly the same lives in the region as in Millbrook alone (with nobody else in the region), and 60 days of the 60's own housing market in the region. All passed.
 
+**Fixed last, not yet measured again over 30 days**
+
+An independent check of realism and of the playable page found these problems, fixed in both engines with their own tests; the full set of slow checks has not been run again since.
+
+- **A floor under poverty:** pensioners are housed in homes their pension can pay for, a household with no paid job moves to the cheapest home that fits it, and a meal at home with an empty fridge brings in groceries, or a free food parcel from the food bank when nobody can pay. A broke owner's property tax waits two clean weeks. Townsfolk in hospital are fed and cared for on the ward, and children left with no adult go to a relative, or leave town to family.
+- **More people out and about:** townsfolk go out on days off and in the evening, eat out, have coffee and lunch at a cafe; retirees leave the house; children play instead of running errands; a child under 5 goes to the nursery or has a sitter when nobody 14 or over is home. Measured on seeds 1 to 3: 42 to 74 townsfolk outdoors at 11:00 on a weekday (was 17 to 19) and 24 to 42 at 20:00 (was 17 to 24).
+- **Nobody works seven days a week:** jobs open every day (nurses, station staff, receptionists) run on a five-day rota.
+- **Shorter trains:** two cars for 120 riders instead of four for 240, since the busiest train carried 15 to 20 people. The timetable is unchanged.
+- **Life at sensible hours:** unexpected bills and windfalls come on a weekday or within the week, not all on Sunday; reviews, layoffs and job offers happen in working hours; a broken bone that strikes someone asleep happens after they wake.
+- **The page opens on the region:** Millbrook and Riverton Central at a quarter zoom, as the design says, instead of Millbrook's Downtown close up. The City tab and the HUD count all 612 homes in the region.
+- **Smaller fixes:** a talk line no longer asks after the speaker's own child, the asked-out fork names the real day of the date, falling-outs at school are between staff, a home hovering at "shabby" is reported once, and a townsperson's page keeps their last talks, friends, dates and choices.
+
 **Cut, or left for later**
 
 - **The dashboard is still about the 60.** The HUD's people count, the People tab, the wealth ranking and the LLM log show the 60 named; the City tab's population, wealth and districts count all 1,060, and its homes (and the HUD's market chips) all 612 homes in the region. There is no list of the townsfolk, no townsperson's page, no News filter by townsperson or topic and no region card in the dashboard yet. The server already sends a townsperson's page and the full roster (`get_agent` with an id like `f17`, and `get_folk`), for the next build.
 - **Townsfolk homes and newcomers:** townsfolk do not move to bigger or better homes, buy homes or do them up, and nobody new moves to town. Moving somewhere cheaper, or leaving town, after three Sundays in the red is in. There is no morning digest of the townsfolk's news.
-- **Poverty has no floor.** A townsperson with no money and an empty fridge goes hungry and can starve: in one 30-day run a single mother without a job whose rent was more than her $200 benefit starved in her second week, and her two eight-year-olds, left alone in the house, starved three weeks later. There is no help from family or friends with food, no food bank, and no one takes in orphaned children.
-- **Fewer questions for the AI players than planned:** falling ill, being laid off and retiring are settled by the character's play style, without a fork. Nobody goes to nursery or college, and grown-up children do not move out of their parents' home.
+- **Poverty:** before the floor above, a townsperson with no money could starve (1 to 5 per city over 30 days). The floor has its own tests, but the 30-day runs have not been repeated, so whether anyone still starves is not measured. Family and friends do not help with food.
+- **Fewer questions for the AI players than planned:** falling ill, being laid off and retiring are settled by the character's play style, without a fork. Nobody goes to college, and grown-up children do not move out of their parents' home.
 - **The 60 stay in Millbrook:** they live, work and shop only there (so they are never in a region house hunt or a long commute), and none of them takes the train.
 - **Not in this build at all:** the 60 riding trains, townsfolk becoming named characters, parties, and job offers as forks for the 60.
 - **The view:** no overhead wires over the tracks and no fog. A townsperson cannot be followed on the map from the dashboard.
 - **Behind the scenes:** the homes' condition and listings carry no version number (`housing_version` in the plan), so the server sends them again every 40th frame as well as whenever they change.
 - **Left over from the long test run:** the housing forks' pages (each home's tier, bedrooms, condition and weekly cost, what each upkeep option does), the repair helper offered only from friends and family, buses (fewer at night and midday, offered for far outings, riders drawn on the bus), staff at the Diner and errands to the bank and City Hall, and keeping the game's pace from the real clock.
 - **Targets missed on this build:**
-  - The view the page opens on shows 43 to 63 townsfolk out of doors at 08:00, not the 150 to 210 the design aimed for.
+  - The region's default view, which the page now opens on, showed 43 to 63 townsfolk out of doors at 08:00 on a weekday (measured before the last fixes), not the 150 to 210 the design aimed for.
   - Drawing speed, measured in a headless test browser drawing in software at a load average of 0.7: panning across the region at 1280 by 800 has a worst frame of 61 ms and a 95th percentile of 30 ms (targets 50 and 25); at 1440 by 900 on a high-density screen, with the resolution lowered as it goes, 99 and 50 ms; a still view of Millbrook's Downtown at zoom 1/2 has a median of 12.6 ms (target 12, met on some runs). Opening the region, panning on a phone and in the top-down view, a still view of Riverton Downtown, the lights at night and the change of season are within their targets.
   - Drawing a building's picture once takes at most 8.1 to 10.7 ms against a limit of 10 ms (missed on one of two runs).
   - Millbrook alone ticks in 0.33 to 0.41 ms of CPU a game minute on average when its test runs by itself, and in 0.37 to 0.50 ms inside the full test runs on this machine, against a budget of 0.4 ms (missed on five of the last seven full runs).
