@@ -94,6 +94,22 @@
   const RECENT_FORKS = 8; // decisions the fork message's `you.recent` carries, with what came of each
   const DAY_OFF_WAKE = 8 * 60; // the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
   const NEWS_EVERY = { fender: 30 * G.clock.MINUTES_PER_DAY }; // outcome id -> the least time between two of one person's in the news
+  const PHRASINGS = { // outcome id -> the ways its event line reads, one picked by sim.rng when it lands (FIXLISTS 17)
+    stuck: ["Gets stuck and frustrated", "Hits a wall with the project", "Can't make the pieces fit", "Gives up on it for today"],
+    burnt: ["Burns the food", "Burns dinner to a crisp", "Sets off the smoke alarm cooking", "Overcooks everything"],
+    insomnia: ["Lies awake for hours", "Can't get to sleep", "Tosses and turns half the night", "Stares at the ceiling for hours"],
+    lovely_talk: ["A lovely long talk", "Talks for an hour and laughs a lot", "Catches up on all the news", "A warm, long chat"],
+    buzz: ["Arrives buzzing with energy", "Arrives glowing from the run", "Gets in wide awake and ready"],
+    late: ["Arrives late", "Gets in late", "Slips in after the start", "Turns up late, flustered"],
+    restless: ["Gets restless and bored", "Can't settle to anything", "Paces round the house, bored", "Gets fidgety and fed up"],
+    friend_there: ["Bumps into a friend", "Runs into a friend", "Spots a friend and stops to chat"],
+    groggy: ["Wakes up groggy", "Wakes up foggy-headed", "Drags themselves out of bed"],
+    great_time: ["Has a great time together", "They have a brilliant time", "Laughs the whole time together"],
+    breakthrough: ["Makes a breakthrough", "Cracks the hard part", "Gets it working at last", "Has a eureka moment"],
+  };
+  const QUIET = ["tasty", "deep_sleep", "unwind", "bonding", "feast", "cosy_night"]; // routine good meals, sleep, rest and
+  // dinners: kept in the decision's `happened` only, unless the outcome is news (importance 1 or more); a dinner out is its own one line
+  const VARIED_MONEY = { breakthrough: [20, 120] }; // outcome id -> the whole-dollar range its money is drawn from as it lands
 
   // One decimal, rounding half up (floor(x * 10 + 0.5) / 10), as the Python twin does.
   const _r1 = x => Math.floor(x * 10 + 0.5) / 10;
@@ -1164,7 +1180,12 @@
     _apply_outcome(agent, pending) {
       const out = pending.outcome;
       let label = out.label;
-      for (const [key, value] of Object.entries(out.effects)) {
+      let effects = out.effects;
+      if (hasOwn(VARIED_MONEY, out.id) && hasOwn(effects, "money")) { // not the same amount every time (FIXLISTS 17)
+        const [lo, hi] = VARIED_MONEY[out.id];
+        effects = Object.assign({}, effects, { money: lo + Math.floor(this.rng.random() * (hi - lo + 1)) });
+      }
+      for (const [key, value] of Object.entries(effects)) {
         if (G.agent.NEEDS.includes(key)) {
           agent.adjust(key, value);
         } else if (key === "money") {
@@ -1199,8 +1220,16 @@
         this._happened(agent, pending, label);
         return;
       }
-      const [text, tag, outcome_importance] = G.chronicle.outcome_event(agent.name, out.label, out.effects);
+      let [text, tag, outcome_importance] = G.chronicle.outcome_event(agent.name, out.label, effects);
       let importance = outcome_importance;
+      if (QUIET.includes(out.id) && importance === 0) { // a routine good night or meal: no log line (FIXLISTS 17)
+        this._happened(agent, pending, label);
+        return;
+      }
+      if (hasOwn(PHRASINGS, out.id)) {
+        const ways = PHRASINGS[out.id];
+        text = G.chronicle.outcome_event(agent.name, ways[Math.floor(this.rng.random() * ways.length)], effects)[0];
+      }
       if (hasOwn(NEWS_EVERY, out.id) && importance >= 1) { // news once in a while: the rest stay in the history only
         if (agent.news_ticks === undefined || agent.news_ticks === null) agent.news_ticks = {}; // outcome id -> tick it was last news
         const seen = agent.news_ticks;

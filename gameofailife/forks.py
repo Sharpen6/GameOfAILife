@@ -90,8 +90,9 @@ class Option:
             out["travel_minutes"] = minutes
         if self.household_pays:
             out["household"] = True
-        if next((where for _, where in self.steps if where is not None), None) == "home":
-            out["home"] = True  # it happens at home: any minutes are the way home (FIXLISTS 16)
+        places = [where for _, where in self.steps if where is not None]
+        if places and all(where == "home" for where in places):
+            out["home"] = True  # it all happens at home: any minutes are the way home (FIXLISTS 16)
         return out
 
 
@@ -910,7 +911,7 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
             if sim.clock.is_weekend and agent.is_adult and agent.money >= 40 else None)
     if shop:  # a weekend wander round the shops (FIXLISTS 18): in place of the side project
         opts[3] = Option(f"Buy something nice at {shop.name}", [("shopping", shop.id), ("relax_home", "home")], cost=40,
-                         tags={"thrift": -1.0, "adventure": 0.5, "social": 0.2}, gains={"fun": 35},
+                         base=-0.2, tags={"thrift": -1.0, "adventure": 0.5, "social": 0.2}, gains={"fun": 35},
                          outcomes=[Outcome("love_it", "Loves the purchase", 0.6, +1, {"fun": 15}, group="purchase"),
                                    Outcome("regret", "Regrets the spending", 0.3, -1, {"fun": -8}, group="purchase"),
                                    _meet_new(0.08)])

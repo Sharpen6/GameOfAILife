@@ -624,6 +624,49 @@ class TraitDrift(unittest.TestCase):
         self.assertLess(dana.profile.traits["social"], round(before["social"] + 0.04 * 0.6, 3))
 
 
+class LogVariety(unittest.TestCase):
+    """Item 14: common outcomes read several ways, routine good nights and meals stay out of the log (but in the
+    decision's `happened`), a dinner out is one line, and a breakthrough is not always $50."""
+
+    def test_the_month_reads_varied(self):
+        from gameofailife import sim as sim_module
+        _, events, forks, _ = Month.get()
+        texts = [re.sub(r"^[^:]*: ", "", e["text"]) for e in events if e["tag"] in ("outcome", "money_swing")]
+        for quiet in ("Sleeps deeply.", "Makes a really tasty meal.", "Properly unwinds.", "A warm family evening.",
+                      "Everyone loves the feast.", "A cosy night in."):
+            self.assertNotIn(quiet, texts)
+        happened = collections.Counter(h for f in forks.values() for h in f["happened"])
+        self.assertGreater(happened["Sleeps deeply"], 20)  # still came true, and the pages' "Then:" says so
+        for oid, ways in sim_module.PHRASINGS.items():
+            self.assertTrue(3 <= len(ways) <= 6, oid)
+        seen = collections.Counter()
+        for t in texts:
+            for oid, ways in sim_module.PHRASINGS.items():
+                if any(t.startswith(w) for w in ways):
+                    seen[oid] += 1
+        common = [oid for oid, n in seen.items() if n >= 20]
+        self.assertTrue(common)
+        for oid in common:
+            used = {w for w in sim_module.PHRASINGS[oid] for t in texts if t.startswith(w)}
+            self.assertGreaterEqual(len(used), 2, oid)
+        tags = collections.Counter(e["tag"] for e in events)
+        self.assertLess(tags["outcome"] / len(events), 0.68)  # 0.77 in the 2-hour run
+
+    def test_breakthroughs_pay_varied_amounts(self):
+        sim = Simulation(1)
+        tom = sim.agents["tom"]
+        out = forks.Outcome("breakthrough", "Makes a breakthrough", 1.0, +1, {"fun": 15, "money": 50})
+        fork = forks.Fork("tom", "free_time", "?", [forks.Option("x", [("rest", "home")])] * 4, sim.clock.tick)
+        sim._decide(tom, fork, 0, "model", "")
+        amounts = set()
+        for _ in range(12):
+            before = tom.money
+            sim._apply_outcome(tom, {"fork": fork.id, "outcome": out, "due": None})
+            amounts.add(tom.money - before)
+        self.assertGreater(len(amounts), 4)
+        self.assertTrue(all(20 <= a <= 120 for a in amounts))
+
+
 def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
     """port/tools/parity_decisions.cjs in Python (the JS port's dice, through test_port's DiceSim)."""
     from tests.test_port import DiceSim

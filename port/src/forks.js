@@ -83,7 +83,8 @@
       const out = { index, label: this.label, cost: pyRound(this.cost, 2) };
       if (minutes !== null && minutes !== undefined) out.travel_minutes = minutes;
       if (this.household_pays) out.household = true;
-      if ((this.steps.find(s => (s[1] ?? null) !== null)?.[1] ?? null) === "home") out.home = true; // it happens at home: any minutes are the way home (FIXLISTS 16)
+      const places = this.steps.map(s => s[1] ?? null).filter(where => where !== null);
+      if (places.length && places.every(where => where === "home")) out.home = true; // it all happens at home: any minutes are the way home (FIXLISTS 16)
       return out;
     }
   }
@@ -900,7 +901,7 @@
     const shop = sim.clock.is_weekend && agent.is_adult && agent.money >= 40
       ? _open_place(sim, agent, ["shop"], SHOP_MINUTES) : null;
     if (shop) { // a weekend wander round the shops (FIXLISTS 18): in place of the side project
-      opts[3] = new Option(`Buy something nice at ${shop.name}`, [["shopping", shop.id], ["relax_home", "home"]], { cost: 40,
+      opts[3] = new Option(`Buy something nice at ${shop.name}`, [["shopping", shop.id], ["relax_home", "home"]], { cost: 40, base: -0.2,
         tags: { thrift: -1.0, adventure: 0.5, social: 0.2 }, gains: { fun: 35 },
         outcomes: [new Outcome("love_it", "Loves the purchase", 0.6, +1, { fun: 15 }, "purchase"),
           new Outcome("regret", "Regrets the spending", 0.3, -1, { fun: -8 }, "purchase"), _meet_new(0.08)] });

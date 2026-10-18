@@ -108,6 +108,22 @@ IDLE_FUN = 1.6  # how much faster fun drains while sitting idle (FIXLISTS 8)
 RECENT_FORKS = 8  # decisions the fork message's `you.recent` carries, with what came of each
 DAY_OFF_WAKE = 8 * 60  # the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
 NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
+PHRASINGS = {  # outcome id -> the ways its event line reads, one picked by sim.rng when it lands (FIXLISTS 17)
+    "stuck": ("Gets stuck and frustrated", "Hits a wall with the project", "Can't make the pieces fit", "Gives up on it for today"),
+    "burnt": ("Burns the food", "Burns dinner to a crisp", "Sets off the smoke alarm cooking", "Overcooks everything"),
+    "insomnia": ("Lies awake for hours", "Can't get to sleep", "Tosses and turns half the night", "Stares at the ceiling for hours"),
+    "lovely_talk": ("A lovely long talk", "Talks for an hour and laughs a lot", "Catches up on all the news", "A warm, long chat"),
+    "buzz": ("Arrives buzzing with energy", "Arrives glowing from the run", "Gets in wide awake and ready"),
+    "late": ("Arrives late", "Gets in late", "Slips in after the start", "Turns up late, flustered"),
+    "restless": ("Gets restless and bored", "Can't settle to anything", "Paces round the house, bored", "Gets fidgety and fed up"),
+    "friend_there": ("Bumps into a friend", "Runs into a friend", "Spots a friend and stops to chat"),
+    "groggy": ("Wakes up groggy", "Wakes up foggy-headed", "Drags themselves out of bed"),
+    "great_time": ("Has a great time together", "They have a brilliant time", "Laughs the whole time together"),
+    "breakthrough": ("Makes a breakthrough", "Cracks the hard part", "Gets it working at last", "Has a eureka moment"),
+}
+QUIET = ("tasty", "deep_sleep", "unwind", "bonding", "feast", "cosy_night")  # routine good meals, sleep, rest and
+# dinners: kept in the decision's `happened` only, unless the outcome is news (importance 1 or more); a dinner out is its own one line
+VARIED_MONEY = {"breakthrough": (20, 120)}  # outcome id -> the whole-dollar range its money is drawn from as it lands
 
 
 def _r1(x: float) -> float:
@@ -1095,7 +1111,11 @@ class Simulation:
     def _apply_outcome(self, agent: Agent, pending: dict) -> None:
         out = pending["outcome"]
         label = out.label
-        for key, value in out.effects.items():
+        effects = out.effects
+        if out.id in VARIED_MONEY and "money" in effects:  # not the same amount every time (FIXLISTS 17)
+            lo, hi = VARIED_MONEY[out.id]
+            effects = {**effects, "money": float(lo + int(self.rng.random() * (hi - lo + 1)))}
+        for key, value in effects.items():
             if key in NEEDS:
                 agent.adjust(key, value)
             elif key == "money":
@@ -1127,7 +1147,13 @@ class Simulation:
         if "meet_new" in out.effects:
             self._happened(agent, pending, label)
             return
-        text, tag, importance = chronicle.outcome_event(agent.name, out.label, out.effects)
+        text, tag, importance = chronicle.outcome_event(agent.name, out.label, effects)
+        if out.id in QUIET and importance == 0:  # a routine good night or meal: no log line (FIXLISTS 17)
+            self._happened(agent, pending, label)
+            return
+        if out.id in PHRASINGS:
+            ways = PHRASINGS[out.id]
+            text = chronicle.outcome_event(agent.name, ways[int(self.rng.random() * len(ways))], effects)[0]
         if out.id in NEWS_EVERY and importance >= 1:  # news once in a while: the rest stay in the history only
             seen = getattr(agent, "news_ticks", None)
             if seen is None:

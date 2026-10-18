@@ -390,7 +390,7 @@ class SummaryTest(unittest.TestCase):
 class EventsTest(unittest.TestCase):
     def test_event_fields_and_places(self):
         sim, events = RUN["sim"], RUN["events"]
-        self.assertGreater(len(events), 300)
+        self.assertGreater(len(events), 150)  # was 300: routine good nights, meals and rest are no lines (v3 D 14)
         for ev in events:
             with self.subTest(seq=ev["seq"]):
                 self.assertEqual(set(ev), EVENT_KEYS)

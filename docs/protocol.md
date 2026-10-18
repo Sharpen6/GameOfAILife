@@ -784,7 +784,11 @@ under 10 would be left at home alone); a weekend `free_time` fork can offer
 now"` when the cash on hand covers what is left of the goal (the goal is then
 cleared, with a `goal_reached` event); and an invite's `"Ignore the message"`
 scores below `"Decline politely"`, whose answer goes into the host's memory
-(`"<name> declines my invite to <place>."`).
+(`"<name> declines my invite to <place>."`). A choice teaches the profile what
+sets it apart from the fork's other options (its tags less the four options'
+mean), not its own tags. In the event log, common outcomes read several ways,
+and a routine good night, meal, rest or family dinner is kept only in the
+decided fork's `happened` (a dinner out is its one `family_dinner` line).
 
 ### `message`
 
