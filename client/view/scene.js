@@ -674,7 +674,7 @@
       list.sort((a, b) => a.depth - b.depth || a.wx - b.wx);
       statics = list;
       dirty = false;
-      occlusion = null;
+      occlusion = null; lampOcc.clear(); lampMasks = 0;
       staticsVersion++;
       scene.stats.statics_builds++;
       scene.stats.staticsMs = performance.now() - t0;
@@ -975,9 +975,49 @@
       }
       return c;
     }
+    // Lazy lamp occlusion for a big town (view.md 3.3.7): a visible lamp's hidden flag and masked pool are worked
+    // out the first time it shows, from the buildings near it, once every nearer one has its sprite (until then
+    // the pool shows unmasked); at most 300 masks are kept and 2 ms a frame spent.
+    const lampOcc = new Map();
+    let lampMasks = 0, lampMs = 0;
+    function hiddenAtIn(list, wx, wy, depth) {
+      for (const r of list) {
+        if (!inHull(r.hull, wx, wy)) continue;
+        const sl = r.slices.find(it => wx >= it.wx && wx < it.wx + it.sw);
+        if (sl && sl.depth > depth + 0.3) return true;
+      }
+      return false;
+    }
+    function maskedGlowIn(src, gx, gy, depth, list) {
+      const w = src.width, h = src.height;
+      let c = null, q = null;
+      for (const r of list) for (const it of r.slices) {
+        if (it.depth <= depth + 0.3 || it.wx >= gx + w || it.wx + it.sw <= gx || it.wy >= gy + h || it.wy + it.sh <= gy) continue;
+        if (!c) { c = CV.canvas(w, h); q = c.getContext("2d"); q.drawImage(src, 0, 0); q.globalCompositeOperation = "destination-out"; }
+        q.drawImage(r.att.c, it.sx, it.sy, it.sw, it.sh, it.wx - gx, it.wy - gy, it.sw, it.sh);
+      }
+      return c;
+    }
+    function lampState(k, lx, ly) {
+      const o0 = lampOcc.get(k);
+      if (o0) return o0;
+      if (lampMs >= 2) return null;
+      const a = performance.now();
+      const d = proj.depth(lx, ly), top = proj.toWorld(lx, ly, 39), p = proj.toWorld(lx, ly, 0);
+      const w = lampGlow.width, h = lampGlow.height, gx = p[0] - 48, gy = p[1] - 25;
+      const near = inRect(Math.min(gx, top[0]) - 2, Math.min(gy, top[1]) - 2, gx + w + 2, gy + h + 2).filter(r => r.big && r.slices.some(it => it.depth > d + 0.3));
+      if (near.some(r => !r.att)) { lampMs += performance.now() - a; return null; }
+      const hidden = hiddenAtIn(near, top[0] + 6, top[1], d);
+      const img = hidden || lampMasks >= 300 ? null : maskedGlowIn(lampGlow, gx, gy, d, near);
+      if (img) lampMasks++;
+      const o = { hidden, img };
+      lampOcc.set(k, o);
+      lampMs += performance.now() - a;
+      return o;
+    }
     function occlusionOf() {
       if (occlusion) return occlusion;
-      // a big town draws its lamp and porch pools without masks (view.md 3.3.7's lazy occlusion is cut, V1a)
+      // a big town works its lamps out lazily (lampState); porch pools draw without masks
       if (BIG) return (occlusion = { lamps: lampPts.map(() => false), lampImg: [], porch: new Map(), porchImg: new Map() });
       const lamps = [], lampImg = [];
       lampPts.forEach(([lx, ly]) => {
@@ -1238,7 +1278,7 @@
     scene.draw = function (now) {
       const t0 = performance.now();
       frameNo++; scene.stats.frames = frameNo;
-      if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; scene.stats.mipMiss = 0; scene.spriteCap = scene.spriteCapSet || (isPhone() ? 8e6 : 16e6); }
+      if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; scene.stats.mipMiss = 0; lampMs = 0; scene.spriteCap = scene.spriteCapSet || (isPhone() ? 8e6 : 16e6); }
       if (dirty || !statics.length) BIG ? budget.run(buildStatics) : buildStatics();
       if (!lampGlow) { lampGlow = makeGlow(54, 27, "#ffd890", 0.5); porchGlow = makeGlow(22, 12, "#ffd890", 0.6); }
       const v = scene.view(), S = v.S;
@@ -1617,7 +1657,9 @@
           if (occ.lamps[k]) return;
           const p = proj.toWorld(lx, ly);
           if (p[0] < v.x0 - 64 || p[0] > v.x1 + 64 || p[1] < v.y0 - 64 || p[1] > v.y1 + 64) return;
-          const img = occ.lampImg[k] || lampGlow;
+          const o = BIG ? lampState(k, lx, ly) : null;
+          if (o && o.hidden) return;
+          const img = (o ? o.img : occ.lampImg[k]) || lampGlow;
           blit(img, 0, 0, img.width, img.height, p[0] - 48, p[1] - 25, v);
         });
         for (const rec of buildings) {
@@ -1638,7 +1680,7 @@
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       // bulbs, neon and beacons sit on top at full strength
       const dot = (wx, wy, w, h, col) => { const x = Math.round(wx * S + v.ox), y = Math.round(wy * S + v.oy); g.fillStyle = col; g.fillRect(x - Math.round(w * S / 2), y, Math.max(1, Math.round(w * S)), Math.max(1, Math.round(h * S))); };
-      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k]) return; const p = proj.toWorld(lx, ly, 0); if (BIG && (p[0] < v.x0 - 16 || p[0] > v.x1 + 16 || p[1] < v.y0 || p[1] > v.y1 + 50)) return; dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
+      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k] || (BIG && lampOcc.has(k) && lampOcc.get(k).hidden)) return; const p = proj.toWorld(lx, ly, 0); if (BIG && (p[0] < v.x0 - 16 || p[0] > v.x1 + 16 || p[1] < v.y0 || p[1] > v.y1 + 50)) return; dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
       for (const rec of buildings) {
         if (offView(rec)) continue;
         const b = rec.b;
