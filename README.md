@@ -684,6 +684,7 @@ Seeds 1 to 3, the region with 1,000 townsfolk, on a 4-CPU machine at a load aver
   - The view the page opens on shows 43 to 63 townsfolk out of doors at 08:00, not the 150 to 210 the design aimed for.
   - Drawing speed, measured in a headless test browser drawing in software at a load average of 0.7: panning across the region at 1280 by 800 has a worst frame of 61 ms and a 95th percentile of 30 ms (targets 50 and 25); at 1440 by 900 on a high-density screen, with the resolution lowered as it goes, 99 and 50 ms; a still view of Millbrook's Downtown at zoom 1/2 has a median of 12.6 ms (target 12, met on some runs). Opening the region, panning on a phone and in the top-down view, a still view of Riverton Downtown, the lights at night and the change of season are within their targets.
   - Drawing a building's picture once takes at most 8.1 to 10.7 ms against a limit of 10 ms (missed on one of two runs).
+  - Millbrook alone ticks in 0.33 to 0.41 ms of CPU a game minute on average when its test runs by itself, and in 0.37 to 0.50 ms inside the full test runs on this machine, against a budget of 0.4 ms (missed on five of the last seven full runs).
 
 **Still not built from the design**
 
