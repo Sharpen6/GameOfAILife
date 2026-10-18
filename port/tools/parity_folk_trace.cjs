@@ -5,8 +5,10 @@
 //   node port/tools/parity_folk_trace.cjs SEED DAYS --js      print the JS trace only
 //   node port/tools/parity_folk_trace.cjs SEED DAYS --py      print the Python trace only
 //
-// The weather is pinned to the same rule in both (the named sim's rng drifts between the twins, and folk read the
-// weather for rained_out). Trace lines (integers and strings only; `named=` is reported but not compared, as the named sim is not folk's):
+// The named sim rolls the same dice in both (the Python side swaps random.Random for the JS port's SimDice at the
+// first weather roll, as tests/test_port.py's DiceSim does), so named characters, and what they do with townsfolk
+// (talks, contagion at work, invites), stay in lockstep too; the weather is also pinned to one rule (folk read it for
+// rained_out). Trace lines (integers and strings only, every field compared):
 //   H <tick> crowd=<n> cs=<crowd checksum> occ=<folk per place> named=<occ(), named added> boardings=<today>
 //     steps=<folk steps> money=<everyone's cents> luck=<luck log rows>   every hour
 //   B <tick> <i> <activity> <place> <stay end>        every stay begun (Folk._begin)
@@ -112,8 +114,22 @@ def _choose(self, sim, p, now, kind):
         c = p.choices[-1]
         out.append("C %d %d %s %s %d %s" % (now, p.i, kind, "|".join(c["options"]), c["choice"], c["by"]))
 F._begin, F._go, F.choose = _begin, _go, _choose
+from gameofailife.rng import Rng
+class MulberryDice:  # port/src/sim.js's SimDice (tests/test_port.py's MulberryDice): the named sim's dice in both
+    def __init__(self, seed):
+        self.r = Rng((seed * 0x2545F491 + 0x6A09E667) & 0xFFFFFFFF)
+    def random(self):
+        return self.r.random()
+    def uniform(self, a, b):
+        return a + (b - a) * self.r.random()
+    def randrange(self, a, b):
+        return a + int(self.r.random() * (b - a))
+    def choice(self, seq):
+        return seq[int(self.r.random() * len(seq))]
 roll = Simulation._roll_weather
 def _roll(self):
+    if not isinstance(self.rng, MulberryDice):
+        self.rng = MulberryDice(self.dice_seed)  # from the first weather roll on, as test_port's DiceSim
     roll(self)
     self.weather = "rain" if ((self.clock.tick // 60) * 7) % 5 < 2 else "clear"
 Simulation._roll_weather = _roll
@@ -151,11 +167,8 @@ function main() {
   const kinds = {};
   for (const l of py) kinds[l[0]] = (kinds[l[0]] || 0) + 1;
   const n = Math.max(py.length, js.length);
-  const folkOnly = l => (l === undefined ? l : l.replace(/ named=\d+/, ""));
-  let namedDiffer = 0;
   for (let k = 0; k < n; k++) {
-    if (py[k] !== js[k] && folkOnly(py[k]) === folkOnly(js[k])) namedDiffer += 1;
-    if (folkOnly(py[k]) !== folkOnly(js[k])) {
+    if (py[k] !== js[k]) {
       console.log(`seed ${seed} days ${days}: differ at line ${k + 1} of ${py.length} (py) / ${js.length} (js)`);
       for (let j = Math.max(0, k - 3); j < k; j++) console.log(`  same ${py[j]}`);
       console.log(`  py   ${py[k]}`);
@@ -164,7 +177,6 @@ function main() {
     }
   }
   console.log(`seed ${seed} days ${days}: ${py.length} lines equal (${JSON.stringify(kinds)}); last ${py[py.length - 1]}`);
-  if (namedDiffer) console.log(`  (named occupancy, not folk's, differs on ${namedDiffer} hourly lines)`);
 }
 
 main();
