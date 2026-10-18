@@ -29,6 +29,10 @@ DECAY_SCALE = {
 # heals HEAL a minute up to life.max_health. Person.settle applies both in closed form, so reading a townsperson's
 # needs (a page, the hourly stats) never changes what their health comes to.
 HUNGER_HEALTH, HEAL, WELL_ABOVE = 0.03, 0.004, 40.0
+# Each activity's (need, minute's decay) in NEEDS order, NEED_DECAY x DECAY_SCALE worked out once (the same floats).
+_RATES = {k: tuple((n, NEED_DECAY[n] * sc.get(n, 1.0)) for n in NEEDS) for k, sc in DECAY_SCALE.items()}
+_RATES_AWAKE = tuple((n, NEED_DECAY[n] * 1.0) for n in NEEDS)
+_life = None  # life, imported on first use
 
 
 def folk_id(i: int) -> str:
@@ -134,23 +138,24 @@ class Person:
         if self.age < 5:
             self._heal(dt)  # under-5s are held at 75 by folk.py: always well
             return
-        scale = DECAY_SCALE.get(self.activity if self.state == "busy" else "", {})
         needs = self._needs
         well = dt  # the minutes every need stays above WELL_ABOVE
         starve = 0.0  # the minutes hunger spends at 0
-        for n in NEEDS:
+        for n, rate in _RATES.get(self.activity if self.state == "busy" else "", _RATES_AWAKE):
             v0 = needs[n]
-            rate = NEED_DECAY[n] * scale.get(n, 1.0)
+            v = v0 - rate * dt
             if v0 <= WELL_ABOVE:
                 well = 0
-            elif rate > 0 and v0 - rate * dt <= WELL_ABOVE:
+            elif rate > 0 and v <= WELL_ABOVE:
                 left = (v0 - WELL_ABOVE) / rate
                 if left < well:
                     well = left
-            if n == "hunger" and rate > 0 and v0 - rate * dt < 0:
-                starve = dt - v0 / rate
-            v = v0 - rate * dt
-            needs[n] = 0.0 if v < 0.0 else 100.0 if v > 100.0 else v
+            if v < 0.0:
+                if n == "hunger" and rate > 0:
+                    starve = dt - v0 / rate
+                needs[n] = 0.0
+            else:
+                needs[n] = 100.0 if v > 100.0 else v
         if well > 0:
             self._heal(well)
         if starve > 0:
@@ -158,8 +163,11 @@ class Person:
             self.health = 0.0 if h < 0.0 else h
 
     def _heal(self, minutes: float) -> None:
-        from . import life  # lazy: L2's module reaches folk
-        top = life.max_health(self)
+        global _life
+        if _life is None:
+            from . import life as _life_module  # lazy: L2's module reaches folk
+            _life = _life_module
+        top = _life.max_health(self)
         if self.health < top:
             h = self.health + HEAL * minutes
             self.health = top if h > top else h
