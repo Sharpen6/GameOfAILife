@@ -225,6 +225,8 @@ class _Rail:
                 self.exits.setdefault(s, ln.exits[s])
         self.serving = {s: tuple(ln for ln in self.lines.values() if s in ln.stations) for s in self.order}
         self.hubs = tuple(s for s in self.order if len(self.serving[s]) > 1)  # where riders change lines
+        self.plans = {}  # (s, t) -> _plans(self, s, t)
+        self.pair_worst = {}  # (s, t) -> (the least worst wait + ride over the plans, or None,)
 
 
 def _rail(town) -> _Rail:
@@ -365,6 +367,13 @@ def _egress(r: _Rail, net, b) -> tuple:
 
 def _plans(r: _Rail, s: str, t: str) -> tuple:
     """Ways from station s to station t: ((line, track, s, t),) on one line, or two rides changing at a hub."""
+    got = r.plans.get((s, t))
+    if got is None:
+        got = r.plans[(s, t)] = _find_plans(r, s, t)
+    return got
+
+
+def _find_plans(r: _Rail, s: str, t: str) -> tuple:
     for ln in r.serving[s]:
         if t in ln.stations:
             return (((ln, ln.track_for(s, t), s, t),),)
@@ -448,10 +457,22 @@ def worst_minutes(town, net, a, b, car: bool = False) -> int | None:
         for em, _, t, _, _ in _egress(r, net, b):
             if s == t:
                 continue
-            for plan in _plans(r, s, t):
-                m = am + em + TRANSFER_MINUTES * (len(plan) - 1)
-                for ln, track, x, y in plan:
-                    m += ln.worst(track, x, y)
-                if best is None or m < best:
-                    best = m
+            w = _pair_worst(r, s, t)
+            if w is not None and (best is None or am + w + em < best):
+                best = am + w + em
     return _store(cache, key, best)
+
+
+def _pair_worst(r: _Rail, s: str, t: str) -> int | None:
+    """The least, over the plans from station s to t, of their worst waits and rides plus any transfer."""
+    got = r.pair_worst.get((s, t))
+    if got is None:
+        best = None
+        for plan in _plans(r, s, t):
+            m = TRANSFER_MINUTES * (len(plan) - 1)
+            for ln, track, x, y in plan:
+                m += ln.worst(track, x, y)
+            if best is None or m < best:
+                best = m
+        got = r.pair_worst[(s, t)] = (best,)
+    return got[0]
