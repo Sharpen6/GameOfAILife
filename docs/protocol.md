@@ -822,7 +822,8 @@ scores below `"Decline politely"`, whose answer goes into the host's memory
 sets it apart from the fork's other options (its tags less the four options'
 mean), not its own tags. In the event log, common outcomes read several ways,
 and a routine good night, meal, rest or family dinner is kept only in the
-decided fork's `happened` (a dinner out is its one `family_dinner` line).
+decided fork's `happened` (a dinner out is its one `family_dinner` line, of
+importance 0 like an accepted invite: the log, not the News).
 
 ### `message`
 
@@ -1475,9 +1476,9 @@ two decimals), `owns_car`, a `job` (title, place, hourly wage, start and end hou
 take-home pay at the end of each shift, the $400 pension on Friday 09:00 to 65+ without a paid job, and on Sunday
 23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Three
 Sundays in the red move a household to a cheaper rental or out of town (`left_town`, its `agents` the folk ids).
-Folk homes have their own damp, chills and emergencies (`damp_chill`, `emergency`, `emergency_settled` naming
-folk only). With `folk_isolated`, no townsperson has a tie to the 60, a job at Millbrook's places or a seat at
-Millbrook's school.
+Folk homes have their own damp, chills and emergencies; they are routine, so the residents remember them (a
+line in each one's memory) and no event is sent. With `folk_isolated`, no townsperson has a tie to the 60, a
+job at Millbrook's places or a seat at Millbrook's school.
 
 | Where | Field | Meaning |
 |-------|-------|---------|
@@ -1555,7 +1556,7 @@ with a named character, and then only for arguments and for warm, news, love or 
 | `moved_in`, `engaged`, `wedding` | 2 | Moving in together, an engagement, the wedding (a Saturday at 14:00 in a park). |
 | `breakup`, `divorce` | 2 | A couple splits (a married couple divorces, $1,500 each). |
 | `loan` | 1 (0 for a repayment) | A loan between family or friends, repaid once the borrower holds three times it. |
-| `invite`, `invite_accepted`, `invite_declined` | 0 / 1 / 0 | Invites, to the named and to townsfolk. |
+| `invite`, `invite_accepted`, `invite_declined` | 0 | Invites, to the named and to townsfolk: the log, not the News. |
 | `text` | 0 | A named character texts a townsperson. |
 
 News about townsfolk alone (an event naming a townsperson and no named character, importance 1 or more) is capped

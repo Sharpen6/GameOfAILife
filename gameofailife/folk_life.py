@@ -217,7 +217,6 @@ def nightly(sim) -> None:
         if home is None or home.household != hh.id:
             continue
         mem = members(folk, hh)
-        ids = [p.id for p in mem]
         live = home.emergency
         if live and _fix(sim, folk, hh, home):
             live = None
@@ -244,7 +243,7 @@ def nightly(sim) -> None:
                 if roll < prob:
                     p.health = max(0.0, p.health + housing.CHILL["health"])
                     p.adjust("fun", housing.CHILL["fun"])
-                    sim.event(f"{p.name} catches a chill in the damp house.", p, tag="damp_chill", place=home.place)
+                    _remember(sim, [p], f"{p.name} catches a chill in the damp house.")  # routine: no News
         if roll_emergency:
             p0 = housing.TIERS[home.tier].get("emergency_p", 0.0) + housing.EMERGENCY_STAGE_P.get(st, 0.0)
             if winter:
@@ -260,8 +259,7 @@ def nightly(sim) -> None:
                         (["roof"] if getattr(sim, "weather", "clear") == "rain" else [])
                 kind = rr.pick(kinds)
                 home.emergency = {"kind": kind, "since": now}
-                sim.event(housing.EMERGENCY_NEWS[kind].format(home=home.name), None, tag="emergency", agents=ids,
-                          place=home.place)
+                _remember(sim, mem, housing.EMERGENCY_NEWS[kind].format(home=home.name))  # routine: no News
 
 
 def richest(people: list):

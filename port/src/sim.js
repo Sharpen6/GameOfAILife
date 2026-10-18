@@ -1362,7 +1362,7 @@
             ignore: "ignores" }[extra.answer];
           this.event(`${agent.name} ${words} ${firstName(host.name)}'s invite.`, agent, null,
             { tag: extra.answer === "accept" ? "invite_accepted" : "invite_declined",
-              agents: [host.id], place: inv.place });
+              importance: 0, agents: [host.id], place: inv.place }); // routine: the log, not the News
           host.remember(this.clock.stamp(), `${firstName(agent.name)} ${words} my invite to `
             + `${this.town.places.get(inv.place).name}.`); // the host's page (FIXLISTS 14)
           this._deliver(host, { type: "invite_answer", invite_id: inv.id, from: agent.id, answer: extra.answer });
@@ -1433,7 +1433,7 @@
         const who = family.length ? G.forks.names(family.map(m => this.agents.get(m))) : "";
         this.event(family.length ? `${agent.name} takes ${who} out to dinner at ${place}.`
           : `${agent.name} goes out to dinner at ${place}.`, agent, null, { tag: "family_dinner", agents: family,
-          place: where });
+          place: where, importance: 0 }); // the week's family evening is routine: the log, not the News
       }
       if (hasOwn(extra, "together")) { // time at home together: the other joins in if free (FIXLISTS 5, 6)
         const other = this.agents.get(extra.together) ?? null;
