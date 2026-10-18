@@ -430,6 +430,8 @@ def populate(folk, sim, n: int) -> None:
     """Fill `folk.people` and `folk.households` with n townsfolk in the region's homes (folk.md 4)."""
     isolated = bool(getattr(folk, "isolated", False))
     sim.folk = folk  # people.person(sim, "f<i>") must find the people being made (make_folk assigns it after)
+    if getattr(folk, "sim", None) is None:
+        folk.sim = sim
     seed = sim.seed
     geo = Geo(sim)
     taken = named_names(sim)
@@ -509,7 +511,7 @@ def populate(folk, sim, n: int) -> None:
             p._nt = now
             wake = day0 + rr.int(360, 450)
             job = p.job
-            if job is not None and job.hourly_wage > 0 and 0 in job.workdays and p.commute is not None:
+            if job is not None and job.hourly_wage > 0 and sim.clock.weekday in job.workdays and p.commute is not None:
                 leave = day0 + job.start_hour * 60 - p.commute[1] - 15
                 if leave < wake:
                     wake = leave
@@ -1084,6 +1086,7 @@ class GenFolk:
         self.people = []
         self.households = []
         self.seekers = 0
+        self.sim = None
 
     def person(self, pid):
         if isinstance(pid, str) and len(pid) > 1 and pid[0] == "f" and pid[1:].isdigit():
@@ -1132,6 +1135,12 @@ class GenSim:
     def household_by_id(self, hid):
         hh = self.households.get(hid)
         return hh if hh is not None else self.folk.household(hid)
+
+    def event(self, text, agent=None, kind=None, *, tag="news", importance=None, agents=None, **_kw):
+        ev = {"text": text, "tag": tag, "agents": [getattr(a, "id", a) for a in (agents or ())],
+              "tick": self.clock.tick}
+        self.events.append(ev)
+        return ev
 
 
 def build_lots(town, homes: dict) -> dict:
