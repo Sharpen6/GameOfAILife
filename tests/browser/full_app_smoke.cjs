@@ -88,7 +88,8 @@ async function until(cond, ms) {
 // --- the real server ---------------------------------------------------------------------------------------
 
 function startServer() {
-  const args = ["-u", "-m", "gameofailife", "--seed", "1", "--host", "127.0.0.1", "--port", "0", "--speed", "4"];
+  const args = ["-u", "-m", "gameofailife", "--seed", "1", "--host", "127.0.0.1", "--port", "0", "--speed", "4",
+    "--world", "millbrook", "--folk", "0"];
   const proc = spawn(process.env.PYTHON || "python3", args, { cwd: REPO, stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve, reject) => {
     let out = "";

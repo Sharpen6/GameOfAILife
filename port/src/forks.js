@@ -97,6 +97,7 @@
       this.controller = null; // the controller asked, if one was
       this.model = null; // the model that controller declared in its hello
       this.profile_choice = null; // the option the profile scores highest (first on ties), set when asked
+      this.about = []; // lines on who or what the fork is about (life.md 8.2)
     }
   }
 
@@ -240,7 +241,7 @@
     const pool = [];
     for (const [oid, r] of agent.relationships) {
       if (!(exclude_household && hh.includes(oid)) && r.affinity > 10
-        && sim.agents.get(oid).alive && (!adults_only || sim.agents.get(oid).is_adult)) pool.push([r.affinity, oid]);
+        && sim.agents.has(oid) && sim.agents.get(oid).alive && (!adults_only || sim.agents.get(oid).is_adult)) pool.push([r.affinity, oid]);
     }
     if (!pool.length) return null;
     return sim.agents.get(maxBy(pool)[1]);
@@ -251,7 +252,8 @@
     const hh = sim.household(agent).member_ids;
     const pool = [];
     for (const [oid, r] of agent.relationships) {
-      if (!hh.includes(oid) && r.affinity > 10 && sim.agents.get(oid).alive && !sim.agents.get(oid).is_adult) {
+      if (!hh.includes(oid) && r.affinity > 10 && sim.agents.has(oid) && sim.agents.get(oid).alive
+        && !sim.agents.get(oid).is_adult) {
         pool.push([r.affinity, oid]);
       }
     }
@@ -283,7 +285,7 @@
   function _closest_family(sim, agent) {
     const pool = [];
     for (const [oid, r] of agent.relationships) {
-      if ((r.kind === "family" || r.kind === "partner") && sim.agents.get(oid).alive) pool.push([r.affinity, oid]);
+      if ((r.kind === "family" || r.kind === "partner") && sim.agents.has(oid) && sim.agents.get(oid).alive) pool.push([r.affinity, oid]);
     }
     return pool.length ? sim.agents.get(maxBy(pool)[1]) : null;
   }
@@ -297,7 +299,8 @@
     if (hour >= 22 || hour < 6 || _curfew(sim, agent)) return null; // sleep on it; the invite waits or expires
     if (sim._must_leave_for_work(agent, invite.place)) return null; // off to work first; the invite waits or expires
     if (!_open_on_arrival(sim, agent, invite.place)) return null; // the place is shut by then; the invite waits or expires
-    const host = sim.agents.get(invite.from);
+    const host = sim.person(invite.from);
+    if (host === null || host === undefined) return null;
     const place = sim.town.places.get(invite.place);
     const rel = relKey(host.id);
     const first = firstName(host.name);
@@ -340,6 +343,7 @@
   function work_fork(sim, agent) {
     const job = agent.job;
     if (!job || agent.worked_today === sim.clock.day) return null;
+    if (G.life.in_hospital(agent)) return null; // on the ward: no shift today
     const minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day;
     if (!job.workdays.includes(sim.clock.weekday) || !(-WORK_LATE <= minutes_to_start && minutes_to_start <= 180)) return null;
     const walk_minutes = sim.walk_minutes(agent, job.place_id);
@@ -684,17 +688,21 @@
 
   // The fork builders in priority order, by name: "housing_forks." names live in housing_forks.js, so build_fork
   // looks them up when it runs rather than at load.
-  const BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "housing_forks.repair_fork", "payday_fork",
+  const BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "people.pending_fork",
+    "housing_forks.repair_fork", "payday_fork",
     "groceries_fork", "housing_forks.housing_trouble_fork", "housing_forks.house_hunt_fork",
     "housing_forks.upkeep_fork", "lonely_fork", "free_time_fork"];
 
   // Minutes before the same kind of fork can come up again for a character.
   const COOLDOWN = { groceries: 360, lonely: 150, free_time: 90, hunger: 45, sleep: 20 };
 
-  // BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too).
+  // BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too): a bare
+  // name is this module's, "<module>.<fn>" that module's (G.<module>, read now).
   function builders() {
-    return BUILDERS.map(name => (name.startsWith("housing_forks.")
-      ? G.housing_forks[name.slice("housing_forks.".length)] : G.forks[name]));
+    return BUILDERS.map(name => {
+      const dot = name.lastIndexOf(".");
+      return dot < 0 ? G.forks[name] : G[name.slice(0, dot)][name.slice(dot + 1)];
+    });
   }
 
   function build_fork(sim, agent) {
