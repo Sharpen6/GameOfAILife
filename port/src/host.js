@@ -51,6 +51,7 @@
     constructor(sim, speed = 1, now = defaultNow) {
       this.sim = sim;
       this.speed = speed;
+      sim.speed = speed; // fork messages carry minutes_per_second (protocol, Fork)
       this.now = now;
       this.god = null;
       this.observers = new Set();
@@ -275,14 +276,17 @@
       if (t === "set_speed") {
         const speed = pyInt(getd(msg, "speed", 1));
         this.speed = SPEEDS.includes(speed) ? speed : 1;
+        sim.speed = this.speed;
         return { type: "speed", speed: this.speed };
       }
       if (t === "pause") {
         this.speed = 0;
+        sim.speed = 0; // paused: fork messages carry no minutes_per_second
         return { type: "speed", speed: 0 };
       }
       if (t === "resume") {
         this.speed = this.speed || 1;
+        sim.speed = this.speed;
         return { type: "speed", speed: this.speed };
       }
       if (t === "get_agent") {

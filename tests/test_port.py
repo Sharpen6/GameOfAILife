@@ -335,6 +335,7 @@ class MessageSchemas(unittest.TestCase):
         self.assertEqual(js["luck"], {"type": "luck_set", "ok": True, "agent_id": "dana", "luck": 80.0, "req_id": "r1"})
         self.assertEqual([js["speed"], js["pause"], js["resume"]],
                          [{"type": "speed", "speed": 4}, {"type": "speed", "speed": 0}, {"type": "speed", "speed": 1}])
+        self.assertEqual(js["sim_speeds"], [16, 4, 0, 1], "the host tells the sim its speed (fork minutes_per_second)")
         self.assertEqual(js["profile"]["agent"]["profile"]["traits"]["thrift"], 0.9)
 
     def test_god_replies_to_odd_values(self):

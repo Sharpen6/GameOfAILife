@@ -224,6 +224,26 @@ class TestGod(ServerCase):
         await god.request({"type": "set_speed", "speed": 16}, "speed")
         await wait_until(lambda: self.sim.clock.tick > tick)
 
+    async def test_fork_messages_follow_the_speed(self):
+        # The server tells the sim its speed on start, set_speed, pause and resume, so a fork message says how many
+        # game minutes go by per real second (protocol, Fork: minutes_per_second), and says nothing when paused.
+        self.assertEqual(self.sim.speed, 0)
+        c, _ = await self.controller("bot", ["tom"])
+        fork = self.ask_hunger_fork("tom")
+        msg = await c.expect(lambda m: m.get("type") == "fork" and m.get("fork_id") == fork.id)
+        self.assertNotIn("minutes_per_second", msg)
+        god, _ = await self.god()
+        await god.request({"type": "set_speed", "speed": 8}, "speed")
+        self.assertEqual(self.sim.speed, 8)
+        self.assertEqual(self.sim.fork_message(self.sim.agents["tom"], fork)["minutes_per_second"], 19.2)
+        await god.request({"type": "pause"}, "speed")
+        self.assertEqual(self.sim.speed, 0)
+        self.assertNotIn("minutes_per_second", self.sim.fork_message(self.sim.agents["tom"], fork))
+        await god.request({"type": "resume"}, "speed")
+        self.assertEqual(self.sim.speed, 1)
+        self.assertEqual(self.sim.fork_message(self.sim.agents["tom"], fork)["minutes_per_second"], 2.4)
+        self.assertEqual(GameServer(Simulation(seed=1), speed=4).sim.speed, 4)
+
     async def test_state_frames_arrive_when_running(self):
         god, _ = await self.god()
         await god.request({"type": "set_speed", "speed": 16}, "speed")

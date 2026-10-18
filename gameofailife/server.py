@@ -245,6 +245,7 @@ class GameServer:
     def __init__(self, sim: Simulation, speed: int = 1):
         self.sim = sim
         self.speed = speed
+        sim.speed = speed  # type: ignore[attr-defined]  # fork messages carry minutes_per_second (protocol, Fork)
         self.god: WebSocket | None = None
         self.observers: set[WebSocket] = set()
         self.controllers: dict[str, WebSocket] = {}
@@ -669,12 +670,15 @@ class GameServer:
         if t == "set_speed":
             speed = int(msg.get("speed", 1))
             self.speed = speed if speed in SPEEDS else 1
+            self.sim.speed = self.speed  # type: ignore[attr-defined]
             return {"type": "speed", "speed": self.speed}
         if t == "pause":
             self.speed = 0
+            self.sim.speed = 0  # type: ignore[attr-defined]  # paused: fork messages carry no minutes_per_second
             return {"type": "speed", "speed": 0}
         if t == "resume":
             self.speed = self.speed or 1
+            self.sim.speed = self.speed  # type: ignore[attr-defined]
             return {"type": "speed", "speed": self.speed}
         if t == "get_agent":
             data = self.sim.agent_json(str(msg.get("agent_id")))
