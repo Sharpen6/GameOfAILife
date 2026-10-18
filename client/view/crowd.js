@@ -210,6 +210,11 @@
         const j = bs(i);
         return j < 0 ? null : [fx[j], fy[j]];
       },
+      // calls fn(x, y, i, kind) for everyone outdoors now (tile units; the minimap)
+      each(fn, now) {
+        positions(now == null ? viewNow() : now);
+        for (let j = 0; j < list.length; j++) { const i = list[j]; if (seen[i] === 1) fn(fx[j], fy[j], i, kind[i]); }
+      },
       has: id => { const i = typeof id === "string" ? +id.slice(1) : id; return i >= 0 && i < n && seen[i] === 1; },
       kindOf: i => kind[i],
       stats: () => ({ crowd: K.count(), crowdDrawn: drawn, crowdInView: inView, crowdSprites: sprites }),

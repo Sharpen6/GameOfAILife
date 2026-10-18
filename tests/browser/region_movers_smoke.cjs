@@ -19,6 +19,9 @@
 // 12. navigation: focus({district}) lands within 2 tiles of its centre; focus({station}) on the station;
 //     districts() and stations() list every district and station; a folk pick returns {kind: "agent",
 //     id: "f...", folk: true}; a train pick returns {kind: "train", id, line, riders}
+//     minimap: 240 x 120 on the region, the by-kind base in <= 10 ms (gated only at load <= 8), trains as dots in
+//     their line colour, folk as 1 px dots, hover names the district, a click recentres, a double-click flies
+//     there at zoom 0.5
 // 13. no Math.random in client/view/*.js
 // Timings (frame gaps) are reported with the load, never gated here (PLAN 6). Set VIEW_SHOTS=<folder> to save
 // screenshots (default view at 08:00, a station with a train, far view).
@@ -456,6 +459,78 @@ async function runNavigation(browser) {
   await ctx.close();
 }
 
+// --- 12b. minimap ----------------------------------------------------------------------------------------------
+async function runMinimap(browser) {
+  console.log("minimap");
+  const { ctx, page, log } = await open(browser, "zoom=0.5&x=85&y=48&minute=480&speed=4");
+  await page.waitForTimeout(600);
+  if (SHOTS) { fs.mkdirSync(SHOTS, { recursive: true }); await page.locator(".cv-minimap").screenshot({ path: path.join(SHOTS, "minimap.png") }); }
+  const m = await page.evaluate(async () => {
+    const mini = __view.minimap(), c = mini.canvas, r = c.getBoundingClientRect(), out = { w: r.width, h: r.height };
+    const ms = [];
+    for (let k = 0; k < 3; k++) { mini.rebuild(); mini.draw(performance.now(), true); ms.push(mini.stats().buildMs); }
+    out.buildMs = +Math.min(...ms).toFixed(2);
+    const g = c.getContext("2d"), px = () => g.getImageData(0, 0, c.width, c.height).data;
+    __drive(false);
+    await new Promise(res => setTimeout(res, 300));
+    mini.draw(performance.now(), true);
+    const withFolk = px();
+    // trains: the head car's pixel is the line's colour
+    const LC = CityView.LINE_COLORS, hex = v => "#" + [v[0], v[1], v[2]].map(n => n.toString(16).padStart(2, "0")).join("");
+    const tr = __view.trains(), proj = __view.scene().proj;
+    let trains = 0, onColour = 0;
+    for (const row of tr.rows()) {
+      const cs = tr.carsOf(row.id); if (!cs || !cs.length) continue;
+      trains++;
+      const w = proj.toWorld(cs[0].x, cs[0].y), p = mini.toMini(w[0], w[1]);
+      const d = g.getImageData(Math.round(p[0]), Math.round(p[1]), 1, 1).data;
+      if (hex(d) === LC[row.line[0]].toLowerCase()) onColour++;
+    }
+    out.trains = trains; out.onColour = onColour;
+    // folk: the dots go when the crowd does
+    const st = __frameAt(__tick() + 1); st.crowd = []; st.occ = undefined;
+    __push(st);
+    await new Promise(res => setTimeout(res, 700));
+    mini.draw(performance.now(), true);
+    const noFolk = px();
+    let diff = 0; for (let i = 0; i < withFolk.length; i += 4) if (withFolk[i] !== noFolk[i] || withFolk[i + 1] !== noFolk[i + 1]) diff++;
+    out.folkPixels = diff;
+    // districts under their centres
+    const ds = __view.districts(), town = __view.scene().town;
+    out.districts = ds.length; out.named = 0; out.spots = [];
+    for (const d of ds) {
+      const w = proj.toWorld(d.center[0], d.center[1]), p = mini.toMini(w[0], w[1]), at = mini.districtAt(p[0], p[1]);
+      if (at && at.id === d.id) out.named++;
+      out.spots.push({ id: d.id, name: (town.districts.find(q => q.id === d.id) || {}).name, x: r.left + p[0], y: r.top + p[1], cx: d.center[0], cy: d.center[1] });
+    }
+    return out;
+  });
+  check(m.w === 240 && m.h === 120, "minimap: 240 x 120 CSS px on the region", [m.w, m.h]);
+  const L = os.loadavg()[0];
+  if (L <= 8) check(m.buildMs <= 10, "minimap: the by-kind base builds in 10 ms or less", `${m.buildMs} ms (load ${L.toFixed(1)})`);
+  note(`minimap base build ${m.buildMs} ms (best of 3; load ${L.toFixed(1)}${L > 8 ? ", report only" : ""})`);
+  check(m.trains >= 8 && m.onColour >= m.trains - 2, "minimap: trains are dots in their line's colour", { trains: m.trains, onColour: m.onColour });
+  check(m.folkPixels >= 150, "minimap: townsfolk are 1 px dots (they go with the crowd)", m.folkPixels);
+  check(m.named === m.districts && m.districts >= 6, "minimap: districtAt names each district at its centre", { named: m.named, of: m.districts });
+  // hover names the district; a click recentres; a double-click flies there at 0.5
+  const s = m.spots[1] || m.spots[0];
+  await page.mouse.move(s.x, s.y);
+  await page.waitForTimeout(150);
+  const title = await page.evaluate(() => __view.minimap().canvas.title);
+  check(title === s.name, "minimap: hover names the district", { title, want: s.name });
+  await page.mouse.click(s.x, s.y);
+  await page.waitForTimeout(250);
+  const c1 = await page.evaluate(() => __view.camera());
+  check(Math.hypot(c1.x - s.cx, c1.y - s.cy) <= 2.5, "minimap: a click recentres the camera there", { cam: [c1.x, c1.y], want: [s.cx, s.cy] });
+  const t = m.spots[3] || m.spots[0];
+  await page.mouse.dblclick(t.x, t.y);
+  await page.waitForTimeout(1100);
+  const c2 = await page.evaluate(() => __view.camera());
+  check(Math.abs(c2.zoom - 0.5) < 0.02 && Math.hypot(c2.x - t.cx, c2.y - t.cy) <= 2.5, "minimap: a double-click flies there at zoom 0.5", { cam: c2, want: [t.cx, t.cy] });
+  noErrors(log, "minimap");
+  await ctx.close();
+}
+
 // --- 13. no Math.random -----------------------------------------------------------------------------------------
 function runNoRandom() {
   console.log("no Math.random");
@@ -476,7 +551,7 @@ async function main() {
   console.log(`load ${L.toFixed(2)}`);
   try {
     const only = (process.env.ONLY || "").split(",").filter(Boolean);
-    for (const [name, fn] of [["crowd", runCrowd], ["trains", runTrains], ["bridges", runBridges], ["pings", runPings], ["navigation", runNavigation]]) {
+    for (const [name, fn] of [["crowd", runCrowd], ["trains", runTrains], ["bridges", runBridges], ["pings", runPings], ["navigation", runNavigation], ["minimap", runMinimap]]) {
       if (only.length && !only.includes(name)) continue;
       try { await fn(browser); } catch (e) { check(false, `${name}: ran to the end`, String((e && e.stack) || e).split("\n").slice(0, 3).join(" | ")); }
     }

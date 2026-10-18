@@ -21,7 +21,8 @@
 //   districts(), stations(), lod()     [{id, name, center}], [{id, name, line, x, y}], "near" | "mid" | "far"
 //   setLayers({transit, labels, pings, runs})  kept in localStorage["goal.view"]; layers() reads them
 //   debug()                            {lod, level, chunks, cacheMP, spriteMP, items, runs, splitRuns,
-//                                      statics_builds, crowd, crowdDrawn, trainCars, pings, drawMs, buildMs, queue}
+//                                      statics_builds, crowd, crowdDrawn, trainCars, pings, drawMs, buildMs, queue,
+//                                      minimapMs}; minimap() the minimap (districtAt, toMini, stats)
 // Hits add {kind: "agent", id: "f417", folk: true} and {kind: "train", id, line, riders}.
 // A place in focus, ping, highlight or an overlay may also be a home id (resolved through town.homes). The
 // view pings only when told to, and it never sends messages. Classic script on window.CityView.
@@ -624,8 +625,9 @@
         const c = crowd ? crowd.stats() : { crowd: 0, crowdDrawn: 0 }, tr = trains ? trains.stats() : { trainCars: 0 }, pg = pings ? pings.stats() : { pings: 0 };
         return Object.assign({ lod: lodOf(), level: null, chunks: s.chunks || 0, cacheMP: s.cacheMP || 0, spriteMP: 0, items: s.items || 0, runs: 0, splitRuns: 0,
           statics_builds: 0, drawMs: s.draw || 0, buildMs: 0, queue: 0 }, d, { lod: d.lod || lodOf(), crowd: c.crowd, crowdDrawn: c.crowdDrawn, crowdInView: c.crowdInView, crowdSprites: c.crowdSprites,
-          trainCars: tr.trainCars, trains: tr.trains, pings: pg.pings });
+          trainCars: tr.trainCars, trains: tr.trains, pings: pg.pings, minimapMs: mini && mini.stats ? +mini.stats().buildMs.toFixed(2) : null });
       },
+      minimap() { return mini; },
       crowd() { return crowd; },
       trains() { return trains; },
       pings() { return pings; },
