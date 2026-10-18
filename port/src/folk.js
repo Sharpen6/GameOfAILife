@@ -151,6 +151,7 @@
       this._bed = new Map();
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
+      this._shifts = new Map(); // i -> [job, minutes its day starts and ends late: folk_gen.shift_offset]
       this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
       this.sent = new Set(); // people on a send_to errand (an invite, a date): not free until its stay ends
       this._locator = (p, tick) => this._locate(p, tick);
@@ -409,8 +410,25 @@
       }
       const [minutes, mode] = this._commute_of(p);
       if (mode === "train") spare = SHIFT_MARGIN; // train commuters time it to the train, so they ride together
-      return p.job.start_hour * 60 - minutes - spare;
+      return this._start_minute(p) - minutes - spare;
     }
+
+    // Minutes p's shift or school day starts and ends after its job's hours (folk_gen.shift_offset: their own on a
+    // region job row, 08:30 at a region school but Riverton High), kept while the job is the same.
+    _shift(p) {
+      const job = p.job;
+      const got = this._shifts.get(p.i);
+      if (got !== undefined && got[0] === job) return got[1];
+      const off = G.folk_gen.shift_offset(this.sim, p);
+      this._shifts.set(p.i, [job, off]);
+      return off;
+    }
+
+    // The minute of the day p's shift or school day starts.
+    _start_minute(p) { return p.job.start_hour * 60 + this._shift(p); }
+
+    // The minute of the day p's shift or school day ends.
+    _end_minute(p) { return p.job.end_hour * 60 + this._shift(p); }
 
     _bed_minute(p) {
       let bed = this._bed.get(p.i);
@@ -506,7 +524,7 @@
         this._sick_meal(p, now); // a rest off sick ends at a meal at home
         return;
       }
-      if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < job.end_hour * 60 - 60) {
+      if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < this._end_minute(p) - 60) {
         const [commute, mode] = this._commute_of(p);
         const leave = this._set_off(p);
         const early = m < leave;
@@ -527,7 +545,7 @@
           }
           const work = job.title === "student" || p.age < 18 ? "school" : "work";
           if (work === "school" && mode === "car") this._school_run(p, now, job.place_id);
-          this._go(sim, p, now, job.place_id, work, day * DAY + job.end_hour * 60, 30, mode);
+          this._go(sim, p, now, job.place_id, work, day * DAY + this._end_minute(p), 30, mode);
           return;
         }
       }
@@ -715,7 +733,7 @@
       this._enter(p, t.dest);
       const job = p.job;
       if ((t.then === "work" || t.then === "school") && job !== null) {
-        const late = now - (Math.floor(now / DAY) * DAY + job.start_hour * 60);
+        const late = now - (Math.floor(now / DAY) * DAY + this._start_minute(p));
         if (late > LATE_GRACE) {
           this.counters.late += 1;
           p.reputation = Math.max(0.0, p.reputation - 1);
@@ -1439,7 +1457,7 @@
       const [day, m] = divmod(now, DAY);
       if (job.workdays.includes(day % 7) && p.worked_day !== day) {
         const leave = f._set_off(p);
-        if (leave - 60 <= m && m < job.end_hour * 60) return false;
+        if (leave - 60 <= m && m < f._end_minute(p)) return false;
       }
     }
     return true;

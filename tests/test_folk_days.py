@@ -311,6 +311,18 @@ class FolkDaysTest(unittest.TestCase):
                 self.assertTrue(0.12 <= evening / n <= 0.35, (seed, d, evening, n))
             self.assertLessEqual(probe.peak, 400, seed)
 
+    def test_the_rush_is_spread_over_the_hour(self):
+        """Starts are staggered (folk_gen.shift_offset), so the street does not empty at 08:00 between those who start
+        at 08:00 and those who start at 09:00: on weekdays at least half the morning peak is outdoors at 08:00."""
+        if not integrated():
+            self.skipTest("needs folk_gen's staggered starts")
+        for seed, probe in self.probes.items():
+            days = sorted({t // DAY for t in probe.outdoors if (t // DAY) % 7 < 5 and t % DAY == 480})
+            self.assertTrue(days, seed)
+            for d in days:
+                peak = max(probe.outdoors[t] for t in range(d * DAY + 420, d * DAY + 541) if t in probe.outdoors)
+                self.assertGreaterEqual(probe.outdoors[d * DAY + 480], 0.5 * peak, (seed, d, peak))
+
     def test_home_at_night(self):
         for seed, probe in self.probes.items():
             for at_home, total in probe.home_at_3:

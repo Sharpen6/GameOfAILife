@@ -179,6 +179,7 @@ class Folk:
         self._bed: dict[int, int] = {}
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
+        self._shifts: dict[int, tuple] = {}  # i -> (job, minutes its day starts and ends late: folk_gen.shift_offset)
         self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
         self.sent: dict[int, None] = {}  # people on a send_to errand (an invite, a date): not free until its stay ends
         self._bind()
@@ -415,7 +416,27 @@ class Folk:
         minutes, mode = self._commute_of(p)
         if mode == "train":
             spare = SHIFT_MARGIN  # train commuters time it to the train, so they ride together
-        return p.job.start_hour * 60 - minutes - spare
+        return self._start_minute(p) - minutes - spare
+
+    def _shift(self, p) -> int:
+        """Minutes p's shift or school day starts and ends after its job's hours (folk_gen.shift_offset: their own
+        on a region job row, 08:30 at a region school but Riverton High), kept while the job is the same."""
+        job = p.job
+        got = self._shifts.get(p.i)
+        if got is not None and got[0] is job:
+            return got[1]
+        from . import folk_gen
+        off = folk_gen.shift_offset(self.sim, p)
+        self._shifts[p.i] = (job, off)
+        return off
+
+    def _start_minute(self, p) -> int:
+        """The minute of the day p's shift or school day starts."""
+        return p.job.start_hour * 60 + self._shift(p)
+
+    def _end_minute(self, p) -> int:
+        """The minute of the day p's shift or school day ends."""
+        return p.job.end_hour * 60 + self._shift(p)
 
     def _bed_minute(self, p) -> int:
         bed = self._bed.get(p.i)
@@ -510,7 +531,7 @@ class Folk:
         if act == "sick_home" and p.state == "busy" and not night:
             self._sick_meal(p, now)  # a rest off sick ends at a meal at home
             return
-        if job is not None and day % 7 in job.workdays and p.worked_day != day and m < job.end_hour * 60 - 60:
+        if job is not None and day % 7 in job.workdays and p.worked_day != day and m < self._end_minute(p) - 60:
             commute, mode = self._commute_of(p)
             leave = self._set_off(p)
             early = m < leave
@@ -529,7 +550,7 @@ class Folk:
                 work = "school" if job.title == "student" or p.age < 18 else "work"
                 if work == "school" and mode == "car":
                     self._school_run(p, now, job.place_id)
-                self._go(sim, p, now, job.place_id, work, until=day * DAY + job.end_hour * 60, prefer=mode)
+                self._go(sim, p, now, job.place_id, work, until=day * DAY + self._end_minute(p), prefer=mode)
                 return
         if night:
             self._go_home(sim, p, now, "sleep", self._wake_tick(p, now))
@@ -705,7 +726,7 @@ class Folk:
         self._enter(p, t.dest)
         job = p.job
         if t.then in ("work", "school") and job is not None:
-            late = now - (now // DAY * DAY + job.start_hour * 60)
+            late = now - (now // DAY * DAY + self._start_minute(p))
             if late > LATE_GRACE:
                 self.counters["late"] += 1
                 p.reputation = max(0.0, p.reputation - 1)
@@ -1393,7 +1414,7 @@ def is_free(sim, p) -> bool:
         day, m = divmod(now, DAY)
         if day % 7 in job.workdays and p.worked_day != day:
             leave = f._set_off(p)
-            if leave - 60 <= m < job.end_hour * 60:
+            if leave - 60 <= m < f._end_minute(p):
                 return False
     return True
 

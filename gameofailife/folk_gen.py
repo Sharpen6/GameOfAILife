@@ -7,7 +7,8 @@ on the career board (`career.board(sim).add(job, holder | None)`); the worker's 
 
 Streams on `sim.seed` (dice keys): `(NS_GEN, "deck")` the household deck; `(NS_GEN, "hh", j)` household j's ages,
 names, traits, needs, health, means, then cars, seeking, money and wake-up, in that order; `(NS_GEN, "match")` the
-job matching jitter and then the ties; `(NS_GEN, "new", k)` newcomer k; `(NS_GEN, "baby", k)` baby names. Folk
+job matching jitter and then the ties; `(NS_GEN, "new", k)` newcomer k; `(NS_GEN, "baby", k)` baby names; the key
+`(NS_GEN, "shift", i)` townsperson i's own start against a region job row's hours (`shift_offset`). Folk
 generation never draws `sim.rng`. `life.init` runs after it (no birthdays here).
 
 Commutes are door-to-door worst cases: walk and drive minutes from `roads.net(town)` (plus `region.car_extra` for
@@ -48,6 +49,9 @@ SCHOOL_WALK = 25
 TEEN_AGE, TEEN_TRAIN_CAP, HIGH_SCHOOL = 11, 45, "high_school"
 SCHOOL_SEATS = 300
 MILLBROOK_SCHOOL = "school"
+# --- staggered starts: not everyone on the street on the hour ---------------------------------------------------
+SHIFT_OFFSETS = (-30, -15, 0, 15, 30)  # minutes: a region worker's own start (and end) against the row's hours
+SCHOOL_LATE = 30  # minutes: the region's schools start at 08:30, Riverton High (HIGH_SCHOOL) and Millbrook's at 08:00
 # --- seekers and money (folk.md 4.6, 4.9) -----------------------------------------------------------------------
 STUDY_P, IDLE_P = 0.3, 0.07
 PENSION = 400
@@ -70,6 +74,21 @@ def stream(seed: int, *parts) -> Rng:
     except ImportError:  # before L1's dice.py: life.md 4.1's key, verbatim
         return Rng(_key(seed, *parts))
     return dice.stream(seed, *parts)
+
+
+def shift_offset(sim, p) -> int:
+    """Minutes p's working or school day starts and ends after its job's hours. A townsperson on a region job row
+    keeps their own of SHIFT_OFFSETS (the key `(NS_GEN, "shift", i)` on `sim.seed`); a pupil at a region school
+    but HIGH_SCHOOL starts SCHOOL_LATE later; Millbrook's rows and school (where the 60 work and learn) and no job:
+    0."""
+    job = p.job
+    if job is None or job.place_id in (sim.town.millbrook_ids or ()):
+        return 0
+    if job.title == "student":
+        return 0 if job.place_id == HIGH_SCHOOL else SCHOOL_LATE
+    if job.hourly_wage <= 0:
+        return 0
+    return SHIFT_OFFSETS[_key(sim.seed, NS_GEN, "shift", p.i) % len(SHIFT_OFFSETS)]
 
 
 _MASK = 0xFFFFFFFF
@@ -512,7 +531,7 @@ def populate(folk, sim, n: int) -> None:
             wake = day0 + rr.int(360, 450)
             job = p.job
             if job is not None and job.hourly_wage > 0 and sim.clock.weekday in job.workdays and p.commute is not None:
-                leave = day0 + job.start_hour * 60 - p.commute[1] - 15
+                leave = day0 + job.start_hour * 60 + shift_offset(sim, p) - p.commute[1] - 15
                 if leave < wake:
                     wake = leave
             p.next_tick = wake if wake > now else now + 1
@@ -1197,7 +1216,8 @@ def dump(sim) -> dict:
             "health": r2(p.health), "money": r2(p.money), "savings": r2(p.savings), "car": p.owns_car,
             "job": None if j is None else [j.title, j.place_id, j.hourly_wage, j.start_hour, j.end_hour,
                                            list(j.workdays), getattr(j, "slot", -1)],
-            "commute": None if p.commute is None else list(p.commute), "next": p.next_tick, "rel": rels})
+            "shift": shift_offset(sim, p), "commute": None if p.commute is None else list(p.commute),
+            "next": p.next_tick, "rel": rels})
     hhs = []
     for hh in sim.folk.households:
         hhs.append({"id": hh.id, "kind": hh.kind, "home": hh.home_id, "rent": hh.weekly_rent,

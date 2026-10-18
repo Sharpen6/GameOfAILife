@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from gameofailife import folk_gen, housing
@@ -136,6 +137,30 @@ class GenerationTest(unittest.TestCase):
                 if p.commute[2] == "car":
                     self.assertTrue(p.owns_car, p.id)
             self.assertLessEqual(median([p.commute[1] for p in workers]), 25, seed)
+
+    def test_staggered_starts(self):
+        """Not every job and school starts on the hour: a region job row's worker keeps their own start of
+        SHIFT_OFFSETS (each used by at least 10% of them), the region's schools but Riverton High start
+        SCHOOL_LATE later, and Millbrook's rows and school, where the named 60 work and learn, keep their hours."""
+        for seed in SEEDS:
+            sim = stub(seed)
+            mb = sim.town.millbrook_ids
+            region = Counter()
+            for p in sim.folk.people:
+                job = p.job
+                if job is None:
+                    continue
+                off = folk_gen.shift_offset(sim, p)
+                if job.place_id in mb:
+                    self.assertEqual(off, 0, p.id)
+                elif job.title == "student":
+                    want = 0 if job.place_id == folk_gen.HIGH_SCHOOL else folk_gen.SCHOOL_LATE
+                    self.assertEqual(off, want, p.id)
+                elif job.hourly_wage > 0:
+                    region[off] += 1
+            self.assertEqual(set(region), set(folk_gen.SHIFT_OFFSETS), seed)
+            for off in folk_gen.SHIFT_OFFSETS:
+                self.assertGreaterEqual(region[off], 0.1 * sum(region.values()), (seed, region))
 
     def test_board(self):
         for seed in SEEDS:
