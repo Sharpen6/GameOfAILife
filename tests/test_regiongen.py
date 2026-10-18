@@ -133,6 +133,10 @@ class Generator(unittest.TestCase):
         self.assertEqual(hashlib.sha1(text.encode()).hexdigest(), regiongen.HOUR0_SHA1)
         self.assertEqual(Path(region.DATA).read_text(encoding="utf-8"), regiongen.dumps(region.load_data()))
 
+    def test_prices_applied_at_load_equal_the_generators(self):
+        m = region.build_region(1)
+        self.assertEqual([list(spec) for spec in m.home_specs], regiongen.priced(regiongen.generate()))
+
     def test_check_exits_1_when_stale(self):
         stale = Path(region.DATA).read_text(encoding="utf-8").replace('"parking_minutes":10', '"parking_minutes":9')
         with tempfile.TemporaryDirectory(prefix="region-stale-") as tmp:
