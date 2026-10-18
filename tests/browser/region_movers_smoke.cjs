@@ -410,6 +410,21 @@ async function runPings(browser) {
   });
   check(talks.n === 2 && talks.shown.some(s => s.place === "cafe" && s.a === "f300") && talks.shown.some(s => !s.place && s.a === "f40"),
     "pings: talks rows (an indoor folk row over its building, an outdoor one between two people), each once", talks);
+  // a birth: a glow with confetti and a stork, which move from frame to frame; a wedding: rings and confetti
+  const party = await page.evaluate(async () => {
+    const P = __view.pings(); P.clear();
+    const c = document.getElementById("c"), g = c.getContext("2d");
+    __view.events([{ seq: 920001, tick: __tick(), kind: "life", tag: "birth", importance: 2, agents: ["f500"], place: "cafe" },
+      { seq: 920002, tick: __tick(), kind: "social", tag: "wedding", importance: 2, agents: ["f40", "f41"], place: "park" }]);
+    await __frames(3, () => 0);
+    const box = () => { const d = g.getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < d.length; i += 4 * 61) h = (h * 33 + d[i] + d[i + 1]) >>> 0; return h; };
+    const a = box();
+    await new Promise(r => setTimeout(r, 400));
+    await __frames(2, () => 0);
+    return { shown: P.shown().map(s => s.tag), moved: a !== box() };
+  });
+  check(party.shown.includes("birth") && party.moved, "pings: a birth's glow, confetti and stork animate", party);
+  if (SHOTS) await shot(page, "pings_birth");
   await page.evaluate(() => { __view.pings().clear(); __drive(true); });
   await page.waitForTimeout(2500);
   const live = await page.evaluate(() => __view.debug().pings);

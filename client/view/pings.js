@@ -6,8 +6,8 @@
 //   talk, flirt                     a bubble in both people's shirt colours, 3 s (flirt: pink rim)
 //   new_friend, partner, engaged    a heart, 3 s
 //   falling_out, breakup, rival, row  a jagged red bubble, 3 s
-//   wedding                         rings, 10 s
-//   party, birth                    a warm glow, 10 s
+//   wedding                         rings and confetti, 10 s
+//   party, birth                    a warm glow and confetti, 10 s; a stork flies over a birth
 // A talk row's tone picks its mark: -1 jagged, 0 a bubble, 1 a bubble with a warm rim. At most 20 on screen,
 // at near and mid only (none at far), newest first, one per place (or per pair outdoors). Named characters use
 // their v2 shirt colour, folk their sheet's. CV.makePings(scene, M, crowd) -> P; the facade feeds P.events and
@@ -133,8 +133,12 @@
           if (p.kind === "bubble") bubble(g, x, y, s, colorOf(p.a), colorOf(p.b), p.rim);
           else if (p.kind === "heart") heart(g, x, y, s, "#ff4f7a");
           else if (p.kind === "jagged") jagged(g, x, y, s);
-          else if (p.kind === "rings") rings(g, x, y, s);
-          else glow(g, x, y, s, age);
+          else if (p.kind === "rings") { rings(g, x, y, s); if (!mid) confetti(g, x, y, s, age, p.n); }
+          else {
+            glow(g, x, y, s, age);
+            if (!mid) confetti(g, x, y, s, age, p.n);
+            if (p.tag === "birth") stork(g, x, y, s, age);
+          }
         }
         g.restore();
         return drawn;
@@ -184,6 +188,39 @@
       const r = (16 + 3 * Math.sin(age / 300)) * s, gr = g.createRadialGradient(x, y - 8 * s, 0, x, y - 8 * s, r);
       gr.addColorStop(0, "rgba(255,214,120,.85)"); gr.addColorStop(1, "rgba(255,160,60,0)");
       g.fillStyle = gr; g.beginPath(); g.arc(x, y - 8 * s, r, 0, 2 * Math.PI); g.fill();
+    }
+    // confetti: 18 bits thrown up from the mark and falling, each its own colour, spin and drift (hashed from
+    // the ping's number, so no two parties look alike and nothing is random)
+    const CONF = ["#ff5a6e", "#ffd23f", "#4fc3f7", "#7ed957", "#c084fc", "#ff9f43"];
+    function confetti(g, x, y, s, age, n) {
+      const T = age / 1000, cycle = 2.6;
+      for (let i = 0; i < 18; i++) {
+        const h = Math.imul((n + 1) * 2654435761 ^ (i + 1) * 40503, 2246822519) >>> 0;
+        const t0 = ((h & 255) / 255) * cycle, tt = ((T + t0) % cycle) / cycle;     // each bit loops on its own phase
+        const vx = (((h >>> 8) & 255) / 255 - 0.5) * 34, up = 22 + ((h >>> 16) & 15);
+        const px = x + vx * tt * s, py = y - 12 * s - (up * tt - 30 * tt * tt) * s;
+        const an = T * (2 + (h >>> 20 & 7)) + i;
+        g.save(); g.translate(px, py); g.rotate(an);
+        g.fillStyle = CONF[(h >>> 24) % CONF.length];
+        g.globalAlpha *= Math.max(0, 1 - tt * 0.9);
+        g.fillRect(-1.5 * s, -0.8 * s, 3 * s, 1.6 * s);
+        g.restore();
+      }
+    }
+    // a stork crossing over the mark with a bundle, once over the 10 s
+    function stork(g, x, y, s, age) {
+      const f = Math.min(1, age / 6000), bx = x + (f - 0.5) * 140 * s, by = y - 46 * s - Math.sin(f * Math.PI) * 10 * s;
+      const flap = Math.sin(age / 140) * 5 * s;
+      g.save();
+      g.globalAlpha *= f < 1 ? 1 : 0;
+      g.strokeStyle = "#f4f4f0"; g.lineWidth = Math.max(1.5, 2.2 * s); g.lineCap = "round";
+      g.beginPath(); g.moveTo(bx - 9 * s, by - flap); g.lineTo(bx, by); g.lineTo(bx + 9 * s, by - flap); g.stroke();     // wings
+      g.fillStyle = "#f4f4f0"; g.beginPath(); g.ellipse(bx, by + 1 * s, 5 * s, 2.4 * s, 0, 0, 2 * Math.PI); g.fill();   // body
+      g.strokeStyle = "#ff8c2a"; g.lineWidth = Math.max(1, 1.2 * s);
+      g.beginPath(); g.moveTo(bx + 5 * s, by); g.lineTo(bx + 10 * s, by + 1.5 * s); g.stroke();                       // beak
+      g.strokeStyle = "rgba(240,240,236,.9)"; g.beginPath(); g.moveTo(bx + 1 * s, by + 3 * s); g.lineTo(bx + 1 * s, by + 7 * s); g.stroke();
+      g.fillStyle = "#bfe0ff"; g.beginPath(); g.arc(bx + 1 * s, by + 9 * s, 2.6 * s, 0, 2 * Math.PI); g.fill();      // the bundle
+      g.restore();
     }
     return P;
   };
