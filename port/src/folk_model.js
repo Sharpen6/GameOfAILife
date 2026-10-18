@@ -80,7 +80,8 @@
       this.choices = []; // last CHOICES_KEEP {time, kind, options, choice, by}
       this.inbox = []; // last INBOX_KEEP messages
       this.commute = null; // [place, minutes, mode] | null
-      this.skill = 0.0;
+      this.skill = 0.0; // job matching (generation)
+      this.role = "a"; // household role at generation: "a" head or partner, "k" child, "g" grandparent, "s" sharer
       this._needs = {};
       for (const n of NEEDS) this._needs[n] = 75.0;
       this._nt = 0;
