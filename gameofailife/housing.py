@@ -1186,28 +1186,12 @@ def fix_emergency(sim, hh: Household, agent: Agent | None = None) -> None:
 
 
 def on_death(sim, agent: Agent) -> None:
-    """After a death and the household update: a home with nobody left alive goes back on the market (an estate
-    sale; nobody inherits) or back to the landlord. Children left on their own keep the home."""
-    hh = sim.households[agent.household_id]
-    if _members(sim, hh):
+    """After a death and the household update: a household with nobody left alive is emptied
+    (`on_household_empty`). Children left on their own keep the home."""
+    hh = _life_household(sim, agent.household_id)
+    if hh is None or _members(sim, hh):
         return
-    home = sim.homes[hh.home_id]
-    if home.household != hh.id:
-        return
-    now, stamp = sim.clock.tick, sim.clock.stamp()
-    home.household = None
-    home.pending_emergency = None
-    home.emergency = None
-    release(home)
-    _history(home.history, {"tick": now, "time": stamp, "event": "left", "household": hh.id, "price": None})
-    _history(hh.history, {"tick": now, "time": stamp, "event": "left", "home": home.id, "name": home.name,
-                          "price": None})
-    if home.owner == hh.id:
-        home.owner, home.listing = "market", "for_sale"
-        _event(sim, f"{home.name} goes on the market after {agent.name}'s death.", "home_listed", home.place,
-               agents=[agent.id])
-    else:
-        home.listing = "for_rent"
+    on_household_empty(sim, hh, agent)
 
 
 # --- group B: fork extras and outcome effects ------------------------------------------------
@@ -1380,3 +1364,78 @@ def afford_score(sim, agent: Agent, opt) -> float:
     if not getattr(opt, "charge", True):
         return -cost / 50 * thrift
     return -2.0
+
+
+# --- life: households ---
+# life.py's (L2) household changes: a new household for a named who leaves one (a split, moving out), and an
+# emptied household's home going back on the market or to the landlord. Townsfolk ids dispatch to the folk first.
+
+def _life_household(sim, hid: str):
+    """The household `hid` of either tier (`sim.household_by_id`, else v2's `sim.households`)."""
+    fn = getattr(sim, "household_by_id", None)
+    return fn(hid) if fn is not None else sim.households.get(hid)
+
+
+def new_household(sim, members: list, home_id: str, how: str) -> Household | None:
+    """Move `members` (people of one tier, the first the head) out of their households into the vacant home
+    `home_id`, as a new household; `how` is "rent" or "buy". Folk go to `sim.folk.new_household`. None when the
+    home is not vacant."""
+    if not members:
+        return None
+    if members[0].id not in sim.agents:
+        return sim.folk.new_household(sim, members, home_id, how)
+    home = sim.homes.get(home_id)
+    if home is None or home.household is not None:
+        return None
+    base = _surname(members[0].name).lower()
+    hid, n = base, 2
+    while hid in sim.households:
+        hid, n = f"{base}_{n}", n + 1
+    hh = Household(hid, home_id, float(home.rent) if how == "rent" else 0.0)
+    sim.households[hid] = hh
+    for a in members:
+        old = sim.households.get(a.household_id)
+        if old is not None and a.id in old.member_ids:
+            old.member_ids.remove(a.id)
+        a.household_id = hid
+        hh.member_ids.append(a.id)
+    now, stamp = sim.clock.tick, sim.clock.stamp()
+    home.household = hid
+    if how == "buy":
+        home.owner = hid
+    release(home)
+    home.listing = None
+    hh.moved_tick = now
+    _history(home.history, {"tick": now, "time": stamp, "event": "moved_in", "household": hid, "price": None})
+    _history(hh.history, {"tick": now, "time": stamp, "event": "moved_in", "home": home.id, "name": home.name,
+                          "price": None})
+    return hh
+
+
+def on_household_empty(sim, hh: Household, agent: Agent | None = None) -> None:
+    """A household with nobody left alive: its home goes back on the market (an estate sale; nobody inherits) or
+    back to the landlord. `agent` is the last to die, if a death emptied it. Folk households go to the folk."""
+    if hh.id not in sim.households:
+        sim.folk.on_household_empty(hh)
+        return
+    home = sim.homes[hh.home_id]
+    if home.household != hh.id:
+        return
+    now, stamp = sim.clock.tick, sim.clock.stamp()
+    home.household = None
+    home.pending_emergency = None
+    home.emergency = None
+    release(home)
+    _history(home.history, {"tick": now, "time": stamp, "event": "left", "household": hh.id, "price": None})
+    _history(hh.history, {"tick": now, "time": stamp, "event": "left", "home": home.id, "name": home.name,
+                          "price": None})
+    if home.owner == hh.id:
+        home.owner, home.listing = "market", "for_sale"
+        if agent is not None:
+            _event(sim, f"{home.name} goes on the market after {agent.name}'s death.", "home_listed", home.place,
+                   agents=[agent.id])
+        else:
+            _event(sim, f"{home.name} goes on the market.", "home_listed", home.place)
+    else:
+        home.listing = "for_rent"
+# --- end life: households ---
