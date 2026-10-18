@@ -307,7 +307,12 @@ class Folk:
         if fl is not None and hasattr(fl, "weekly"):
             fl.weekly(sim)
 
-    def new_household(self, member_ids, home_id, how):
+    def new_household(self, *args):
+        """folk_life.new_household: (member_ids, home_id, how), or (sim, members, home_id, how) as
+        housing.new_household passes them (members may be people or ids)."""
+        if len(args) == 4:
+            args = args[1:]
+        member_ids, home_id, how = args
         return _folk_life().new_household(self, member_ids, home_id, how)
 
     def on_household_empty(self, hh) -> None:

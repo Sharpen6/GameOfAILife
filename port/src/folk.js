@@ -287,7 +287,12 @@
       if (fl && fl.weekly) fl.weekly(sim);
     }
 
-    new_household(member_ids, home_id, how) { return G.folk_life.new_household(this, member_ids, home_id, how); }
+    // folk_life.new_household: (member_ids, home_id, how), or (sim, members, home_id, how) as
+    // housing.new_household passes them (members may be people or ids).
+    new_household(...args) {
+      const [member_ids, home_id, how] = args.length === 4 ? args.slice(1) : args;
+      return G.folk_life.new_household(this, member_ids, home_id, how);
+    }
 
     on_household_empty(hh) { G.folk_life.on_household_empty(this, hh); }
 
