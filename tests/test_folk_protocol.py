@@ -280,6 +280,30 @@ class TestFrameLoop(unittest.TestCase):
                                places=6)
 
 
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_the_js_host_catches_up_the_same_way(self):
+        code = r"""
+const G = require(process.argv[1] + "/port/tools/engine.cjs").load();
+const sim = new G.sim.Simulation(1, null, null, 1);
+const clock = { t: 1000.0 };
+const host = new G.host.LocalHost(sim, 1, () => clock.t);
+const start = sim.clock.tick, out = [];
+for (const late of [0, 0, 0.5, 0]) {
+  clock.t += G.host.FRAME_SECONDS + late;
+  host.frame();
+  out.push(sim.clock.tick - start + host._pending_ticks);
+}
+process.stdout.write(JSON.stringify({ out, span: G.host.frame_span(10), on_time: G.host.frame_span(1000.05 - 1000) }));
+"""
+        js = json.loads(subprocess.run([NODE, "-e", code, str(ROOT)], capture_output=True, text=True, check=True,
+                                       timeout=120).stdout)
+        per_frame = py_server.FRAME_SECONDS * TICKS_PER_REAL_SECOND
+        for got, frames in zip(js["out"], (1, 2, 2 + py_server.CATCH_UP_FRAMES, 3 + py_server.CATCH_UP_FRAMES)):
+            self.assertAlmostEqual(got, per_frame * frames, places=6)
+        self.assertEqual((js["span"], js["on_time"]), (py_server.CATCH_UP_FRAMES * py_server.FRAME_SECONDS,
+                                                       py_server.FRAME_SECONDS))
+
+
 JS_KEYS = r"""
 const G = require(process.argv[1] + "/port/tools/engine.cjs").load();
 const folk = Number(process.argv[2]);
