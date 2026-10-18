@@ -50,12 +50,16 @@
     // drawing runs on the time of the frame being drawn (view.js: setNow), frames arrive on the real clock
     let frameNow = null;
     const drawNow = () => (frameNow != null ? frameNow : viewNow());
+    const ticksSince = (a, b) => (typeof a === "number" && typeof b === "number" && b > a ? Math.min(8, b - a) : 1);
     const sOf = (t, now) => t.s0 + (t.s1 - t.s0) * Math.min(1, Math.max(0, (now - t.t0) / t.dur));
 
     function setState(st, now) {
       const rows = st && st.trains;
       if (!Array.isArray(rows)) return;
       const fresh = lastTick === null || st.tick !== lastTick;
+      // the ticks this frame covers (about 2 at speed 16): a train runs up to 10 tiles a tick, so the jump
+      // threshold scales with them (capped, so a long gap still snaps)
+      const dt = ticksSince(lastTick, st.tick);
       lastTick = st.tick;
       const seen = new Set();
       for (const r of rows) {
@@ -67,7 +71,7 @@
         t.row = r;
         if (!fresh) continue;
         const s = sOf(t, now), di = r.i - t.s1;
-        if (r.track !== t.track || r.i < t.s1 || Math.abs(di) > SNAP) { t.track = r.track; t.s0 = t.s1 = r.i; t.t0 = now; t.dur = 1; continue; }
+        if (r.track !== t.track || r.i < t.s1 || Math.abs(di) > SNAP * dt) { t.track = r.track; t.s0 = t.s1 = r.i; t.t0 = now; t.dur = 1; continue; }
         t.s0 = s; t.s1 = r.i; t.t0 = now; t.dur = Math.max(30, (M && M.tickMs) || 417) * 1.1;
       }
       for (const id of [...trains.keys()]) if (!seen.has(id)) trains.delete(id);

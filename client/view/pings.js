@@ -86,10 +86,13 @@
           add({ kind, tag: e.tag, rim: e.tag === "flirt" ? "#ff7ab8" : null, place: placeIdOf(e.place), a: ag[0], b: ag[1], at: e.at || null, t0: now, life: LIFE[kind] });
         }
       },
-      // state.talks rows, each once (a, b and the start tick)
+      // state.talks rows, each once (a, b and the start tick). The rows come named first, newest first
+      // (PLAN 2.10), so they are added last to first: row 0 is added last and wins its place in visible().
       talks(rows, now) {
         now = now == null ? nowMs() : now;
-        for (const r of rows || []) {
+        const rs = Array.isArray(rows) ? rows : [];
+        for (let j = rs.length - 1; j >= 0; j--) {
+          const r = rs[j];
           if (!Array.isArray(r) || r.length < 4) continue;
           const [pi, a, b, tone, tick] = r, key = a + "|" + b + "|" + (tick != null ? tick : "");
           if (seenTalk.has(key)) continue;

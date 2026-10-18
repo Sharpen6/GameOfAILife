@@ -7,7 +7,7 @@
 // a leaver fades over 300 ms. Walkers keep to a kerb (side and place along it by hash2(i, 7)), vehicles to
 // their lane; standing people sharing a tile stand in a ring. Near: sprites (folk sheets, cars; cap 800, the
 // rest as marks) merged by depth with everything upright; mid: 2 x 3 px walkers and 4 x 3 px vehicles;
-// far: 1 px dots (vehicles 2 px). pick(wx, wy, r) -> {kind: "agent", id: "f417", folk: true}. stats().crowdDrawn
+// far: 1 px dots (vehicles too, in their colour). pick(wx, wy, r) -> {kind: "agent", id: "f417", folk: true}. stats().crowdDrawn
 // counts the people drawn whose foot point is in the view (those just outside it are drawn too, uncounted).
 // Drawing (items, marks, pick, pos, each) runs on the frame's time (setNow, from view.js); each(fn) feeds the
 // minimap. Classic script on window.CityView; no random numbers (view.md 7).
@@ -104,6 +104,9 @@
       const fresh = lastTick === null || st.tick !== lastTick;
       if (!fresh) return;
       const u = lastTick === null ? 1 : share(now);
+      // the ticks this frame covers (about 2 at speed 16; highway cars run 8 tiles a tick): the jump
+      // threshold scales with them, capped so a long gap still snaps
+      const dt = typeof lastTick === "number" && typeof st.tick === "number" && st.tick > lastTick ? Math.min(8, st.tick - lastTick) : 1;
       lastTick = st.tick;
       // a little longer than the tick, so a move never ends before the next one starts (no standing frames
       // between ticks when the tick comes late); the next move starts from wherever it was shown
@@ -132,7 +135,7 @@
         kind[i] = kk;
         let px = prev[2 * i], py = prev[2 * i + 1];
         const dx = x - px, dy = y - py;
-        if (Math.abs(dx) + Math.abs(dy) > SNAP || vehNow !== vehWas) { // a jump (or into or out of a car): no glide
+        if (Math.abs(dx) + Math.abs(dy) > SNAP * dt || vehNow !== vehWas) { // a jump (or into or out of a car): no glide
           prev[2 * i] = px = x; prev[2 * i + 1] = py = y;
           offset(i, x, y, face[i], m, o0, 2 * i);
         }
@@ -293,7 +296,7 @@
           }
         }
       },
-      // mid: 2 x 3 px walkers and 4 x 3 px vehicles; far: 1 px dots (vehicles 2 px). Device px.
+      // mid: 2 x 3 px walkers and 4 x 3 px vehicles; far: 1 px dots (vehicles too, in their colour). Device px.
       marks(g, v, lod) {
         const now = drawNow();
         positions(now);
@@ -308,7 +311,7 @@
           g.globalAlpha = fa[j];
           g.fillStyle = veh ? CAR_COLORS[hash2(i, 3) % 10] : shirtOf(i);
           if (lod === "mid") g.fillRect(dx - (veh ? 2 : 1) * k, dy - 3 * k, (veh ? 4 : 2) * k, 3 * k);
-          else g.fillRect(dx, dy, (veh ? 2 : 1) * k, (veh ? 2 : 1) * k);
+          else g.fillRect(dx, dy, k, k);
         }
         g.globalAlpha = 1;
       },

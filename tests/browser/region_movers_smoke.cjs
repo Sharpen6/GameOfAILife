@@ -9,13 +9,14 @@
 //  8. crowd: at zoom 0.5 debug().crowdDrawn equals the crowd whose shown foot point is in the view; at speed 1 a
 //     walker's shown position changes on >= 90% of the frames between two ticks; 8 people on one tile give 8
 //     pick targets; >= 150 people drawn at the default view (1/4 at 85, 48) at 08:00; at far zoom people are
-//     dots (no sprites) when the scene has levels of detail
+//     dots (no sprites) when the scene has levels of detail; at 2 ticks a frame a car 16 tiles on glides
 //  9. trains: every car centre within 0.3 tiles of its track (speed 16); a train stands still while it stays at
-//     a station; it snaps on a track change and when i drops; its cars sit at i, i-1, i-2, i-3 (car k at s - k)
+//     a station; it snaps on a track change and when i drops; its cars sit at i, i-1, i-2, i-3 (car k at s - k);
+//     at 2 ticks a frame (speed 16) a train running 13 to 24 tiles glides, no snap
 // 10. bridges and crossings: a named car, a folk car and a walker each ease over a b tile and an x tile with no
 //     jump between frames
 // 11. pings: one talk event shows one bubble for 3 s; 30 events in a frame show 20; none at far zoom; talks rows
-//     (indoor folk rows too) draw over their buildings
+//     (indoor folk rows too) draw over their buildings; at one place the first row (named first, newest first) wins
 // 12. navigation: focus({district}) lands within 2 tiles of its centre; focus({station}) on the station;
 //     districts() and stations() list every district and station; a folk pick returns {kind: "agent",
 //     id: "f...", folk: true}; a train pick returns {kind: "train", id, line, riders}
@@ -185,6 +186,15 @@ async function runCrowd(browser) {
   await page.mouse.click(picks[3].c[0], picks[3].c[1]);
   const clicked = await page.evaluate(() => __calls.pick[__calls.pick.length - 1]);
   check(clicked && clicked.id === "f503" && clicked.folk === true, "crowd: a click on a townsperson picks them", clicked);
+  // speed 16 sends about 2 ticks a frame: a car 16 tiles on (highway speed, 8 tiles a tick) glides, no jump
+  const car = await page.evaluate(async () => {
+    const st = __frameAt(__tick()), K = __view.crowd();
+    st.crowd = [600, 100, 62, 2]; st.tick += 10; __push(st);
+    await __frames(2, () => 0);
+    __push(Object.assign({}, st, { crowd: [600, 116, 62, 2], tick: st.tick + 2 }));
+    return { p: K.pos(600, performance.now()) };
+  });
+  check(car.p && car.p[0] < 104, "crowd: at 2 ticks a frame (speed 16) a car 16 tiles on glides from where it was, no jump", car);
   // far: dots, no sprites (only when the scene has levels of detail)
   await page.evaluate(() => { __setTick(__tick() + 2); __view.setCamera({ x: 128, y: 96, zoom: 0.1 }); });
   await page.waitForTimeout(500);
@@ -268,6 +278,25 @@ async function runTrains(browser) {
     return { at: row.at_station, i: row.i, min: Math.min(...ss), max: Math.max(...ss) };
   });
   check(still.at && Math.abs(still.max - still.min) < 1e-9 && Math.abs(still.min - still.i) < 1e-9, "trains: a train stands still while it stays at a station", still);
+  // speed 16 sends about 2 ticks a frame: a train that runs 13 to 24 tiles between two frames glides, no snap
+  const glide = await page.evaluate(() => {
+    const T = __view.trains(), base = 1440 + 480;
+    let moves = 0, snaps = 0;
+    for (let t = base; t < base + 240; t += 2) {
+      __setTick(t);
+      const before = new Map(T.rows().map(r => [r.id, { track: r.track, i: r.i }]));
+      __setTick(t + 2);
+      const now = performance.now();
+      for (const r of T.rows()) {
+        const b = before.get(r.id);
+        if (!b || b.track !== r.track || r.i - b.i <= 12 || r.i - b.i > 24) continue;
+        moves++;
+        if (Math.abs(T.sOf(r.id, now) - r.i) < 1e-9) snaps++;
+      }
+    }
+    return { moves, snaps };
+  });
+  check(glide.moves > 0 && glide.snaps === 0, "trains: at 2 ticks a frame (speed 16) a train running 13 to 24 tiles glides, no snap", glide);
   // cars at i, i-1, i-2, i-3 once settled
   const settled = await page.evaluate(async () => {
     await new Promise(r => setTimeout(r, 700));
@@ -410,6 +439,20 @@ async function runPings(browser) {
   });
   check(talks.n === 2 && talks.shown.some(s => s.place === "cafe" && s.a === "f300") && talks.shown.some(s => !s.place && s.a === "f40"),
     "pings: talks rows (an indoor folk row over its building, an outdoor one between two people), each once", talks);
+  // the rows come named first, newest first (PLAN 2.10): at one place the first row wins
+  const order = await page.evaluate(async () => {
+    const P = __view.pings(), town = __view.scene().town, pi = town.places.findIndex(p => p.id === "cafe");
+    const at = (rows, dt) => { P.clear(); const st = __frameAt(__tick()); st.talks = rows(st.tick); st.tick += dt; __push(st); };
+    at(t => [[pi, "dana", "f1", 1, t], [pi, "f2", "f3", 0, t]], 2);
+    await __frames(3, () => 0);
+    const named = P.shown().filter(s => s.place === "cafe").map(s => s.a);
+    at(t => [[pi, "f8", "f9", 0, t], [pi, "f4", "f5", 0, t - 7]], 3);
+    await __frames(3, () => 0);
+    const newest = P.shown().filter(s => s.place === "cafe").map(s => s.a);
+    return { named, newest };
+  });
+  check(order.named.join() === "dana" && order.newest.join() === "f8",
+    "pings: talks rows at one place: the first row (named first, newest first) is the one shown", order);
   // a birth: a glow with confetti and a stork, which move from frame to frame; a wedding: rings and confetti
   const party = await page.evaluate(async () => {
     const P = __view.pings(); P.clear();
