@@ -16,7 +16,8 @@
   const TRAVEL_COST = 0.004; // forks.TRAVEL_COST
   const NIGHT_TRAVEL = 2, NIGHT_FROM = 20, NIGHT_UNTIL = 7; // forks' night rate
   const STYLE = 0.6; // forks.default_scores' style weight
-  const SHIFT_MARGIN = 10; // minutes spare before a shift
+  const SHIFT_MARGIN = 10; // minutes spare before a shift, on average: each person keeps 10 +- SHIFT_SPREAD of their own
+  const SHIFT_SPREAD = 5;
   const LATE_GRACE = 5; // minutes late before reputation suffers
   const EVENING = 19 * 60; // choices after this are "evening" ones
   const STROLL_EVERY = 5; // minutes between a park stroller's hops
@@ -124,6 +125,7 @@
       this._park_tiles = new Map();
       this._bed = new Map();
       this._wake = new Map();
+      this._spare = new Map(); // i -> minutes spare before a shift
       const { Person } = fm();
       Person.clock = sim.clock;
       Person.town = town;
@@ -331,11 +333,21 @@
       }
       const job = p.job;
       if (job !== null && job.workdays.includes(day % 7)) {
-        const leave = job.start_hour * 60 - this._commute_of(p)[0] - SHIFT_MARGIN;
-        return Math.min(base, leave - 40);
+        return Math.min(base, this._set_off(p) - 40);
       }
       if (job !== null || p.age >= 18) return base + 90; // a day off (the jobless and retired every day)
       return day % 7 >= 5 ? base + 90 : base;
+    }
+
+    // The minute of the day p sets off for today's shift or school: start - commute - their own margin.
+    _set_off(p) {
+      let spare = this._spare.get(p.i);
+      if (spare === undefined) {
+        const k = G.dice.key(this.sim.dice_seed, fm().NS_FOLK, p.i, "spare");
+        spare = SHIFT_MARGIN - SHIFT_SPREAD + k % (2 * SHIFT_SPREAD + 1);
+        this._spare.set(p.i, spare);
+      }
+      return p.job.start_hour * 60 - this._commute_of(p)[0] - spare;
     }
 
     _bed_minute(p) {
@@ -425,7 +437,7 @@
       const night = m >= bed || m < this._wake_minute(p, day);
       if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < job.end_hour * 60 - 60) {
         const [commute, mode] = this._commute_of(p);
-        const leave = job.start_hour * 60 - commute - SHIFT_MARGIN;
+        const leave = this._set_off(p);
         const early = m < leave;
         if (early && (p.inside === home || home === null) && !night) {
           this._begin(p, now, "relax_home", leave - m);
@@ -859,6 +871,20 @@
     }
 
     // [x, y, mode] of a traveller at tick, or null while aboard a train or a passenger.
+    // A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one.
+    _passenger(p, leg) {
+      const hh = this.hh_of(p);
+      if (hh === null) return false;
+      for (const mid of hh.member_ids) {
+        const q = this.people[Number(mid.slice(1))];
+        if (q.i >= p.i) continue;
+        if (q.trip !== null && q.trip.dest === p.trip.dest && q.age < 18 && q.trip.mode === p.trip.mode) {
+          if (q.trip.legs.length && q.trip.legs[0][1] === p.trip.legs[0][1] && q.trip.legs[0][0] === leg[0]) return true;
+        }
+      }
+      return false;
+    }
+
     _leg_xy(p, tick) {
       const { WALK, DRIVE, WAIT, K_WALK, K_CAR, K_AMBULANCE, K_WAIT } = fm();
       const trip = p.trip;
@@ -872,7 +898,7 @@
         const at = data.at(Math.max(0, tick - t0));
         if (kind === WALK) return [at[0], at[1], K_WALK];
         if (trip.mode === "ambulance") return [at[0], at[1], K_AMBULANCE];
-        if (p.age < 18) return null; // a passenger: the driver's car is the one on the street
+        if (p.age < 18 && this._passenger(p, leg)) return null; // a passenger: the school run's car is an older sibling's
         return [at[0], at[1], K_CAR];
       }
       if (kind === WAIT) {
@@ -1151,7 +1177,7 @@
       const now = sim.clock.tick;
       const [day, m] = divmod(now, DAY);
       if (job.workdays.includes(day % 7) && p.worked_day !== day) {
-        const leave = job.start_hour * 60 - f._commute_of(p)[0] - SHIFT_MARGIN;
+        const leave = f._set_off(p);
         if (leave - 60 <= m && m < job.end_hour * 60) return false;
       }
     }
@@ -1315,7 +1341,7 @@
   }
 
   G.folk = {
-    DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, LATE_GRACE,
+    DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
     GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,
