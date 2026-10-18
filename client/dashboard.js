@@ -2269,7 +2269,7 @@
       </div>
       <h3>Owns</h3>${ownsHtml(a)}
       <h3>Play style</h3>
-      <textarea class="dash-prompt" aria-label="Play-style prompt"${watching ? " disabled" : ""}>${esc(a.profile ? a.profile.prompt : "")}</textarea>
+      <textarea class="dash-prompt" maxlength="1000" aria-label="Play-style prompt"${watching ? " disabled" : ""}>${esc(a.profile ? a.profile.prompt : "")}</textarea>
       <div class="dash-traits">${traits}</div>
       <button type="button" class="dash-btn dash-saveprof"${watching ? " disabled" : ""}>Save play style</button>
       <span class="dash-muted">${a.profile && a.profile.edited ? "Written by you" : "Learns from choices"}</span>

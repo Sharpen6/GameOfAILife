@@ -65,7 +65,7 @@ def plain_fork(agent_id: str, tick: int) -> Fork:
 
 # --- the real-time scenario (run in a child process) ------------------------------------------------------------
 
-UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 
