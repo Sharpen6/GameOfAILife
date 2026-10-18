@@ -2,7 +2,7 @@
 // Headless smoke test for the region view (V1a, view.md 3): the 256 x 192 region of client/dev/region_data.js
 // on client/dev/region.html (manual=1: the test times setTown and drives every frame).
 //
-//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat camera pick proj)
+//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat camera pick proj occ)
 //
 // 1 open: the first default frame (setTown, setState, frame at zoom 1/4 over (85, 48)) is drawn within 600 ms
 //   at 1280x800 and 390x844 dpr 2 (a phone), 1000 ms at 1440x900 dpr 2, and settles (no chunk pending)
@@ -388,6 +388,21 @@ async function runPick(browser) {
   await ctx.close();
 }
 
+// low-zoom night lights follow folk's occ (view.md 3.4: homes lit if occ > 0, else 5%)
+async function runOcc(browser) {
+  const { ctx, page, errors } = await open(browser, SIZES.desk, "stub=0&minute=1320");
+  await page.evaluate(() => window.__setTown());
+  const r = await page.evaluate(() => {
+    const sc = window.__view.scene(), n = sc.R.buildings.length, out = {};
+    window.__cam({ zoom: 0.25, x: 40, y: 25 }); window.__settle(300);
+    for (const v of [0, 3]) { sc.occ = new Array(n).fill(v); window.__settle(300); window.__f(); out[v] = window.__lit(); }
+    return out;
+  });
+  check(r[3] > r[0] * 1.2, "occ: at mid, homes with people in them light more windows", `${r[0]} lit px with nobody home, ${r[3]} with everyone`);
+  check(!errors.length, "occ: no console errors", errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
 // a projection switch at runtime (the View menu's Top-down) draws what a fresh flat page draws (view.md 3.2)
 async function runProj(browser) {
   const views = [[1, 40, 25], [0.5, 150, 100]];
@@ -405,7 +420,7 @@ async function runProj(browser) {
 }
 
 const RUNS = [["open", runOpen], ["sweep", runSweep], ["steady", runSteady], ["same", runSame], ["night", runNight], ["season", runSeason],
-  ["fit", runFit], ["flat", runFlat], ["camera", runCamera], ["pick", runPick], ["proj", runProj]];
+  ["fit", runFit], ["flat", runFlat], ["camera", runCamera], ["pick", runPick], ["proj", runProj], ["occ", runOcc]];
 async function main() {
   const pw = findPlaywright();
   if (!pw) { console.log("SKIP: Playwright is not installed"); return; }

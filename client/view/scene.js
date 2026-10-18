@@ -1540,7 +1540,7 @@
       const layer = (name, check) => {
         for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
           const e = chunks.want(name, lv, cx, cy, budget);
-          if (check && e.c) check(e);
+          if (check && e.c) { const was = e.stale; check(e); if (e.stale && !was) chunks.pending++; } // (stale now: pending too)
           if (chunks.draw(g, e, v)) n++;
         }
       };
