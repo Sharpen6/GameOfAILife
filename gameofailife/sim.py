@@ -7,6 +7,11 @@ calls `step()` on a timer, hands controller answers to `answer()`, and drains
 The city's other parts plug in through hook functions this module calls at fixed points (PLAN 3.10):
 `housing` (homes, rent, upkeep), `travel` and `transit` (getting around), `chronicle` (event tags) and
 `stats` (counters and samples). Their packages change those functions, never the call sites.
+
+v3 (PLAN 2.1-2.4): `world="region"` builds the region (`region.build_region`) with its trains (`rail`), and
+`folk=N` townsfolk (`people.make_folk`, `sim.folk`); `life`, `career`, `money` and `social` run the life rules for
+both tiers through the hook lines of life.md 7, each a one-line call into its module. `world="millbrook"`, folk 0
+(the default) is v2's city.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import chronicle, housing, stats, transit, travel
+from . import career, chronicle, housing, life, money, people, social, stats, transit, travel
+from . import social_forks  # noqa: F401  # registers its fork builders and handlers in people
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, TICKS_PER_REAL_SECOND, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
@@ -87,12 +93,16 @@ ACTIVITIES = {
 # The housing forks' activities (moving house, viewings, DIY, ...): none of them is leisure.
 ACTIVITIES.update({name: Activity(spec["minutes"], dict(spec["gains"]), spec["inside"])
                    for name, spec in housing.ACTIVITIES_EXTRA.items()})
+# life's activities (life.md 7): the ward, a doctor's visit, a newborn's day.
+ACTIVITIES.update({name: Activity(spec["minutes"], dict(spec["gains"]), spec["inside"])
+                   for name, spec in life.ACTIVITIES_EXTRA.items()})
 
 # How fast needs drop during some activities (default 1.0).
 DECAY_SCALE = {
     "sleep": {"energy": 0.0, "hunger": 0.35, "social": 0.0, "fun": 0.0},
     "work": {"social": 0.0, "fun": 1.3, "hunger": 0.6},
     "hospital": {"social": 0.5, "fun": 0.5},
+    "ward": {"social": 0.5, "fun": 0.5},  # life's hospital stay, like v2's afternoon in hospital
 }
 
 LIGHT_CYCLE = 6  # minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
@@ -124,6 +134,7 @@ PHRASINGS = {  # outcome id -> the ways its event line reads, one picked by sim.
 QUIET = ("tasty", "deep_sleep", "unwind", "bonding", "feast", "cosy_night")  # routine good meals, sleep, rest and
 # dinners: kept in the decision's `happened` only, unless the outcome is news (importance 1 or more); a dinner out is its own one line
 VARIED_MONEY = {"breakthrough": (20, 120)}  # outcome id -> the whole-dollar range its money is drawn from as it lands
+WORLDS = ("millbrook", "region")  # Simulation(world=...): v2's 80 x 50 town, or the region around it (PLAN 2.1)
 
 
 def _r1(x: float) -> float:
@@ -133,14 +144,25 @@ def _r1(x: float) -> float:
 
 class Simulation:
     def __init__(self, seed: int = 1, now: Callable[[], float] = time.monotonic,
-                 luck_log_path: str | None = None):
+                 luck_log_path: str | None = None, *, world: str = "millbrook", folk: int = 0,
+                 folk_isolated: bool = False, dice_seed: int | None = None):
         from . import cast  # here, not at the top, so `python3 -m gameofailife.cast` runs it only once
 
+        if world not in WORLDS:
+            raise ValueError(f"world must be one of {', '.join(WORLDS)}")
         self.seed = seed
+        self.dice_seed = seed if dice_seed is None else dice_seed  # the keyed behaviour streams (dice.stream)
+        self.world = world
+        self.folk_isolated = bool(folk_isolated)
+        folk = max(0, int(folk)) if world == "region" else 0  # townsfolk live in the region only
         self.rng = random.Random(seed)
         self.now = now
         self.clock = Clock()
-        self.town: TownMap = build_map(seed)  # shared with every Simulation of this seed: never changed
+        if world == "region":
+            from . import region  # lazy: millbrook never loads the region's data
+            self.town: TownMap = region.build_region(seed)  # shared and read-only, like build_map's
+        else:
+            self.town = build_map(seed)  # shared with every Simulation of this seed: never changed
         self.homes = housing.build_homes(self.town)  # home id -> Home
         self.lots = housing.build_lots(self.town, self.homes)  # residential place id -> Lot (its condition)
         self.agents, self.households = cast.build_cast(self.town, self.homes, seed)
@@ -164,12 +186,25 @@ class Simulation:
         self._invite_ids = 0
         self._host_hold: dict[str, int] = {}  # host id -> tick they wait at an invite place until
         self._lawns: dict[str, list[tuple[int, int]]] = {}  # park id -> its lawn tiles, where a stroll heads
+        self.folk = people.NoFolk()  # until make_folk below: nobody, every call a no-op
+        life.pre_init(self)  # sim.life, and the job board with the named jobs
+        self.folk = people.make_folk(self, folk, self.folk_isolated)  # folk_gen fills the board
+        life.init(self)  # everyone's LifeState, and the start
+        social.init(self)
         self._roll_weather()
 
     # --- lookups used by the fork builders -----------------------------------
 
     def household(self, agent: Agent) -> Household:
         return self.households[agent.household_id]
+
+    def person(self, pid: str):
+        """A named Agent or a townsperson by id, or None (people.person)."""
+        return people.person(self, pid)
+
+    def household_by_id(self, hid: str):
+        """A named Household or a townsfolk household by id, or None (people.household_by_id)."""
+        return people.household_by_id(self, hid)
 
     def home_of(self, agent: Agent) -> str:
         """The place id of the character's home: the house, or the apartment block of a flat."""
@@ -267,13 +302,16 @@ class Simulation:
 
     def event(self, text: str, agent: Agent | None = None, kind: str | None = None, *, tag: str = "other",
               importance: int | None = None, agents: list[str] | None = None, place: str | None = None,
-              remember: bool = True) -> dict:
+              remember: bool = True) -> dict | None:
         """Log something that happened, for God's views and the character's memory.
 
         `tag` is a key of chronicle.EVENT_TAGS and gives the kind and importance unless the call names them.
         `place` is a place id: the one given, else where the character is or is headed, else None.
         remember=False (and the God-only tags) keeps the line out of the character's memory.
+        Returns None when people.news_gate drops it (the townsfolk-only news cap, PLAN 2.8).
         """
+        if not people.news_gate(self, tag, importance, agent, agents):
+            return None
         if place is None and agent is not None:
             place = agent.inside or agent.activity_place
         self._event_seq += 1
@@ -310,13 +348,18 @@ class Simulation:
             self._new_day()
         if self.clock.weekday == 6 and m == 23 * 60:
             housing.weekly_charges(self)  # rent or property tax, and bills
+            self.folk.weekly(self)
         if self.clock.weekday == 4 and m == 9 * 60:
             self._pay_pensions()
+            self.folk.pensions(self)
         self._check_timeouts()
         self._expire_invites()
         housing.tick(self)
+        life.tick(self)
         for agent in self.living():
             self._tick_agent(agent)
+        self.folk.tick(self)
+        social.tick(self)
         if m % 60 == 0:
             self.stats.sample(self)
 
@@ -333,21 +376,12 @@ class Simulation:
             self.event("It starts to rain." if self.weather == "rain" else "The sky clears up.", tag="weather")
 
     def _new_day(self) -> None:
-        for agent in self.living():
-            # Old age: a small daily chance from 70, which Luck softens.
-            if agent.age >= 70:
-                # About 0.75% a month at 74 and 3.6% at 80 (at Luck 50), so a death in the first weeks is rare.
-                p = luck_odds(0.00001 * (agent.age - 69) ** 2, -1, agent.luck)
-                self._log_roll(agent, "old_age", p, roll := self.rng.random())
-                if roll < p:
-                    self._die(agent, "passed away peacefully in their sleep")
-        if self.clock.day % (DAYS_PER_SEASON * len(SEASONS)) == 0 and self.clock.day:
-            for agent in self.living():
-                agent.age += 1
+        life.legacy_ageing(self)  # v2's old-age roll and yearly birthday, until life's own rules replace them
         for agent in self.living():
             if getattr(agent, "car_at", None) and not travel.car_here(self, agent):
                 agent.car_at = None  # type: ignore[attr-defined]  # a car left elsewhere is fetched home overnight
         housing.nightly(self)
+        self.folk.nightly(self)
         self.stats.reset_day()
 
     def _pay_pensions(self) -> None:
@@ -371,7 +405,18 @@ class Simulation:
         return None
 
     def timetable(self) -> dict:
-        return transit.timetable_json()
+        table = transit.timetable_json()
+        if self.world == "region":
+            from . import rail  # lazy: millbrook has no railway
+            table = {**table, "train": rail.timetable_json(self.town)}
+        return table
+
+    def trains(self) -> list[dict]:
+        """`state.trains` (region.md 8): a pure function of the tick, riders from the townsfolk; [] in millbrook."""
+        if self.world != "region":
+            return []
+        from . import rail
+        return rail.train_rows(self.town, self.clock.tick, self.folk.riders(self.clock.tick))
 
     # --- agents ---------------------------------------------------------------
 
@@ -403,11 +448,15 @@ class Simulation:
             agent.health -= 0.03
         if agent.needs["energy"] <= 0:
             agent.health -= 0.02
-        if min(agent.needs.values()) > 40 and agent.health < 100:
-            agent.health = min(100.0, agent.health + 0.004)
+        top = life.max_health(agent)  # 100, less with a chronic condition
+        if min(agent.needs.values()) > 40 and agent.health < top:
+            agent.health = min(top, agent.health + 0.004)
 
     def _next(self, agent: Agent) -> None:
         """Start the next planned step, or let the Director find the next decision."""
+        if agent.age < life.FORK_AGE:
+            life.toddle(self, agent)  # too young for forks: life's day for a small child
+            return
         if (agent.plan and self._must_leave_for_work(agent, agent.plan[0][1])
                 and not any(s[0] == "work" for s in agent.plan)):
             agent.plan = []  # drop the rest of the plan: it's time to head to work
@@ -419,9 +468,7 @@ class Simulation:
             if agent.state != "idle" or agent.plan:
                 return  # an outcome set the character off (a haggle's deal: moving house)
         if agent.health < 25 and agent.inside != "hospital":
-            self.event(f"{agent.name} feels very unwell, and an ambulance takes them to "
-                       f"{self.town.places['hospital'].name}.", agent, tag="hospital")
-            self.start_plan(agent, [("hospital", "hospital")], "ambulance")  # free; the hospital's fee stays
+            life.hospitalise(self, agent, 1, "very unwell")  # the ambulance (v2: an afternoon; life: the ward)
             return
         fork = build_fork(self, agent)
         if fork:
@@ -596,6 +643,8 @@ class Simulation:
             # Paid from the shift start, not for turning up early.
             start = tick - self.clock.minute_of_day + agent.job.start_hour * 60 if agent.job else tick
             agent.work_started = max(tick, min(start, agent.busy_until - 30))  # type: ignore[attr-defined]
+        elif agent.activity == "ward":
+            agent.busy_until = agent.life.ward_until  # life's hospital stay: until the ward lets them go
         elif agent.activity == "sleep":
             # Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
             # commute from home (the usual way, the worst bus wait counted) for the long ones.
@@ -621,7 +670,7 @@ class Simulation:
             agent.busy_until = max(agent.busy_until, self._host_hold.pop(agent.id))
         # Nothing runs into today's shift (the work fork offers a coffee on the way only while it fits before it).
         start = self._shift_start_tick(agent)
-        if (agent.activity not in ("work", "hospital") and start is not None
+        if (agent.activity not in ("work", "hospital", "ward") and start is not None
                 and not any(s[0] == "work" for s in agent.plan)):
             leave = start - self.commute_minutes(agent) - SHIFT_MARGIN  # as _must_leave_for_work counts it
             agent.busy_until = max(tick + 1, min(agent.busy_until, leave))
@@ -720,7 +769,7 @@ class Simulation:
             if pay:
                 agent.money += pay
                 agent.week_earnings += pay
-            agent.reputation = min(100.0, agent.reputation + 0.5)
+            career.on_shift_end(self, agent)  # standing at work (v2: reputation +0.5 a shift)
         elif agent.activity == "buy_groceries":
             self.household(agent).groceries += 10
         elif agent.activity == "hospital":
@@ -752,8 +801,10 @@ class Simulation:
         for inv in self.invites.values():
             if inv["from"] == agent.id and inv["status"] == "pending":
                 inv["status"] = "expired"
-                guest = self.agents[inv["to"]]
-                asked = self.forks.get(guest.fork_id or "")
+                guest = people.person(self, inv["to"])
+                if guest is None:
+                    continue
+                asked = self.forks.get(getattr(guest, "fork_id", None) or "")
                 if asked and asked.kind == "invite" and asked.options[0].extra.get("invite") == inv["id"]:
                     self._withdraw_fork(guest)  # the guest can't accept a dead host's invite
         self.event(f"{agent.name} {how}, aged {agent.age}.", agent, tag="death", place=place)
@@ -765,6 +816,7 @@ class Simulation:
                 other.remember(self.clock.stamp(), f"Lost {agent.name}.")
         self.household(agent).member_ids = [m for m in self.household(agent).member_ids if m != agent.id]
         housing.on_death(self, agent)
+        life.on_death(self, agent)  # widowhood, grief, the job slot, loans, the agenda (both tiers)
 
     def _withdraw_fork(self, agent: Agent) -> None:
         """Stop asking a character's open fork: nothing is played for it and answers are refused."""
@@ -904,7 +956,7 @@ class Simulation:
                   for f in agent.forks[-RECENT_FORKS:]]  # what came of each, keyed by fork id (FIXLISTS 2)
         return {
             "type": "fork", "fork_id": fork.id, "agent_id": agent.id, "kind": fork.kind,
-            "question": fork.question, "options": options, "time": self.clock.stamp(),
+            "question": fork.question, "about": fork.about, "options": options, "time": self.clock.stamp(),
             "deadline_seconds": ANSWER_SECONDS, "weather": self.weather, "season": self.clock.season,
             "profile_scores": list(fork.scores),
             "you": {"name": agent.name, "profile": agent.profile.prompt, "money": round(agent.money, 2),
@@ -914,7 +966,8 @@ class Simulation:
                     "savings": r2(agent.savings), "where_name": here.name if here else "outside",
                     "home_name": self.homes[hh.home_id].name, **housing.fork_you(self, agent),
                     "today": today_line(self, agent), "recent": recent,
-                    "payer": ({"name": payer.name, "money": round(payer.money, 2)} if payer is not agent else None)},
+                    "payer": ({"name": payer.name, "money": round(payer.money, 2)} if payer is not agent else None),
+                    "life": life.fork_you(self, agent)},
             **extra,
         }
 
@@ -1085,6 +1138,9 @@ class Simulation:
             self._next(agent)
 
     def _log_roll(self, agent: Agent, what: str, p: float, roll: float, base: float | None = None) -> None:
+        if people.is_folk_id(agent.id):
+            people.log_roll(self, agent, what, p, roll)  # a townsperson's roll goes to the folk luck log
+            return
         entry = {"tick": self.clock.tick, "agent": agent.id, "luck": round(agent.luck, 1), "what": what,
                  "base_p": base, "p": round(p, 4), "roll": round(roll, 4), "hit": roll < p}
         self.luck_log.append(entry)
@@ -1142,6 +1198,8 @@ class Simulation:
                 self._bump(agent, key[1], value)
             elif key == "delay":
                 continue  # when it lands, not what it does
+            elif isinstance(key, str) and people.apply_effect(self, agent, key, value):
+                pass  # a life effect (people.EFFECTS)
             elif isinstance(key, str):
                 housing.apply_effect(self, agent, key, value)  # home_condition, hh_money, buy, ... (P2)
         if "meet_new" in out.effects:
@@ -1217,9 +1275,9 @@ class Simulation:
         extra = opt.extra
         if "invite" in extra:
             inv = self.invites.get(extra["invite"])
-            if inv:
+            host = people.person(self, inv["from"]) if inv else None
+            if inv and host is not None:
                 inv["status"] = extra["answer"]
-                host = self.agents[inv["from"]]
                 words = {"accept": "accepts", "decline": "declines", "later": "suggests another day for",
                          "ignore": "ignores"}[extra["answer"]]
                 self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent,
@@ -1298,6 +1356,7 @@ class Simulation:
             self.event(f"{agent.name} finally buys {agent.goal['name']}!", agent, tag="goal_reached")
             agent.goal = None
         housing.apply_extra(self, agent, fork, opt)  # move, repair, works, belt_tighten, ... (P2)
+        people.apply_extra(self, agent, fork, opt)  # life's forks' extras (people.HANDLERS)
 
     def _interruptible(self, other: Agent) -> bool:
         """Free to be asked along: idle or doing something leisurely, not asleep, working or deciding."""
@@ -1326,6 +1385,10 @@ class Simulation:
     # --- invites and messages ---------------------------------------------------
 
     def invite(self, host: Agent, guest_id: str, place_id: str) -> dict | None:
+        if people.is_folk_id(getattr(host, "id", None)):
+            return None  # townsfolk invite nobody through here
+        if people.is_folk_id(guest_id):
+            return social.invite_folk(self, host, guest_id, place_id)
         guest = self.agents.get(guest_id)
         if not host.alive or not guest or guest is host or not guest.alive or place_id not in self.town.places:
             return None
@@ -1345,14 +1408,17 @@ class Simulation:
             if inv["status"] == "pending" and self.clock.tick - inv["tick"] > INVITE_MINUTES:
                 inv["status"] = "expired"
             elif inv["status"] == "pending" and inv.get("host_goes"):
-                host = self.agents[inv["from"]]
-                if not host.alive or host.activity not in MEET or host.activity_place != inv["place"]:
+                host = people.person(self, inv["from"])
+                if host is None or not host.alive or host.activity not in MEET or host.activity_place != inv["place"]:
                     inv["status"] = "expired"  # the host has already left
             if inv["status"] != "pending" and self.clock.tick - inv["tick"] > INVITE_MINUTES * 2:
                 del self.invites[inv["id"]]
 
     def send_message(self, from_id: str, to_id: str, text: str) -> dict:
-        a, b = self.agents.get(from_id), self.agents.get(to_id)
+        a = self.agents.get(from_id)
+        if a is not None and a.alive and people.is_folk_id(to_id):
+            return social.message_folk(self, a, to_id, text)  # a text to a townsperson
+        b = self.agents.get(to_id)
         if not a or not b or not a.alive or not b.alive:
             return {"ok": False, "error": "unknown or dead character"}
         if a is b:
@@ -1374,11 +1440,18 @@ class Simulation:
     # --- God's only power, and the character pages -----------------------------
 
     def set_luck(self, agent_id: str, luck: float) -> bool:
+        if people.is_folk_id(agent_id):
+            return bool(self.folk.set_luck(agent_id, max(0.0, min(100.0, float(luck)))))
         agent = self.agents.get(agent_id)
         if not agent:
             return False
         agent.luck = max(0.0, min(100.0, float(luck)))
         return True
+
+    def luck_of(self, pid: str) -> float | None:
+        """Anyone's Luck (named or townsperson), or None for an unknown id."""
+        p = people.person(self, pid)
+        return p.luck if p is not None else None
 
     def set_profile(self, agent_id: str, prompt: str | None = None, traits: dict | None = None) -> bool:
         agent = self.agents.get(agent_id)
@@ -1460,7 +1533,7 @@ class Simulation:
     # --- snapshots ---------------------------------------------------------------
 
     def town_json(self) -> dict:
-        """God's map, sent once in `welcome` (PLAN 3.2)."""
+        """God's map, sent once in `welcome` (PLAN 3.2; in the region, region.md 8: RegionMap.map_json + v2's keys)."""
         return {**self.town.map_json(), "homes": housing.town_homes_json(self), "housing": housing.town_housing_json(),
                 "stops": transit.stops_json(), "timetable": self.timetable()}
 
@@ -1473,8 +1546,11 @@ class Simulation:
             "agents": [{"id": a.id, "name": a.name, "x": a.x, "y": a.y, "inside": a.inside, "state": a.state,
                         "activity": a.activity, "vehicle": a.vehicle, "mood": round(a.mood), "luck": round(a.luck),
                         "controller": a.controller, "alive": a.alive, "age": a.age,
-                        "home": self.households[a.household_id].home_id, "car": a.owns_car, "riding": a.riding}
+                        "home": self.households[a.household_id].home_id, "car": a.owns_car, "riding": a.riding,
+                        "ill": life.ill(a), "stage": life.stage(a)}
                        for a in self.agents.values()],
+            "trains": self.trains(), "crowd": self.folk.crowd(self), "folk_n": self.folk.n,
+            "talks": social.talks_json(self),
         }
         if housing:
             state.update(self.housing_maps())
@@ -1485,12 +1561,14 @@ class Simulation:
         return {"lots": housing.lots_json(self), "homes": housing.homes_json(self)}
 
     def agent_json(self, agent_id: str) -> dict | None:
+        if people.is_folk_id(agent_id):
+            return self.folk.page_json(self, agent_id)  # a townsperson's page (view.md 4.3)
         a = self.agents.get(agent_id)
         if not a:
             return None
         hh = self.household(a)
         return {
-            "id": a.id, "name": a.name, "age": a.age, "alive": a.alive, "state": a.state,
+            "id": a.id, "kind": "named", "name": a.name, "age": a.age, "alive": a.alive, "state": a.state,
             "activity": a.activity, "place": a.activity_place, "inside": a.inside, "luck": round(a.luck, 1),
             "money": round(a.money, 2), "health": round(a.health, 1), "mood": round(a.mood),
             "reputation": round(a.reputation), "needs": {k: round(v, 1) for k, v in a.needs.items()},
@@ -1499,8 +1577,9 @@ class Simulation:
                         "learned": a.profile.learned},
             **housing.agent_page_fields(self, a),
             "possessions": self.possessions(a),
-            "relationships": {oid: {**r.to_json(), "name": self.agents[oid].name}
+            "relationships": {oid: people.rel_row(self, oid, r)
                               for oid, r in sorted(a.relationships.items(), key=lambda kv: -kv[1].affinity)},
             "memory": a.memory[-15:], "inbox": a.inbox[-10:], "forks": a.forks[-10:],
             "household": [self.agents[m].name for m in hh.member_ids],
+            "life": life.page(self, a),
         }

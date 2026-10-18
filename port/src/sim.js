@@ -8,6 +8,11 @@
 // `housing` (homes, rent, upkeep), `travel` and `transit` (getting around), `chronicle` (event tags) and
 // `stats` (counters and samples).
 //
+// v3 (PLAN 2.1-2.4): opts.world "region" builds the region (region.build_region) with its trains (rail), and
+// opts.folk townsfolk (people.make_folk, sim.folk); life, career, money and social run the life rules for both tiers
+// through the hook lines of life.md 7, each a one-line call into its module (G.<module>, read at call time). World
+// "millbrook", folk 0 (the default) is v2's city.
+//
 // Port notes: Python's random.Random(seed) is SimDice here (mulberry32 with the same four helpers), so the
 // outcome dice differ from Python's while every probability is the same (PLAN decision 22). `luck_log_path` is
 // a function that receives each JSON line, or null. Fork ids come from `_fork_ids` (see forks.js).
@@ -73,12 +78,17 @@
   for (const [name, spec] of Object.entries(G.housing.ACTIVITIES_EXTRA)) {
     ACTIVITIES[name] = new Activity(spec.minutes, Object.assign({}, spec.gains), spec.inside);
   }
+  // life's activities (life.md 7): the ward, a doctor's visit, a newborn's day.
+  for (const [name, spec] of Object.entries(G.life.ACTIVITIES_EXTRA)) {
+    ACTIVITIES[name] = new Activity(spec.minutes, Object.assign({}, spec.gains), spec.inside);
+  }
 
   // How fast needs drop during some activities (default 1.0).
   const DECAY_SCALE = {
     sleep: { energy: 0.0, hunger: 0.35, social: 0.0, fun: 0.0 },
     work: { social: 0.0, fun: 1.3, hunger: 0.6 },
     hospital: { social: 0.5, fun: 0.5 },
+    ward: { social: 0.5, fun: 0.5 }, // life's hospital stay, like v2's afternoon in hospital
   };
 
   const LIGHT_CYCLE = 6; // minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
@@ -110,6 +120,7 @@
   const QUIET = ["tasty", "deep_sleep", "unwind", "bonding", "feast", "cosy_night"]; // routine good meals, sleep, rest and
   // dinners: kept in the decision's `happened` only, unless the outcome is news (importance 1 or more); a dinner out is its own one line
   const VARIED_MONEY = { breakthrough: [20, 120] }; // outcome id -> the whole-dollar range its money is drawn from as it lands
+  const WORLDS = ["millbrook", "region"]; // new Simulation(..., {world}): v2's 80 x 50 town, or the region around it (PLAN 2.1)
 
   // One decimal, rounding half up (floor(x * 10 + 0.5) / 10), as the Python twin does.
   const _r1 = x => Math.floor(x * 10 + 0.5) / 10;
@@ -129,15 +140,26 @@
   const defaultNow = () => (globalThis.performance ? globalThis.performance.now() / 1000 : Date.now() / 1000);
 
   class Simulation {
-    // new Simulation(seed = 1, now = monotonic seconds, luck_log_path = null, dice = seed): `dice` seeds the
-    // outcome dice on their own (the page rolls fresh dice for the same city on every load).
-    constructor(seed = 1, now = null, luck_log_path = null, dice = null) {
+    // new Simulation(seed = 1, now = monotonic seconds, luck_log_path = null, dice = seed, opts = {world, folk,
+    // folk_isolated}): `dice` seeds the outcome dice and the keyed behaviour streams on their own (the page rolls
+    // fresh dice for the same city on every load); Python's twin takes it as dice_seed.
+    constructor(seed = 1, now = null, luck_log_path = null, dice = null, opts = {}) {
       const { housing, stats, town, cast } = G;
+      const world = opts.world ?? "millbrook";
+      if (!WORLDS.includes(world)) throw new PyError("ValueError", `world must be one of ${WORLDS.join(", ")}`);
       this.seed = seed;
-      this.rng = new SimDice(dice === null || dice === undefined ? seed : dice);
+      this.dice_seed = dice === null || dice === undefined ? seed : dice; // the keyed behaviour streams (dice.stream)
+      this.world = world;
+      this.folk_isolated = Boolean(opts.folk_isolated);
+      const folk = world === "region" ? Math.max(0, Math.trunc(opts.folk ?? 0)) : 0; // townsfolk live in the region only
+      this.rng = new SimDice(this.dice_seed);
       this.now = now || defaultNow;
       this.clock = new G.clock.Clock();
-      this.town = town.build_map(seed); // shared with every Simulation of this seed: never changed
+      if (world === "region") {
+        this.town = G.region.build_region(seed); // shared and read-only, like build_map's
+      } else {
+        this.town = town.build_map(seed); // shared with every Simulation of this seed: never changed
+      }
       this.homes = housing.build_homes(this.town); // home id -> Home
       this.lots = housing.build_lots(this.town, this.homes); // residential place id -> Lot (its condition)
       [this.agents, this.households] = cast.build_cast(this.town, this.homes, seed);
@@ -162,12 +184,23 @@
       this._fork_ids = 0; // forks.build_fork numbers forks from here (Python: a module-wide counter)
       this._host_hold = new Map(); // host id -> tick they wait at an invite place until
       this._lawns = new Map(); // park id -> its lawn tiles, where a stroll heads
+      this.folk = new G.people.NoFolk(); // until make_folk below: nobody, every call a no-op
+      G.life.pre_init(this); // sim.life, and the job board with the named jobs
+      this.folk = G.people.make_folk(this, folk, this.folk_isolated); // folk_gen fills the board
+      G.life.init(this); // everyone's LifeState, and the start
+      G.social.init(this);
       this._roll_weather();
     }
 
     // --- lookups used by the fork builders -----------------------------------
 
     household(agent) { return this.households.get(agent.household_id); }
+
+    // A named Agent or a townsperson by id, or null (people.person).
+    person(pid) { return G.people.person(this, pid); }
+
+    // A named Household or a townsfolk household by id, or null (people.household_by_id).
+    household_by_id(hid) { return G.people.household_by_id(this, hid); }
 
     // The place id of the character's home: the house, or the apartment block of a flat.
     home_of(agent) { return this.homes.get(this.household(agent).home_id).place; }
@@ -253,9 +286,11 @@
     // event(text, agent, kind, {tag, importance, agents, place, remember}): `tag` is a key of
     // chronicle.EVENT_TAGS and gives the kind and importance unless the call names them. `place` is a place id:
     // the one given, else where the character is or is headed, else null. remember=false (and the God-only
-    // tags) keeps the line out of the character's memory.
+    // tags) keeps the line out of the character's memory. Returns null when people.news_gate drops it (the
+    // townsfolk-only news cap, PLAN 2.8).
     event(text, agent = null, kind = null, o = {}) {
       const tag = o.tag ?? "other";
+      if (!G.people.news_gate(this, tag, o.importance ?? null, agent, o.agents ?? null)) return null;
       const remember = o.remember ?? true;
       let place = o.place ?? null;
       if (place === null && agent) place = agent.inside || agent.activity_place;
@@ -293,12 +328,21 @@
       const m = this.clock.minute_of_day;
       if (m === 6 * 60 || m === 14 * 60) this._roll_weather();
       if (m === 0) this._new_day();
-      if (this.clock.weekday === 6 && m === 23 * 60) G.housing.weekly_charges(this); // rent or property tax, and bills
-      if (this.clock.weekday === 4 && m === 9 * 60) this._pay_pensions();
+      if (this.clock.weekday === 6 && m === 23 * 60) {
+        G.housing.weekly_charges(this); // rent or property tax, and bills
+        this.folk.weekly(this);
+      }
+      if (this.clock.weekday === 4 && m === 9 * 60) {
+        this._pay_pensions();
+        this.folk.pensions(this);
+      }
       this._check_timeouts();
       this._expire_invites();
       G.housing.tick(this);
+      G.life.tick(this);
       for (const agent of this.living()) this._tick_agent(agent);
+      this.folk.tick(this);
+      G.social.tick(this);
       if (m % 60 === 0) this.stats.sample(this);
     }
 
@@ -318,24 +362,12 @@
     }
 
     _new_day() {
-      const { DAYS_PER_SEASON, SEASONS } = G.clock;
-      for (const agent of this.living()) {
-        // Old age: a small daily chance from 70, which Luck softens.
-        if (agent.age >= 70) {
-          // About 0.75% a month at 74 and 3.6% at 80 (at Luck 50), so a death in the first weeks is rare.
-          const p = G.forks.luck_odds(0.00001 * (agent.age - 69) ** 2, -1, agent.luck);
-          const roll = this.rng.random();
-          this._log_roll(agent, "old_age", p, roll);
-          if (roll < p) this._die(agent, "passed away peacefully in their sleep");
-        }
-      }
-      if (this.clock.day % (DAYS_PER_SEASON * SEASONS.length) === 0 && this.clock.day) {
-        for (const agent of this.living()) agent.age += 1;
-      }
+      G.life.legacy_ageing(this); // v2's old-age roll and yearly birthday, until life's own rules replace them
       for (const agent of this.living()) {
         if (agent.car_at && !G.travel.car_here(this, agent)) agent.car_at = null; // a car left elsewhere is fetched home overnight
       }
       G.housing.nightly(this);
+      this.folk.nightly(this);
       this.stats.reset_day();
     }
 
@@ -366,7 +398,17 @@
       return null;
     }
 
-    timetable() { return G.transit.timetable_json(); }
+    timetable() {
+      let table = G.transit.timetable_json();
+      if (this.world === "region") table = Object.assign({}, table, { train: G.rail.timetable_json(this.town) });
+      return table;
+    }
+
+    // `state.trains` (region.md 8): a pure function of the tick, riders from the townsfolk; [] in millbrook.
+    trains() {
+      if (this.world !== "region") return [];
+      return G.rail.train_rows(this.town, this.clock.tick, this.folk.riders(this.clock.tick));
+    }
 
     // --- agents ---------------------------------------------------------------
 
@@ -395,11 +437,16 @@
       }
       if (agent.needs.hunger <= 0) agent.health -= 0.03;
       if (agent.needs.energy <= 0) agent.health -= 0.02;
-      if (Math.min(...Object.values(agent.needs)) > 40 && agent.health < 100) agent.health = Math.min(100.0, agent.health + 0.004);
+      const top = G.life.max_health(agent); // 100, less with a chronic condition
+      if (Math.min(...Object.values(agent.needs)) > 40 && agent.health < top) agent.health = Math.min(top, agent.health + 0.004);
     }
 
     // Start the next planned step, or let the Director find the next decision.
     _next(agent) {
+      if (agent.age < G.life.FORK_AGE) {
+        G.life.toddle(this, agent); // too young for forks: life's day for a small child
+        return;
+      }
       if (agent.plan.length && this._must_leave_for_work(agent, agent.plan[0][1])
         && !agent.plan.some(s => s[0] === "work")) {
         agent.plan = []; // drop the rest of the plan: it's time to head to work
@@ -414,9 +461,7 @@
         if (agent.state !== "idle" || agent.plan.length) return; // an outcome set the character off (a haggle's deal: moving house)
       }
       if (agent.health < 25 && agent.inside !== "hospital") {
-        this.event(`${agent.name} feels very unwell, and an ambulance takes them to `
-          + `${this.town.places.get("hospital").name}.`, agent, null, { tag: "hospital" });
-        this.start_plan(agent, [["hospital", "hospital"]], "ambulance"); // free; the hospital's fee stays
+        G.life.hospitalise(this, agent, 1, "very unwell"); // the ambulance (v2: an afternoon; life: the ward)
         return;
       }
       const fork = G.forks.build_fork(this, agent);
@@ -611,6 +656,8 @@
         // Paid from the shift start, not for turning up early.
         const start = agent.job ? tick - this.clock.minute_of_day + agent.job.start_hour * 60 : tick;
         agent.work_started = Math.max(tick, Math.min(start, agent.busy_until - 30));
+      } else if (agent.activity === "ward") {
+        agent.busy_until = agent.life.ward_until; // life's hospital stay: until the ward lets them go
       } else if (agent.activity === "sleep") {
         // Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
         // commute from home (the usual way, the worst bus wait counted) for the long ones.
@@ -641,7 +688,7 @@
       }
       // Nothing runs into today's shift (the work fork offers a coffee on the way only while it fits before it).
       const start = this._shift_start_tick(agent);
-      if (agent.activity !== "work" && agent.activity !== "hospital" && start !== null
+      if (agent.activity !== "work" && agent.activity !== "hospital" && agent.activity !== "ward" && start !== null
         && !agent.plan.some(s => s[0] === "work")) {
         const leave = start - this.commute_minutes(agent) - SHIFT_MARGIN; // as _must_leave_for_work counts it
         agent.busy_until = Math.max(tick + 1, Math.min(agent.busy_until, leave));
@@ -754,7 +801,7 @@
           agent.money += pay;
           agent.week_earnings += pay;
         }
-        agent.reputation = Math.min(100.0, agent.reputation + 0.5);
+        G.career.on_shift_end(this, agent); // standing at work (v2: reputation +0.5 a shift)
       } else if (agent.activity === "buy_groceries") {
         this.household(agent).groceries += 10;
       } else if (agent.activity === "hospital") {
@@ -788,7 +835,8 @@
       for (const inv of this.invites.values()) {
         if (inv.from === agent.id && inv.status === "pending") {
           inv.status = "expired";
-          const guest = this.agents.get(inv.to);
+          const guest = G.people.person(this, inv.to);
+          if (guest === null || guest === undefined) continue;
           const asked = this.forks.get(guest.fork_id || "");
           if (asked && asked.kind === "invite" && getd(asked.options[0].extra, "invite", null) === inv.id) {
             this._withdraw_fork(guest); // the guest can't accept a dead host's invite
@@ -806,6 +854,7 @@
       }
       this.household(agent).member_ids = this.household(agent).member_ids.filter(m => m !== agent.id);
       G.housing.on_death(this, agent);
+      G.life.on_death(this, agent); // widowhood, grief, the job slot, loans, the agenda (both tiers)
     }
 
     // Stop asking a character's open fork: nothing is played for it and answers are refused.
@@ -963,7 +1012,7 @@
       const extra = this.speed ? { minutes_per_second: G.clock.TICKS_PER_REAL_SECOND * this.speed } : {};
       return Object.assign({
         type: "fork", fork_id: fork.id, agent_id: agent.id, kind: fork.kind,
-        question: fork.question, options, time: this.clock.stamp(),
+        question: fork.question, about: fork.about, options, time: this.clock.stamp(),
         deadline_seconds: ANSWER_SECONDS, weather: this.weather, season: this.clock.season,
         profile_scores: fork.scores.slice(),
         you: Object.assign({ name: agent.name, profile: agent.profile.prompt, money: pyRound(agent.money, 2),
@@ -973,7 +1022,8 @@
           savings: G.rng.r2(agent.savings), where_name: here ? here.name : "outside",
           home_name: this.homes.get(hh.home_id).name }, G.housing.fork_you(this, agent),
         { today: G.forks.today_line(this, agent), recent,
-          payer: payer !== agent ? { name: payer.name, money: pyRound(payer.money, 2) } : null }),
+          payer: payer !== agent ? { name: payer.name, money: pyRound(payer.money, 2) } : null,
+          life: G.life.fork_you(this, agent) }),
       }, extra);
     }
 
@@ -1154,6 +1204,10 @@
     }
 
     _log_roll(agent, what, p, roll, base = null) {
+      if (G.people.is_folk_id(agent.id)) {
+        G.people.log_roll(this, agent, what, p, roll); // a townsperson's roll goes to the folk luck log
+        return;
+      }
       const entry = { tick: this.clock.tick, agent: agent.id, luck: pyRound(agent.luck, 1), what,
         base_p: base, p: pyRound(p, 4), roll: pyRound(roll, 4), hit: roll < p };
       this.luck_log.push(entry);
@@ -1212,6 +1266,8 @@
           this._bump(agent, key.slice(REL.length), value);
         } else if (key === "delay") {
           continue; // when it lands, not what it does
+        } else if (G.people.apply_effect(this, agent, key, value)) {
+          // a life effect (people.EFFECTS)
         } else {
           G.housing.apply_effect(this, agent, key, value); // home_condition, hh_money, buy, ... (P2)
         }
@@ -1291,9 +1347,9 @@
       const extra = opt.extra;
       if (hasOwn(extra, "invite")) {
         const inv = this.invites.get(extra.invite);
-        if (inv) {
+        const host = inv ? G.people.person(this, inv.from) : null;
+        if (inv && host !== null && host !== undefined) {
           inv.status = extra.answer;
-          const host = this.agents.get(inv.from);
           const words = { accept: "accepts", decline: "declines", later: "suggests another day for",
             ignore: "ignores" }[extra.answer];
           this.event(`${agent.name} ${words} ${firstName(host.name)}'s invite.`, agent, null,
@@ -1383,6 +1439,7 @@
         agent.goal = null;
       }
       G.housing.apply_extra(this, agent, fork, opt); // move, repair, works, belt_tighten, ... (P2)
+      G.people.apply_extra(this, agent, fork, opt); // life's forks' extras (people.HANDLERS)
     }
 
     // Free to be asked along: idle or doing something leisurely, not asleep, working or deciding.
@@ -1411,6 +1468,8 @@
     // --- invites and messages ---------------------------------------------------
 
     invite(host, guest_id, place_id) {
+      if (G.people.is_folk_id(host ? host.id : null)) return null; // townsfolk invite nobody through here
+      if (G.people.is_folk_id(guest_id)) return G.social.invite_folk(this, host, guest_id, place_id);
       const guest = this.agents.get(guest_id);
       if (!host.alive || !guest || guest === host || !guest.alive || !this.town.places.has(place_id)) return null;
       this._invite_ids += 1;
@@ -1430,8 +1489,8 @@
         if (inv.status === "pending" && this.clock.tick - inv.tick > INVITE_MINUTES) {
           inv.status = "expired";
         } else if (inv.status === "pending" && inv.host_goes) {
-          const host = this.agents.get(inv.from);
-          if (!host.alive || !MEET.includes(host.activity) || host.activity_place !== inv.place) {
+          const host = G.people.person(this, inv.from);
+          if (host === null || host === undefined || !host.alive || !MEET.includes(host.activity) || host.activity_place !== inv.place) {
             inv.status = "expired"; // the host has already left
           }
         }
@@ -1440,7 +1499,9 @@
     }
 
     send_message(from_id, to_id, text) {
-      const a = this.agents.get(from_id), b = this.agents.get(to_id);
+      const a = this.agents.get(from_id);
+      if (a !== undefined && a.alive && G.people.is_folk_id(to_id)) return G.social.message_folk(this, a, to_id, text); // a text to a townsperson
+      const b = this.agents.get(to_id);
       if (!a || !b || !a.alive || !b.alive) return { ok: false, error: "unknown or dead character" };
       if (a === b) return { ok: false, error: "can't message yourself" };
       text = cut(text, 500);
@@ -1460,10 +1521,17 @@
     // --- God's only power, and the character pages -----------------------------
 
     set_luck(agent_id, luck) {
+      if (G.people.is_folk_id(agent_id)) return Boolean(this.folk.set_luck(agent_id, pyClamp(pyFloat(luck), 0.0, 100.0)));
       const agent = this.agents.get(agent_id);
       if (!agent) return false;
       agent.luck = pyClamp(pyFloat(luck), 0.0, 100.0);
       return true;
+    }
+
+    // Anyone's Luck (named or townsperson), or null for an unknown id.
+    luck_of(pid) {
+      const p = G.people.person(this, pid);
+      return p !== null && p !== undefined ? p.luck : null;
     }
 
     set_profile(agent_id, prompt = null, traits = null) {
@@ -1545,7 +1613,7 @@
 
     // --- snapshots ---------------------------------------------------------------
 
-    // God's map, sent once in `welcome` (PLAN 3.2).
+    // God's map, sent once in `welcome` (PLAN 3.2; in the region, region.md 8: RegionMap.map_json + v2's keys).
     town_json() {
       return Object.assign(this.town.map_json(), { homes: G.housing.town_homes_json(this),
         housing: G.housing.town_housing_json(), stops: G.transit.stops_json(), timetable: this.timetable() });
@@ -1560,7 +1628,10 @@
         agents: Array.from(this.agents.values(), a => ({ id: a.id, name: a.name, x: a.x, y: a.y, inside: a.inside,
           state: a.state, activity: a.activity, vehicle: a.vehicle, mood: pyRound(a.mood), luck: pyRound(a.luck),
           controller: a.controller, alive: a.alive, age: a.age,
-          home: this.households.get(a.household_id).home_id, car: a.owns_car, riding: a.riding })),
+          home: this.households.get(a.household_id).home_id, car: a.owns_car, riding: a.riding,
+          ill: G.life.ill(a), stage: G.life.stage(a) })),
+        trains: this.trains(), crowd: this.folk.crowd(this), folk_n: this.folk.n,
+        talks: G.social.talks_json(this),
       };
       if (with_housing) Object.assign(state, this.housing_maps());
       return state;
@@ -1570,6 +1641,7 @@
     housing_maps() { return { lots: G.housing.lots_json(this), homes: G.housing.homes_json(this) }; }
 
     agent_json(agent_id) {
+      if (G.people.is_folk_id(agent_id)) return this.folk.page_json(this, agent_id); // a townsperson's page (view.md 4.3)
       const a = this.agents.get(agent_id);
       if (!a) return null;
       const hh = this.household(a);
@@ -1577,10 +1649,10 @@
       for (const [k, v] of Object.entries(a.needs)) needs[k] = pyRound(v, 1);
       const relationships = {};
       for (const [oid, r] of sortedBy(Array.from(a.relationships), kv => -kv[1].affinity)) {
-        relationships[oid] = Object.assign(r.to_json(), { name: this.agents.get(oid).name });
+        relationships[oid] = G.people.rel_row(this, oid, r);
       }
       return Object.assign({
-        id: a.id, name: a.name, age: a.age, alive: a.alive, state: a.state,
+        id: a.id, kind: "named", name: a.name, age: a.age, alive: a.alive, state: a.state,
         activity: a.activity, place: a.activity_place, inside: a.inside, luck: pyRound(a.luck, 1),
         money: pyRound(a.money, 2), health: pyRound(a.health, 1), mood: pyRound(a.mood),
         reputation: pyRound(a.reputation), needs,
@@ -1592,6 +1664,7 @@
         relationships,
         memory: a.memory.slice(-15), inbox: a.inbox.slice(-10), forks: a.forks.slice(-10),
         household: hh.member_ids.map(m => this.agents.get(m).name),
+        life: G.life.page(this, a),
       });
     }
   }
@@ -1600,6 +1673,6 @@
     ANSWER_SECONDS, LEARN_SECONDS, INVITE_MINUTES, PENSION, BILLS_PER_ADULT, CAR_BILL, HOSPITAL_FEE, GROCERY_COST,
     SHIFT_MARGIN, LEISURE, HISTORY_SIZE, NEWS_SIZE, HEADLINES_SIZE, LLM_LOG_SIZE, AGENT_LLM_FORKS, income_tax,
     Activity, ACTIVITIES, DECAY_SCALE, LIGHT_CYCLE, STOP_AT_LIGHTS, ONE_WAY, BUS_GIVE_UP, FLIGHT_MINUTES, WANDER,
-    WANDER_EVERY, MEET, NEWS_EVERY, _r1, SimDice, Simulation,
+    WANDER_EVERY, MEET, NEWS_EVERY, WORLDS, _r1, SimDice, Simulation,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

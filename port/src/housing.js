@@ -1316,29 +1316,12 @@
     _event(sim, `The ${EMERGENCY_NAME[live.kind]} at ${home.name} is fixed.`, "emergency_settled", home.place, agent);
   }
 
-  // After a death and the household update: a home with nobody left alive goes back on the market (an estate
-  // sale; nobody inherits) or back to the landlord. Children left on their own keep the home.
+  // After a death and the household update: a household with nobody left alive is emptied
+  // (`on_household_empty`). Children left on their own keep the home.
   function on_death(sim, agent) {
-    const hh = sim.households.get(agent.household_id);
-    if (_members(sim, hh).length) return;
-    const home = sim.homes.get(hh.home_id);
-    if (home.household !== hh.id) return;
-    const now = sim.clock.tick, stamp = sim.clock.stamp();
-    home.household = null;
-    home.pending_emergency = null;
-    home.emergency = null;
-    release(home);
-    _history(home.history, { tick: now, time: stamp, event: "left", household: hh.id, price: null });
-    _history(hh.history, { tick: now, time: stamp, event: "left", home: home.id, name: home.name, price: null });
-    if (home.owner === hh.id) {
-      home.owner = "market";
-      home.listing = "for_sale";
-      home.shares = {};
-      _event(sim, `${home.name} goes on the market after ${agent.name}'s death.`, "home_listed", home.place, null,
-        [agent.id]);
-    } else {
-      home.listing = home.notice !== null ? null : "for_rent"; // a notice's sale goes ahead when it runs out
-    }
+    const hh = _life_household(sim, agent.household_id);
+    if (hh === null || _members(sim, hh).length) return;
+    on_household_empty(sim, hh, agent);
   }
 
   // --- group B: fork extras and outcome effects ------------------------------------------------
@@ -1528,4 +1511,75 @@
     buy_let_home, forced_move, weekly_charges, _stage_news, _just_moved_in, _change_condition, nightly, tick,
     fix_emergency, on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale, afford_score,
   };
+
+  // --- life: households ---
+  // life.js's (L2) household changes: a new household for a named who leaves one (a split, moving out), and an
+  // emptied household's home going back on the market or to the landlord. Townsfolk ids dispatch to the folk first.
+
+  // The household `hid` of either tier (`sim.household_by_id`, else v2's `sim.households`).
+  function _life_household(sim, hid) {
+    if (typeof sim.household_by_id === "function") return sim.household_by_id(hid) ?? null;
+    return sim.households.get(hid) ?? null;
+  }
+
+  // Move `members` (people of one tier, the first the head) out of their households into the vacant home
+  // `home_id`, as a new household; `how` is "rent" or "buy". Folk go to `sim.folk.new_household`. null when the
+  // home is not vacant.
+  function new_household(sim, members, home_id, how) {
+    if (!members.length) return null;
+    if (!sim.agents.has(members[0].id)) return sim.folk.new_household(sim, members, home_id, how);
+    const home = sim.homes.get(home_id);
+    if (home === undefined || home.household !== null) return null;
+    const base = G.py.lastName(members[0].name).toLowerCase();
+    let hid = base, n = 2;
+    while (sim.households.has(hid)) { hid = `${base}_${n}`; n += 1; }
+    const hh = new G.agent.Household(hid, home_id, how === "rent" ? home.rent : 0.0);
+    sim.households.set(hid, hh);
+    for (const a of members) {
+      const old = sim.households.get(a.household_id);
+      if (old !== undefined && old.member_ids.includes(a.id)) old.member_ids.splice(old.member_ids.indexOf(a.id), 1);
+      a.household_id = hid;
+      hh.member_ids.push(a.id);
+    }
+    const now = sim.clock.tick, stamp = sim.clock.stamp();
+    home.household = hid;
+    if (how === "buy") home.owner = hid;
+    release(home);
+    home.listing = null;
+    hh.moved_tick = now;
+    _history(home.history, { tick: now, time: stamp, event: "moved_in", household: hid, price: null });
+    _history(hh.history, { tick: now, time: stamp, event: "moved_in", home: home.id, name: home.name, price: null });
+    return hh;
+  }
+
+  // A household with nobody left alive: its home goes back on the market (an estate sale; nobody inherits) or
+  // back to the landlord. `agent` is the last to die, if a death emptied it. Folk households go to the folk.
+  function on_household_empty(sim, hh, agent = null) {
+    if (!sim.households.has(hh.id)) { sim.folk.on_household_empty(hh); return; }
+    const home = sim.homes.get(hh.home_id);
+    if (home.household !== hh.id) return;
+    const now = sim.clock.tick, stamp = sim.clock.stamp();
+    home.household = null;
+    home.pending_emergency = null;
+    home.emergency = null;
+    release(home);
+    _history(home.history, { tick: now, time: stamp, event: "left", household: hh.id, price: null });
+    _history(hh.history, { tick: now, time: stamp, event: "left", home: home.id, name: home.name, price: null });
+    if (home.owner === hh.id) {
+      home.owner = "market";
+      home.listing = "for_sale";
+      home.shares = {};
+      if (agent !== null) {
+        _event(sim, `${home.name} goes on the market after ${agent.name}'s death.`, "home_listed", home.place, null,
+          [agent.id]);
+      } else {
+        _event(sim, `${home.name} goes on the market.`, "home_listed", home.place);
+      }
+    } else {
+      home.listing = home.notice !== null ? null : "for_rent"; // a notice's sale goes ahead when it runs out
+    }
+  }
+
+  Object.assign(G.housing, { _life_household, new_household, on_household_empty });
+  // --- end life: households ---
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

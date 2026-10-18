@@ -39,8 +39,8 @@ STATE_BYTES, STATE_BYTES_LEAN = 24 * 1024, 19 * 1024
 SUMMARY_KEYS = {"id", "agent", "kind", "tick", "time", "question", "options", "choice", "decided_by", "reason",
                 "happened", "major", "controller", "model", "answer_seconds", "late", "profile_choice", "place"}
 EVENT_KEYS = {"seq", "tick", "time", "kind", "tag", "importance", "major", "text", "agent", "agents", "place", "at"}
-PLAN_BUILDERS = ["invite", "work", "hunger", "sleep", "repair", "payday", "groceries", "housing_trouble",
-                 "house_hunt", "upkeep", "lonely", "free_time"]
+PLAN_BUILDERS = ["invite", "work", "hunger", "sleep", "pending", "repair", "payday", "groceries", "housing_trouble",
+                 "house_hunt", "upkeep", "lonely", "free_time"]  # v3: life's prompts (people.pending_fork) after sleep
 
 RUN: dict = {}
 
@@ -177,7 +177,8 @@ class TownJsonTest(unittest.TestCase):
 class StateJsonTest(unittest.TestCase):
     def check_state(self, state: dict, housing_maps: bool = True) -> None:
         sim = RUN["sim"]
-        keys = {"tick", "time", "minute", "day", "season", "weather", "lights", "plane", "buses", "agents"}
+        keys = {"tick", "time", "minute", "day", "season", "weather", "lights", "plane", "buses", "agents",
+                "trains", "crowd", "folk_n", "talks"}  # v3 (PLAN 2.10): in both worlds
         self.assertEqual(set(state), keys | ({"lots", "homes"} if housing_maps else set()))
         self.assertNotIn("bus", state)  # replaced by buses
         self.assertIsInstance(state["buses"], list)
@@ -186,7 +187,7 @@ class StateJsonTest(unittest.TestCase):
         self.assertEqual(len(state["agents"]), CAST_SIZE)
         for row in state["agents"]:
             self.assertEqual(set(row), {"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood",
-                                        "luck", "controller", "alive", "age", "home", "car", "riding"})
+                                        "luck", "controller", "alive", "age", "home", "car", "riding", "ill", "stage"})
             self.assertTrue(all(is_int(row[k]) for k in ("x", "y", "mood", "luck", "age")))
             self.assertIn(row["vehicle"], ("walk", "run", "car", "taxi", "ambulance", "bus"))
             self.assertIn(row["home"], sim.homes)
