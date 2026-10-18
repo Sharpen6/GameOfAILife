@@ -1107,7 +1107,8 @@
   // --- incidents ------------------------------------------------------------------------------------------------------
 
   // Weekly, each workplace and school (Wednesday 11:00) and each block of homes (Sunday 20:00) with 3+ tied pairs
-  // present: an incident at odds(.04, -1, mean luck) between one such pair, affinity -15 and trust -5 both.
+  // present (acquaintances, coworkers, friends): an incident at odds(.04, -1, mean luck) between the pair who get on
+  // worst (lowest affinity both ways, then ids), affinity -15 and trust -5 both.
   function _incidents(sim, classes) {
     const folk = sim.folk;
     const mixed = P().mixed(sim);
@@ -1137,12 +1138,13 @@
         const pairs = [];
         for (const p of group) {
           for (const [oid, r] of p.relationships) {
-            if (ids.has(oid) && p.id < oid && (r.kind === COWORKER || r.kind === ACQ || r.kind === FRIEND
-              || r.kind === RIVAL)) pairs.push([p.id, oid]);
+            if (ids.has(oid) && p.id < oid && (r.kind === COWORKER || r.kind === ACQ || r.kind === FRIEND)) {
+              const back = P().person(sim, oid).relationships.get(p.id);
+              pairs.push([r.affinity + (back !== undefined ? back.affinity : 0.0), p.id, oid]);
+            }
           }
         }
         if (pairs.length < 3) continue;
-        pairs.sort(cmp);
         let luck = 0.0;
         for (const p of group) luck += p.luck;
         luck /= group.length;
@@ -1150,7 +1152,9 @@
         const prob = D().odds(0.04, -1, luck);
         const roll = rr.random();
         if (roll >= prob) continue;
-        const [lo, hi] = pairs[Math.floor(rr.random() * pairs.length)];
+        let worst = pairs[0];
+        for (const pr of pairs) if (cmp(pr, worst) < 0) worst = pr; // it flares up between the two who get on worst
+        const [, lo, hi] = worst;
         const a = P().person(sim, lo), b = P().person(sim, hi);
         P().log_roll(sim, a, "incident", prob, roll);
         bump(sim, a, b, -15, -15);

@@ -1166,7 +1166,8 @@ def _repay(sim, day) -> None:
 
 def _incidents(sim, classes) -> None:
     """Weekly, each workplace and school (Wednesday 11:00) and each block of homes (Sunday 20:00) with 3+ tied pairs
-    present: an incident at odds(.04, -1, mean luck) between one such pair, affinity -15 and trust -5 both."""
+    present (acquaintances, coworkers, friends): an incident at odds(.04, -1, mean luck) between the pair who get on
+    worst (lowest affinity both ways, then ids), affinity -15 and trust -5 both."""
     folk = getattr(sim, "folk", None)
     mixed = people.mixed(sim)
     present = {}
@@ -1194,11 +1195,11 @@ def _incidents(sim, classes) -> None:
             pairs = []
             for p in group:
                 for oid, r in p.relationships.items():
-                    if oid in ids and p.id < oid and r.kind in (COWORKER, ACQ, FRIEND, RIVAL):
-                        pairs.append((p.id, oid))
+                    if oid in ids and p.id < oid and r.kind in (COWORKER, ACQ, FRIEND):
+                        back = people.person(sim, oid).relationships.get(p.id)
+                        pairs.append((r.affinity + (back.affinity if back is not None else 0.0), p.id, oid))
             if len(pairs) < 3:
                 continue
-            pairs.sort()
             luck = 0.0
             for p in group:
                 luck += p.luck
@@ -1208,7 +1209,7 @@ def _incidents(sim, classes) -> None:
             roll = rr.random()
             if roll >= prob:
                 continue
-            lo, hi = pairs[math.floor(rr.random() * len(pairs))]
+            _, lo, hi = min(pairs)  # it flares up between the two who get on worst
             a, b = people.person(sim, lo), people.person(sim, hi)
             people.log_roll(sim, a, "incident", prob, roll)
             bump(sim, a, b, -15, -15)

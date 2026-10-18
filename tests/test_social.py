@@ -3,7 +3,13 @@ headline rule, the relationship cap, state.talks rows and townsfolk isolation.""
 
 from __future__ import annotations
 
+import json
+import math
+import os
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from gameofailife import people, social, talk
@@ -321,6 +327,102 @@ class FolkRoomsTest(unittest.TestCase):
         self.assertFalse(social.eligible(sim, a, f))
         cafe = next(pid for pid, k in sim.social.kind.items() if k == "cafe")
         self.assertIsNone(social.invite_folk(sim, a, f.id, cafe))
+
+
+NODE = os.environ.get("NODE") or shutil.which("node")
+PARITY = Path(__file__).resolve().parent.parent / "port" / "tools" / "parity_social.cjs"
+SOCIAL_TAGS = {"talk", "flirt", "new_friend", "falling_out", "rival", "row", "partner", "breakup", "divorce",
+               "moved_in", "engaged", "wedding", "loan", "meetup", "invite", "invite_accepted", "invite_declined",
+               "text"}
+
+
+class MulberryDice:
+    """port/src/sim.js's SimDice for the Python engine (as tests/test_port.py's)."""
+
+    def __init__(self, seed: int):
+        self.r = Rng((seed * 0x2545F491 + 0x6A09E667) & 0xFFFFFFFF)
+
+    def random(self) -> float:
+        return self.r.random()
+
+    def uniform(self, a: float, b: float) -> float:
+        return a + (b - a) * self.r.random()
+
+    def randrange(self, a: int, b: int) -> int:
+        return a + int(self.r.random() * (b - a))
+
+    def choice(self, seq):
+        return seq[int(self.r.random() * len(seq))]
+
+
+class DiceSim(Simulation):
+    """A Python Simulation rolling the JS port's dice, from the first weather roll on."""
+
+    def __init__(self, seed: int, dice: int):
+        self._dice = dice
+        super().__init__(seed=seed, dice_seed=dice)
+
+    def _roll_weather(self) -> None:
+        if not isinstance(self.rng, MulberryDice):
+            self.rng = MulberryDice(self._dice)
+        super()._roll_weather()
+
+
+def r6(x: float) -> float:
+    return math.floor(x * 1e6 + 0.5) / 1e6
+
+
+def snapshot(sim) -> dict:
+    rels = []
+    for a in sorted(sim.agents.values(), key=lambda x: x.id):
+        for oid in sorted(a.relationships):
+            r = a.relationships[oid]
+            rels.append([a.id, oid, r.kind.value, r6(r.affinity), r6(r.trust), r6(r.romance), r.since, r.seen,
+                         r.talks, r.married])
+    st = sim.social
+    return {
+        "tick": sim.clock.tick, "counts": {k: st.counts[k] for k in sorted(st.counts)}, "rels": rels,
+        "couples": sorted("|".join(c) for c in st.couples), "engaged": sorted([k, v] for k, v in st.engaged.items()),
+        "pending": [[a.id, [q["kind"] for q in a.life.pending]] for a in sim.agents.values()
+                    if a.life is not None and a.life.pending],
+        "talks": social.talks_json(sim),
+        "households": sorted([h.id, sorted(h.member_ids)] for h in sim.households.values()),
+    }
+
+
+def python_social(seed: int, days: int, dice: int) -> dict:
+    sim = DiceSim(seed, dice)
+    out = {"days": [], "events": []}
+    for _ in range(days * DAY):
+        sim.step()
+        events, _, _ = sim.drain()
+        out["events"] += [[e["tick"], e["tag"], e["text"]] for e in events if e["tag"] in SOCIAL_TAGS]
+        if sim.clock.minute_of_day == 0:
+            out["days"].append(snapshot(sim))
+    return out
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class SocialParityTest(unittest.TestCase):
+    """port/tools/parity_social.cjs: the 60 live eight days with social on, the same in both engines."""
+
+    def test_eight_days(self):
+        days = 8
+        run = subprocess.run([NODE, str(PARITY), "1", str(days), "5"], capture_output=True, text=True, timeout=600)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        js = json.loads(run.stdout)
+        py = python_social(1, days, 5)
+        a, b = py["events"], js["events"]
+        at = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        self.assertEqual(a[at:at + 1], b[at:at + 1], f"social events differ first at #{at} (Python first)")
+        self.assertEqual(len(a), len(b))
+        self.assertEqual(len(py["days"]), days)
+        for d, (got, want) in enumerate(zip(js["days"], py["days"]), 1):
+            for key in want:
+                self.assertEqual(got[key], want[key], f"day {d}: {key} differs (JS first)")
+        last = py["days"][-1]
+        self.assertGreater(last["counts"]["talks"], 60 * days * 3)
+        self.assertGreater(len(py["events"]), 100)
 
 
 if __name__ == "__main__":
