@@ -401,28 +401,32 @@ def _move_in(sim, agent, fork, opt, value) -> None:
 
 
 def _place_together(sim, a, b) -> bool:
-    """A new household for the two in the cheapest fitting rental; False when none is free."""
+    """A new household for the two, and the children under 18 each has at home, in the cheapest rental that fits
+    them all; False when none is free. A household they leave empty gives its home back (an owned one is sold)."""
     from . import housing
+    from types import SimpleNamespace
 
     fn = getattr(housing, "cheapest_rental", None)
-    hh = people.household(sim, a)
-    if fn is None or hh is None or getattr(housing, "new_household", None) is None:
+    olds = [people.household(sim, a), people.household(sim, b)]
+    if fn is None or None in olds or getattr(housing, "new_household", None) is None:
         return False
-    home = fn(sim, hh)
+    members = social.with_kids(sim, a)
+    for m in social.with_kids(sim, b):
+        if all(m.id != x.id for x in members):
+            members.append(m)
+    home = fn(sim, SimpleNamespace(member_ids=[m.id for m in members]))
     if home is None:
         return False
-    olds = [people.household(sim, a), people.household(sim, b)]
+    came = {m.id: m.household_id for m in members}
     try:
-        new = housing.new_household(sim, [a, b], home.id, "rent")
+        new = housing.new_household(sim, members, home.id, "rent")
     except NameError:  # housing.new_household before its Household import is fixed (see L1's handoff)
         return False
     if new is None:
         return False
-    for old in olds:  # a household the two leave empty gives its home back
-        if old is not None and old is not new and old.id in sim.households and not any(
-                people.person(sim, x) is not None and people.person(sim, x).alive for x in old.member_ids):
-            housing.on_household_empty(sim, old)
-            sim.households.pop(old.id, None)
+    for i, old in enumerate(olds):
+        if old is not new and not (i == 1 and old is olds[0]):
+            social.vacate(sim, old, [m for m in members if came[m.id] == old.id])
     for r in (a.relationships.get(b.id), b.relationships.get(a.id)):
         if r is not None:
             r.kind = social.PARTNER

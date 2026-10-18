@@ -369,23 +369,22 @@
     else if (act === "wait") S().bump(sim, q, agent, -5, 0);
   }
 
-  // A new household for the two in the cheapest fitting rental; false when none is free.
+  // A new household for the two, and the children under 18 each has at home, in the cheapest rental that fits
+  // them all; false when none is free. A household they leave empty gives its home back (an owned one is sold).
   function _place_together(sim, a, b) {
     const H = G.housing;
-    const hh = P().household(sim, a);
-    if (!H.cheapest_rental || nil(hh) || !H.new_household) return false;
-    const home = H.cheapest_rental(sim, hh);
-    if (nil(home)) return false;
     const olds = [P().household(sim, a), P().household(sim, b)];
-    const nw = H.new_household(sim, [a, b], home.id, "rent");
+    if (!H.cheapest_rental || olds.some(nil) || !H.new_household) return false;
+    const members = S().with_kids(sim, a);
+    for (const m of S().with_kids(sim, b)) if (members.every(x => x.id !== m.id)) members.push(m);
+    const home = H.cheapest_rental(sim, { member_ids: members.map(m => m.id) });
+    if (nil(home)) return false;
+    const came = new Map(members.map(m => [m.id, m.household_id]));
+    const nw = H.new_household(sim, members, home.id, "rent");
     if (nil(nw)) return false;
-    for (const old of olds) { // a household the two leave empty gives its home back
-      if (!nil(old) && old !== nw && sim.households.has(old.id)
-        && !old.member_ids.some(x => { const q = P().person(sim, x); return !nil(q) && q.alive; })) {
-        H.on_household_empty(sim, old);
-        sim.households.delete(old.id);
-      }
-    }
+    olds.forEach((old, i) => {
+      if (old !== nw && !(i === 1 && old === olds[0])) S().vacate(sim, old, members.filter(m => came.get(m.id) === old.id));
+    });
     for (const r of [a.relationships.get(b.id), b.relationships.get(a.id)]) {
       if (r !== undefined) {
         r.kind = G.agent.RelationKind.PARTNER;

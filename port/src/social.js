@@ -719,6 +719,29 @@
     if (f !== null && f.split) f.split(sim, p);
   }
 
+  // a and their own children under 18 who live with them: the ones who move when a moves.
+  function with_kids(sim, a) {
+    return [a].concat(P().members(sim, a).filter(m => m !== a && m.age < 18
+      && a.relationships.get(m.id) !== undefined && a.relationships.get(m.id).kind === FAMILY));
+  }
+
+  // `leavers` have moved out of household `old`. If nobody alive is left, its home goes back: an owned one is
+  // sold first, the proceeds into the savings of the adults who left (as housing.move_household credits a sale).
+  function vacate(sim, old, leavers) {
+    if (nil(old) || !sim.households.has(old.id)
+      || old.member_ids.some(x => { const q = P().person(sim, x); return !nil(q) && q.alive; })) return;
+    const H = G.housing;
+    const home = sim.homes.get(old.home_id);
+    if (home !== undefined && home.owner === old.id && home.household === old.id) {
+      let payees = leavers.filter(m => m.is_adult);
+      if (!payees.length) payees = leavers.slice();
+      const proceeds = H.sale_proceeds(sim, home.id);
+      for (const m of payees) m.savings += proceeds / payees.length;
+    }
+    H.on_household_empty(sim, old);
+    sim.households.delete(old.id);
+  }
+
   // mover (and their children under 18) join host's household; an emptied household's home goes back.
   function move_in(sim, mover, host) {
     if (P().is_named(mover) !== P().is_named(host)) return false;
@@ -730,18 +753,14 @@
       const old = P().household(sim, mover);
       const nw = P().household(sim, host);
       if (nil(old) || nil(nw) || old === nw) return false;
-      const movers = [mover].concat(P().members(sim, mover).filter(m => m !== mover && m.age < 18
-        && mover.relationships.get(m.id) !== undefined && mover.relationships.get(m.id).kind === FAMILY));
+      const movers = with_kids(sim, mover);
       for (const m of movers) {
         const i = old.member_ids.indexOf(m.id);
         if (i >= 0) old.member_ids.splice(i, 1);
         m.household_id = nw.id;
         nw.member_ids.push(m.id);
       }
-      if (!old.member_ids.some(x => { const q = P().person(sim, x); return !nil(q) && q.alive; })) {
-        G.housing.on_household_empty(sim, old);
-        sim.households.delete(old.id);
-      }
+      vacate(sim, old, movers);
     }
     const ra = mover.relationships.get(host.id), rb = host.relationships.get(mover.id);
     if (ra !== undefined && rb !== undefined) {
@@ -1439,7 +1458,7 @@
     FRIEND_AT, RIVAL_AT, RIVAL_OFF, REL_CAP, CHEM_MIN, ASK_ROMANCE, ASK_AFFINITY, RING, TALKS_SHOWN, TALKS_WINDOW,
     DATE_HOUR, WEDDING_HOUR, COOL, FOLK_TEXTS, TOPIC_WORDS, SocialState,
     init, tick, converse, on_affinity, bump, trait_gap, compat, talk_ctx, partner_of, attracted, eligible, chemistry,
-    ask_out, folk_answer, start_dating, end_couple, move_in, engage, date_roll, lend, message_folk, invite_folk,
+    ask_out, folk_answer, start_dating, end_couple, move_in, with_kids, vacate, engage, date_roll, lend, message_folk, invite_folk,
     pick_companion, talks_json, seed_story, _cool, _set_cool, _rooms, _run_room, _nightly, _dates, _lending,
     _incidents, _weddings, _folk_texts, _crushes, _rebuild_couples, _named_place, _ensure, _drop, _evict, _count,
     _home_day, _dating_day, _mover, _leave_home, _closest_eligible, _headline, _named_talk, _upkeep,

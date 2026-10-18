@@ -5,8 +5,9 @@ real fork in a running city."""
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
-from gameofailife import people, social, social_forks
+from gameofailife import agent as agent_mod, housing, people, social, social_forks
 from gameofailife.agent import RelationKind
 from gameofailife.sim import Simulation
 
@@ -206,6 +207,75 @@ class HandlersTest(unittest.TestCase):
         self.assertEqual(a.household_id, b.household_id)
         self.assertEqual(a.relationships[b.id].kind, PARTNER)
         self.assertTrue(a.household_id not in old or b.household_id == a.household_id)
+
+
+class MovingHomeTest(unittest.TestCase):
+    """Moving in together takes each one's children under 18 along, and an owned home left empty is sold for the
+    one who leaves it (not handed to the market for nothing)."""
+
+    def _parent_and_partner(self, sim):
+        for a in sorted(sim.agents.values(), key=lambda x: x.id):
+            kids = [m for m in social.with_kids(sim, a) if m is not a]
+            if a.is_adult and kids and all(m.is_adult is False for m in kids) and len(
+                    [m for m in people.members(sim, a) if m.is_adult]) == 1:
+                b = next(b for b in sorted(sim.agents.values(), key=lambda x: x.id)
+                         if b.is_adult and b.household_id != a.household_id
+                         and len(people.members(sim, b)) == 1 and not b.relationships.get(a.id))
+                return a, kids, b
+        raise AssertionError("no single parent in seed 1")
+
+    def test_place_together_takes_the_children(self):
+        sim = Simulation(1)
+        a, kids, b = self._parent_and_partner(sim)
+        old_a, old_b = a.household_id, b.household_id
+        people.set_rel(sim, a.id, b.id, PARTNER, 60, romance=70.0)
+        with mock.patch.object(housing, "Household", agent_mod.Household, create=True):
+            self.assertTrue(social_forks._place_together(sim, a, b))
+        new = sim.households[a.household_id]
+        self.assertEqual(b.household_id, new.id)
+        self.assertEqual(sorted(new.member_ids), sorted([a.id, b.id] + [k.id for k in kids]))
+        for k in kids:
+            self.assertEqual(k.household_id, new.id, k.id)
+        self.assertNotIn(old_a, sim.households)  # nobody is left behind in the old homes
+        self.assertNotIn(old_b, sim.households)
+        self.assertTrue(housing.fits(sim, new, sim.homes[new.home_id]))
+
+    def test_an_owned_home_left_empty_is_sold_for_the_mover(self):
+        for how in ("move_in", "together"):
+            sim = Simulation(1)
+            a = next(a for a in sorted(sim.agents.values(), key=lambda x: x.id)
+                     if a.is_adult and len(people.members(sim, a)) == 1)
+            b = next(b for b in sorted(sim.agents.values(), key=lambda x: x.id)
+                     if b.is_adult and b is not a and len(people.members(sim, b)) == 1)
+            old = people.household(sim, a)
+            home = sim.homes[old.home_id]
+            home.owner = old.id  # as after a home_bought
+            people.set_rel(sim, a.id, b.id, PARTNER, 60, romance=70.0)
+            proceeds = housing.sale_proceeds(sim, home.id)
+            self.assertGreater(proceeds, 0)
+            savings, money = a.savings, a.money
+            with mock.patch.object(housing, "Household", agent_mod.Household, create=True):
+                moved = social.move_in(sim, a, b) if how == "move_in" else social_forks._place_together(sim, a, b)
+            self.assertTrue(moved, how)
+            self.assertEqual(a.household_id, b.household_id, how)
+            self.assertNotIn(old.id, sim.households, how)
+            self.assertAlmostEqual(a.savings, savings + proceeds, 6, how)
+            self.assertEqual(a.money, money, how)
+            self.assertEqual((home.owner, home.listing, home.household), ("market", "for_sale", None), how)
+
+    def test_a_rented_home_left_empty_pays_nothing(self):
+        sim = Simulation(1)
+        a = next(a for a in sorted(sim.agents.values(), key=lambda x: x.id)
+                 if a.is_adult and len(people.members(sim, a)) == 1
+                 and sim.homes[people.household(sim, a).home_id].owner != a.household_id)
+        b = next(b for b in sorted(sim.agents.values(), key=lambda x: x.id)
+                 if b.is_adult and b is not a and len(people.members(sim, b)) == 1)
+        home = sim.homes[people.household(sim, a).home_id]
+        people.set_rel(sim, a.id, b.id, PARTNER, 60, romance=70.0)
+        savings = a.savings
+        self.assertTrue(social.move_in(sim, a, b))
+        self.assertEqual(a.savings, savings)
+        self.assertEqual(home.listing, "for_rent")
 
 
 class EffectsTest(unittest.TestCase):

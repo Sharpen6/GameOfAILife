@@ -772,6 +772,30 @@ def _leave_home(sim, p) -> None:
             pass
 
 
+def with_kids(sim, a) -> list:
+    """a and their own children under 18 who live with them: the ones who move when a moves."""
+    return [a] + [m for m in people.members(sim, a)
+                  if m is not a and m.age < 18 and (a.relationships.get(m.id) is not None
+                                                    and a.relationships[m.id].kind is FAMILY)]
+
+
+def vacate(sim, old, leavers) -> None:
+    """`leavers` have moved out of household `old`. If nobody alive is left, its home goes back: an owned one is
+    sold first, the proceeds into the savings of the adults who left (as housing.move_household credits a sale)."""
+    if old is None or old.id not in sim.households or any(
+            people.person(sim, x) is not None and people.person(sim, x).alive for x in old.member_ids):
+        return
+    from . import housing
+    home = sim.homes.get(old.home_id)
+    if home is not None and home.owner == old.id and home.household == old.id:
+        payees = [m for m in leavers if m.is_adult] or list(leavers)
+        proceeds = housing.sale_proceeds(sim, home.id)
+        for m in payees:
+            m.savings += proceeds / len(payees)
+    housing.on_household_empty(sim, old)
+    sim.households.pop(old.id, None)
+
+
 def move_in(sim, mover, host) -> bool:
     """mover (and their children under 18) join host's household; an emptied household's home goes back."""
     if people.is_named(mover) != people.is_named(host):
@@ -789,18 +813,13 @@ def move_in(sim, mover, host) -> bool:
         new = people.household(sim, host)
         if old is None or new is None or old is new:
             return False
-        movers = [mover] + [m for m in people.members(sim, mover)
-                            if m is not mover and m.age < 18 and (mover.relationships.get(m.id) is not None
-                                                                   and mover.relationships[m.id].kind is FAMILY)]
+        movers = with_kids(sim, mover)
         for m in movers:
             if m.id in old.member_ids:
                 old.member_ids.remove(m.id)
             m.household_id = new.id
             new.member_ids.append(m.id)
-        if not any(people.person(sim, x) is not None and people.person(sim, x).alive for x in old.member_ids):
-            from . import housing
-            housing.on_household_empty(sim, old)
-            sim.households.pop(old.id, None)
+        vacate(sim, old, movers)
     ra, rb = mover.relationships.get(host.id), host.relationships.get(mover.id)
     if ra is not None and rb is not None:
         ra.kind = rb.kind = PARTNER
