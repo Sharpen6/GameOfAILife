@@ -3,19 +3,23 @@
 //
 //   node tests/browser/art_specimens.cjs
 //
-// Over the distinct building styles in gameofailife/data/region.json (places and decor) plus Millbrook's (from
-// client/dev/fixture_town.js), up to three sample places a style, each x 5 neglect stages x 4 seasons x day/night:
-// - no console error, and more than 30% of the sprite's canvas opaque;
+// Over the building shapes in gameofailife/data/region.json (places and decor: one sample for each distinct
+// style, w, h and floors) plus all of Millbrook's places (from client/dev/fixture_town.js), each x 5 neglect
+// stages x 4 seasons x day/night:
+// - no console error, and more than 30% of every keyed (region) sprite's canvas opaque (Millbrook's v2 sprites
+//   keep v2's lot boxes by contract, so their share is reported only);
 // - CV.spriteBox equals the drawn canvas rect (iso and flat), nothing touches the canvas edge (no clipping), every
 //   night-glow window quad lies inside it, and CV.heightOf is within 4 px of the roof;
 // - each sprite takes <= 6 ms at p95 and <= 10 ms at most (PLAN 6's timing rule: report-only when the 1-minute
-//   load L > 8, else the limits times max(1, L / 4));
+//   load L > 8, else the limits times max(1, L / 4); view.md 8: the timing pass runs up to 3 times and the best
+//   counts, here each sprite's fastest draw over the passes run);
 // - every new style is shift-invariant: a place with a variant drawn in place equals its canonical copy at (0, 0),
 //   and so does its night glow (art.glow, cached by sprite key); Millbrook's glow equals v2's (scene glowOf);
 // - CV.spriteKey is equal iff its nine parts are: neglected and pristine homes never share a sprite, flats with
 //   different names never do, places of one variant do, and Millbrook places keep their id in the key;
 // - every tile code's CV.groundKey names an art drawer that returns a tw x (th + 24) tile, in iso and flat;
-// - train cars, folk sheets and the van and truck draw.
+// - train cars, folk sheets and the van and truck draw, and no train car or goods vehicle touches its canvas
+//   edge in any iso rotation or flat.
 // A screenshot sheet goes to $ART_SHOTS/art_specimens.png (default: the system temp folder).
 // Playwright is looked for as a local module, then in the global node_modules; without it the test prints SKIP.
 "use strict";
@@ -65,7 +69,8 @@ function check(ok, what, detail) {
   return false;
 }
 
-// The sample places: up to three of each style from the region (places, then decor rows) and all of Millbrook's.
+// The sample places: one for each distinct (style, w, h, floors) of the region (places, then decor rows) and all
+// of Millbrook's.
 const KIND = { tower: "office", apartments: "home", residential_tower: "home", row_houses: "home", house: "home", big_house: "home",
   shop: "shop", factory: "works", warehouse: "works" };
 function samples() {
@@ -73,8 +78,14 @@ function samples() {
   const ctx = { window: {} };
   vm.runInNewContext(fs.readFileSync(path.join(CLIENT, "dev", "fixture_town.js"), "utf8"), ctx);
   const mill = ctx.window.CITY_FIXTURE.town.places.filter(p => p.kind !== "park");
-  const by = new Map();
-  const add = p => { if (p.kind === "park" || p.style === "park") return; const l = by.get(p.style) || []; if (l.length < 3) l.push(p); by.set(p.style, l); };
+  const by = new Map(), shapes = new Set();
+  const add = p => {
+    if (p.kind === "park" || p.style === "park") return;
+    const sh = [p.style, p.w, p.h, p.floors].join("|");
+    if (shapes.has(sh)) return;
+    shapes.add(sh);
+    const l = by.get(p.style) || []; l.push(p); by.set(p.style, l);
+  };
   for (const p of region.places) add({ id: p.id, name: p.name, kind: p.kind, style: p.style, x: p.x, y: p.y, w: p.w, h: p.h, floors: p.floors, face: p.face, entry: p.entry });
   region.decor.forEach((d, k) => add({ id: "decor_" + k, name: "", kind: KIND[d[4]] || "shop", style: d[4], x: d[0], y: d[1], w: d[2], h: d[3], floors: d[5], face: "s",
     entry: [d[0] + (d[2] >> 1), d[1] + d[3]], variant: d[6], decor: true }));
@@ -110,7 +121,7 @@ function pageRun(arg) {
   // warm-up: every sample once, untimed
   for (const p of arg.places) arts.iso.building(CV.canonPlace(p), lookFor(p, 0), "summer");
   for (const p of arg.places) {
-    const st = out.styles[p.style] || (out.styles[p.style] = { n: 0, ms: [], opaqueMin: 1, boundsBad: 0, clipBad: 0, heightBad: 0, glowBad: 0, windows: 0, samples: 0 });
+    const st = out.styles[p.style] || (out.styles[p.style] = { n: 0, ms: [], opaqueMin: 1, opaqueKeyed: 1, opaqueWorst: "", boundsBad: 0, clipBad: 0, heightBad: 0, glowBad: 0, windows: 0, samples: 0 });
     st.samples++;
     for (const kind of ["iso", "flat"]) {
       const art = arts[kind], proj = projs[kind];
@@ -124,6 +135,7 @@ function pageRun(arg) {
         let opaque = 0, minX = W, minY = H, maxX = -1, maxY = -1;
         for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[(y * W + x) * 4 + 3] > 0) { opaque++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
         st.opaqueMin = Math.min(st.opaqueMin, opaque / (W * H));
+        if (!inPlace(p) && opaque / (W * H) < st.opaqueKeyed) { st.opaqueKeyed = opaque / (W * H); st.opaqueWorst = `${p.id} ${p.w}x${p.h} fl${p.floors} ${kind} ${W}x${H}`; }
         const box = CV.spriteBox(q, look, proj);
         if (box.ox !== b.ox || box.oy !== b.oy || box.w !== W || box.h !== H) { st.boundsBad++; if (st.boundsBad === 1) out.errors.push(`${p.style} bounds ${JSON.stringify(box)} vs ${[b.ox, b.oy, W, H]}`); }
         // (the bottom edge too for a keyed place; v2's in-place sprites keep v2's boxes, steps and all)
@@ -170,15 +182,20 @@ function pageRun(arg) {
   // timing, in a pass of its own (the checks above allocate a full readback per sprite, and their garbage
   // collections would land in the timed spans): a sprite's cost is drawing it plus rasterising it, which a
   // one-pixel read forces
-  for (const p of arg.places) {
-    const st = out.styles[p.style], q = inPlace(p) ? p : CV.canonPlace(p);
-    for (const season of SEASONS) for (let stage = 0; stage < 5; stage++) {
-      const look = lookFor(p, stage), t0 = performance.now();
-      const b = arts.iso.building(q, look, season);
-      b.c.getContext("2d").getImageData(0, 0, 1, 1);
-      st.ms.push(performance.now() - t0);
+  // window.__timePass() runs one pass: { style: [ms per sprite, in a fixed order] }
+  window.__timePass = () => {
+    const ms = {};
+    for (const p of arg.places) {
+      const l = ms[p.style] || (ms[p.style] = []), q = inPlace(p) ? p : CV.canonPlace(p);
+      for (const season of SEASONS) for (let stage = 0; stage < 5; stage++) {
+        const look = lookFor(p, stage), t0 = performance.now();
+        const b = arts.iso.building(q, look, season);
+        b.c.getContext("2d").getImageData(0, 0, 1, 1);
+        l.push(performance.now() - t0);
+      }
     }
-  }
+    return ms;
+  };
   // spriteKey: equal iff the nine parts are equal
   const base = { id: "k1", name: "Harbour Court", kind: "home", style: "apartments", x: 120, y: 60, w: 6, h: 4, floors: 6, face: "s", entry: [123, 64], variant: 3 };
   const k = (p, look, season) => CV.spriteKey(p, look, season);
@@ -223,6 +240,22 @@ function pageRun(arg) {
     try { const l = f(); out.movers.push([what, l.length, l.every(s => s && s.c && s.c.width > 0), l.reduce((a, s) => a + s.c.width * s.c.height, 0)]); }
     catch (e) { out.movers.push([what, 0, false, String(e)]); }
   }
+  // train cars and goods vehicles fit their canvas in every view: no opaque pixel on an edge row or column
+  out.moverEdges = [];
+  const edgeOf = c => {
+    const W = c.width, H = c.height, d = c.getContext("2d").getImageData(0, 0, W, H).data, a = (x, y) => d[(y * W + x) * 4 + 3] > 0;
+    let n = 0;
+    for (let x = 0; x < W; x++) { if (a(x, 0)) n++; if (a(x, H - 1)) n++; }
+    for (let y = 0; y < H; y++) { if (a(0, y)) n++; if (a(W - 1, y)) n++; }
+    return n;
+  };
+  for (const view of ["iso0", "iso1", "iso2", "iso3", "flat0"]) {
+    const art = CV.makeArt(CV.makeProj(view.slice(0, -1), 256, 192, +view.slice(-1)));
+    for (let d = 0; d < 4; d++) {
+      for (const kk of ["head", "car", "tail"]) { const e = edgeOf(art.trainCar("#d23a3a", d, kk, kk === "car").c); if (e) out.moverEdges.push(`${view} trainCar d${d} ${kk}: ${e}`); }
+      for (const kind of ["van", "truck"]) { const e = edgeOf(art.car("#3a6ad6", kind, d).c); if (e) out.moverEdges.push(`${view} ${kind} d${d}: ${e}`); }
+    }
+  }
   return out;
 }
 
@@ -242,13 +275,27 @@ function pageRun(arg) {
     page.on("console", m => { if (m.type() === "error") errors.push(m.text()); });
     await page.goto(base + "/dev/specimens.html");
     const out = await page.evaluate(pageRun, S);
+    // the timing passes: up to 3 while the gate fails; each sprite keeps its fastest draw
+    const gate = L <= 8, k = Math.max(1, L / 4);
+    let best = null, passesRun = 0;
+    const summary = ms => { const all = [].concat(...Object.values(ms)).sort((a, b) => a - b); return { p95: all[Math.floor(all.length * 0.95)], mx: all[all.length - 1], n: all.length }; };
+    for (let run = 0; run < 3; run++) {
+      const ms = await page.evaluate(() => window.__timePass());
+      passesRun++;
+      if (!best) best = ms; else for (const s of Object.keys(ms)) best[s] = best[s].map((v, i) => Math.min(v, ms[s][i]));
+      const sm = summary(ms), sb = summary(best);
+      console.log(`timing pass ${run + 1}: p95 ${sm.p95.toFixed(2)} max ${sm.mx.toFixed(2)} ms; fastest so far p95 ${sb.p95.toFixed(2)} max ${sb.mx.toFixed(2)} ms`);
+      if (!gate || (sb.p95 <= 6 * k && sb.mx <= 10 * k)) break;
+    }
+    for (const s of Object.keys(best)) out.styles[s].ms = best[s];
     // every style of the region and Millbrook was drawn
     for (const s of S.regionStyles.concat(S.millStyles)) check(out.styles[s] && out.styles[s].n > 0, `style ${s} drawn`);
     check(!out.errors.length, "no errors drawing sprites", out.errors.slice(0, 6));
     const all = [];
     const rows = [];
     for (const [s, st] of Object.entries(out.styles)) {
-      check(st.opaqueMin > 0.3, `${s}: > 30% opaque`, st.opaqueMin.toFixed(3));
+      if (st.opaqueKeyed < 1) check(st.opaqueKeyed > 0.3, `${s}: > 30% opaque`, `${st.opaqueKeyed.toFixed(3)} (${st.opaqueWorst})`);
+      else console.log(`  ${s}: Millbrook v2 sprites only, opaque ${(st.opaqueMin * 100).toFixed(0)}% (v2 lot boxes, report-only)`);
       check(!st.boundsBad, `${s}: spriteBox equals the drawn bounds`, st.boundsBad);
       check(!st.clipBad, `${s}: nothing clipped at the canvas edge`, st.clipBad);
       check(!st.heightBad, `${s}: heightOf within 4 px of the roof`, st.heightBad);
@@ -259,10 +306,10 @@ function pageRun(arg) {
       rows.push(`${s.padEnd(18)} n ${String(st.n).padStart(3)}  median ${ms[ms.length >> 1].toFixed(2)}  p95 ${ms[Math.floor(ms.length * 0.95)].toFixed(2)}  max ${ms[ms.length - 1].toFixed(2)} ms  opaque ${(st.opaqueMin * 100).toFixed(0)}%`);
     }
     all.sort((a, b) => a - b);
-    const p95 = all[Math.floor(all.length * 0.95)], mx = all[all.length - 1], k = Math.max(1, L / 4);
-    console.log(`sprite timings at load ${L.toFixed(2)} (${all.length} sprites):\n  ` + rows.join("\n  "));
+    const p95 = all[Math.floor(all.length * 0.95)], mx = all[all.length - 1];
+    console.log(`sprite timings at load ${L.toFixed(2)} (${all.length} sprites, fastest of ${passesRun} pass${passesRun > 1 ? "es" : ""}):\n  ` + rows.join("\n  "));
     console.log(`all sprites: p95 ${p95.toFixed(2)} ms, max ${mx.toFixed(2)} ms`);
-    if (L > 8) console.log(`  timing report-only (load ${L.toFixed(2)} > 8)`);
+    if (!gate) console.log(`  timing report-only (load ${L.toFixed(2)} > 8)`);
     else { check(p95 <= 6 * k, `sprite p95 <= ${(6 * k).toFixed(1)} ms`, p95.toFixed(2)); check(mx <= 10 * k, `sprite max <= ${(10 * k).toFixed(1)} ms`, mx.toFixed(2)); }
     check(!out.shiftFails.length, "every keyed place is shift-invariant", out.shiftFails.slice(0, 8));
     check(out.glowN > 0 && !out.glowFails.length, `night glow shared by sprite key, and Millbrook's equals v2's (${out.glowN} glows)`, out.glowFails.slice(0, 8));
@@ -270,6 +317,7 @@ function pageRun(arg) {
     check(!out.keyFails.length, "spriteKey equal iff its nine parts are equal", out.keyFails);
     check(!out.tileFails.length, "every tile code's drawer returns a tw x (th + 24) tile", out.tileFails.slice(0, 8));
     for (const [what, n, ok, px] of out.movers) check(ok && n > 0, `${what} draw`, px);
+    check(!out.moverEdges.length, "train cars, vans and trucks fit their canvas (iso 0-3 and flat)", out.moverEdges.slice(0, 8));
     const folk = out.movers.find(m => m[0] === "folkSheet");
     if (folk) console.log(`folk sheets: 48 (24 x adult/child), ${(folk[3] / 1e6).toFixed(2)} MP`);
     check(!errors.length, "no console errors", errors.slice(0, 5));

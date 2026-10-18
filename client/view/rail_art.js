@@ -164,7 +164,7 @@
       const d = typeof dir === "string" ? (DIRS[dir] == null ? 0 : DIRS[dir]) : ((dir | 0) % 4 + 4) % 4;
       kind = kind === "head" || kind === "tail" ? kind : "car";
       const col = color || "#d23a3a";
-      return art.oriented(`tc:${col}:${d}:${kind}:${open ? 1 : 0}`, 112, 84, 56, 58, g => {
+      return art.oriented(`tc:${col}:${d}:${kind}:${open ? 1 : 0}`, 112, 92, 56, 58, g => { // 92 high: the flat view's shadow
         const ax = d % 2 === 0, L = 0.96, Wd = 0.4, hl = (ax ? L : Wd) / 2, hw = (ax ? Wd : L) / 2;
         const x0 = 0.5 - hl, y0 = 0.5 - hw, x1 = 0.5 + hl, y1 = 0.5 + hw;
         poly(g, [P(x0 + 0.04, y0 + 0.06), P(x1 + 0.08, y0 + 0.06), P(x1 + 0.08, y1 + 0.08), P(x0 + 0.04, y1 + 0.08)], "rgba(0,0,0,.3)");

@@ -46,7 +46,7 @@
       signBgs: ["#5a1010", "#1e1e24", "#4a2410", "#1a4a30", "#5a2e10", "#2a1a40", "#1e2230", "#3a1010"] },
     row_houses: { floorPx: 24, roof: "gable", roofPx: 24, extra: 16 },
     warehouse: { floorPx: 30, roof: "gable", roofPx: 14, wall: ["#a8b0b4", "#b8a890", "#8e9aa4", "#c0b8a8", "#9aa898"], roofC: "#7a8086", extra: 6 },
-    station: { floorPx: 30, roof: "flat", wall: "#d8cdb8", roofC: "#5a6470", sign: "STATION", signBg: "#1e3a6a", extra: 30 },
+    station: { floorPx: 30, roof: "flat", wall: "#d8cdb8", roofC: "#5a6470", sign: "STATION", signBg: "#1e3a6a", extra: 30, crown: 0.35, sideMargin: 0.1 },
     residential_tower: { floorPx: 20, roof: "flat", wall: ["#a8573f", "#9a6347", "#b06a4a", "#8a5a48", "#c08868", "#b8a088"], roofC: "#6d6f78", extra: 30 },
     hotel: { floorPx: 20, roof: "flat", wall: "#e8dcc4", roofC: "#7d808a", sign: "HOTEL", signBg: "#5a1a2a", extra: 36 },
     library: { floorPx: 24, roof: "flat", wall: "#d8cdb4", roofC: "#7d808a", sign: "LIBRARY" },
@@ -133,6 +133,7 @@
   // The sprite's canvas rect in world px for a place drawn in place, through one projection.
   // A place with a variant (anything outside Millbrook) gets a box round its body rather than its lot: the
   // body plus BODY_MARGIN tiles (awnings, porches, eaves) and the roof, so the sprite is mostly opaque.
+  // Millbrook's places (no variant) keep v2's lot box exactly.
   const BODY_MARGIN = 0.3;
   function boxOf(proj, p) {
     if (CV.variantOf(p) != null && !(p.x === 0 && p.y === 0 && String(p.id).indexOf("#") > 0)) {
@@ -143,17 +144,25 @@
     }
     const hh = heights(p);
     let fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
-    {
+    const keyed = CV.variantOf(p) != null; // Millbrook (no variant) keeps v2's lot box, so its scaled blits stay v2's
+    if (keyed) {
       const bd = CV.bodyOf(p), m = hh.st.boxMargin != null ? hh.st.boxMargin : BODY_MARGIN;
-      fx0 = Math.max(fx0, bd.x0 - m); fy0 = Math.max(fy0, bd.y0 - m); fx1 = Math.min(fx1, bd.x1 + m); fy1 = Math.min(fy1, bd.y1 + m);
+      // st.sideMargin: the margin on the sides that are not the front (the station's canopy is on its front only;
+      // a front the projection does not show moves to its lit face, as drawStation does)
+      const fs = proj.faces || [], front = fs.includes(p.face) || !fs.length ? p.face : fs[0];
+      const ms = f => hh.st.sideMargin != null && front !== f ? hh.st.sideMargin : m;
+      fx0 = Math.max(fx0, bd.x0 - ms("w")); fy0 = Math.max(fy0, bd.y0 - ms("n")); fx1 = Math.min(fx1, bd.x1 + ms("e")); fy1 = Math.min(fy1, bd.y1 + ms("s"));
     }
     let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
     const add = (a, b, z) => { const q = proj.toWorld(a, b, z); if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1]; };
     // a pitched roof of a keyed place rises only along its ridge: the corners need the eaves, the mid-lines the top
-    const ridge = (hh.st.roof === "gable" || hh.st.roof === "hip");
-    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { add(a, b, 0); add(a, b, ridge ? hh.Hw + 10 : hh.topZ); }
+    const ridge = keyed && (hh.st.roof === "gable" || hh.st.roof === "hip");
+    // a keyed style with a crown (the station's clock turret) rises to topZ only over the crown, half-size st.crown tiles
+    const crown = keyed && !ridge && hh.st.crown ? hh.st.crown : 0;
+    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { add(a, b, 0); add(a, b, ridge || crown ? hh.Hw + 10 : hh.topZ); }
     if (ridge) { const cx = (fx0 + fx1) / 2, cy = (fy0 + fy1) / 2; for (const [a, b] of [[fx0, cy], [fx1, cy], [cx, fy0], [cx, fy1]]) add(a, b, hh.topZ); }
-    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += CV.variantOf(p) == null ? 4 : 8; // keyed: room for steps and canopy posts in front (flat)
+    if (crown) { const bd = CV.bodyOf(p), cx = (bd.x0 + bd.x1) / 2, cy = (bd.y0 + bd.y1) / 2; for (const [a, b] of [[cx - crown, cy - crown], [cx + crown, cy - crown], [cx + crown, cy + crown], [cx - crown, cy + crown]]) add(a, b, hh.topZ); }
+    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += keyed ? 8 : 4; // keyed: room for steps and canopy posts in front (flat)
     const ox = Math.floor(bx0), oy = Math.floor(by0);
     return { ox, oy, w: Math.max(1, Math.ceil(Math.ceil(bx1) - ox)), h: Math.max(1, Math.ceil(Math.ceil(by1) - oy)), height: hh.height, labelZ: hh.labelZ };
   }

@@ -81,10 +81,11 @@
       });
       const last = segs[segs.length - 1][2], i = Math.min(last, w / 2 - 0.6, h / 2 - 0.6);
       const cx0 = x0 + i + 0.5, cy0 = y0 + i + 0.5, cx1 = x1 - i - 0.5, cy1 = y1 - i - 0.5;
-      // crown: a plant room with louvres, then the mast and its beacon
+      if (floors <= 15) { B.acUnit(ctx, x1 - 0.8, y1 - 0.8, H); B.acUnit(ctx, x0 + 0.4, y0 + 0.4, H); return; } // a plain roof deck
+      // above 15 floors, the crown: a plant room with louvres, then the mast and its beacon
       boxAt(g, cx0, cy0, cx1, cy1, H, H + 12, shade(pal[0], 1.1), shade(pal[0], 0.9));
       for (const f of FACES) { const F = faceFn(f, cx0, cy0, cx1, cy1); for (let u = 0.1; u < F.len - 0.1; u += 0.2) poly(g, quad(F, u, u + 0.1, H + 3, H + 9), f === LIT ? shade(pal[0], 0.8) : shade(pal[0], 0.65)); }
-      if (floors > 15) poly(g, top(cx0 - 0.1, cy0 - 0.1, cx1 + 0.1, cy1 + 0.1, H + 12), "#c9d1dc");
+      poly(g, top(cx0 - 0.1, cy0 - 0.1, cx1 + 0.1, cy1 + 0.1, H + 12), "#c9d1dc");
       const m = P((cx0 + cx1) / 2, (cy0 + cy1) / 2, H + 12);
       g.fillStyle = "#c9d1dc"; g.fillRect(Math.round(m[0]), Math.round(m[1]) - 30, 2, 30);
       g.fillStyle = "#e23b3b"; g.fillRect(Math.round(m[0]), Math.round(m[1]) - 32, 2, 2);
