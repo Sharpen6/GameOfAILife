@@ -20,6 +20,7 @@
   const SHIFT_SPREAD = 5;
   const LATE_GRACE = 5; // minutes late before reputation suffers
   const EVENING = 19 * 60; // choices after this are "evening" ones
+  const DINNER_FROM = 17 * 60 + 30, DINNER_UNTIL = 19 * 60 + 30, DINNER_MINUTES = 45; // the family dinner, once a day
   const STROLL_EVERY = 5; // minutes between a park stroller's hops
   const STROLL_MINUTES = 10; // one way of a stroll round the block when no park is in reach
   const FAV_WALK = 25, FAV_CAR = 15, FAV_KEEP = 3; // favourites: the nearest FAV_KEEP within these minutes
@@ -27,7 +28,7 @@
   const CPU_KEEP = 1440; // ticks of timings kept for the perf report
   const WARD = "ward";
   const FREE = ["relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-    "idle", "stroll"]; // activities that can be interrupted (is_free)
+    "idle", "stroll", "movie", "golf", "read"]; // activities that can be interrupted (is_free)
 
   // activity -> [need gains over the whole stay, outdoors]. Decay is folk_model's (DECAY_SCALE by activity).
   const ACT = {
@@ -46,6 +47,9 @@
     hang_out: [{ social: 40, fun: 25 }, false],
     walk_park: [{ fun: 30, social: 4 }, true],
     stroll: [{ fun: 15 }, true],
+    movie: [{ fun: 45, social: 10 }, false],
+    golf: [{ fun: 40, social: 15 }, false],
+    read: [{ fun: 25 }, false],
     ward: [{ hunger: 40 }, false],
     idle: [{}, false],
   };
@@ -61,6 +65,18 @@
   };
   const GROCERY_COST = 35, COFFEE_COST = 4, MEAL_COST = 14, DINNER_COST = 20, HANG_COST = 8;
   const GROCERY_MEALS = 10;
+  // A day out (folk.md 5 day_off d), by "kind/style": [activity, label, cost or null for the shopping spend, min age]
+  const DAY_OUT = {
+    "shop/mall": ["shopping", "A day at the mall", null, 0],
+    "venue/cinema": ["movie", "See a film", 12, 0],
+    "venue/clubhouse": ["golf", "A round of golf", 40, 40],
+    "townhall/library": ["read", "Read at the library", 0, 0],
+  };
+  const DAY_OUT_WALK = 40, DAY_OUT_CAR = 25, DAY_OUT_MINUTES = 150; // reach from home, and the stay
+  // Outcomes of an outing (folk.md 5), keyed dice into the luck log: [what, valence, chance, money, fun]
+  const BARGAIN = ["bargain", 1, 0.05, 15, 0]; // shopping or groceries
+  const PICKPOCKET = ["pickpocket", -1, 0.003, -60, 0]; // any outing
+  const RAINED_OUT = ["rained_out", -1, 0.5, 0, -10]; // a park walk or stroll in the rain
 
   const actOf = a => ACT[a] || [{}, false];
   const fm = () => G.folk_model;
@@ -106,7 +122,8 @@
       this.strollers = new Map(); // people strolling in a park -> the park
       this.luck_log = []; // the last 5000 luck changes (folk_life appends and trims)
       this.counters = { steps: 0, choices: 0, habit: 0, shifts: 0, school_days: 0, trips: 0, boardings: 0,
-        train_trips: 0, late: 0, sick_days: 0, starved: 0 };
+        train_trips: 0, late: 0, sick_days: 0, starved: 0,
+        school_runs: 0 };
       this.today = { boardings: 0, train_trips: 0, lines: {} }; // since midnight
       this._lines = null; // train id -> line id
       this.cpu = []; // ms per tick, the last CPU_KEEP
@@ -127,6 +144,7 @@
       this._bed = new Map();
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
+      this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
       const { Person } = fm();
       Person.clock = sim.clock;
       Person.town = town;
@@ -269,7 +287,12 @@
       if (fl && fl.weekly) fl.weekly(sim);
     }
 
-    new_household(member_ids, home_id, how) { return G.folk_life.new_household(this, member_ids, home_id, how); }
+    // folk_life.new_household: (member_ids, home_id, how), or (sim, members, home_id, how) as
+    // housing.new_household passes them (members may be people or ids).
+    new_household(...args) {
+      const [member_ids, home_id, how] = args.length === 4 ? args.slice(1) : args;
+      return G.folk_life.new_household(this, member_ids, home_id, how);
+    }
 
     on_household_empty(hh) { G.folk_life.on_household_empty(this, hh); }
 
@@ -484,6 +507,7 @@
             return;
           }
           const work = job.title === "student" || p.age < 18 ? "school" : "work";
+          if (work === "school" && mode === "car") this._school_run(p, now, job.place_id);
           this._go(sim, p, now, job.place_id, work, day * DAY + job.end_hour * 60, 30, mode);
           return;
         }
@@ -492,7 +516,32 @@
         this._go_home(sim, p, now, "sleep", this._wake_tick(p, now));
         return;
       }
+      if (DINNER_FROM <= m && m < DINNER_UNTIL && home !== null && p.inside === home && this._dinner(p, now, day)) return;
       this.choose(sim, p, now, m >= EVENING ? "evening" : "day_off");
+    }
+
+    // The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one grocery
+    // each. Needs someone to eat with and food in the house.
+    _dinner(p, now, day) {
+      const hh = this.hh_of(p);
+      if (hh === null || hh.dinner_day === day || hh.groceries <= 0) return false;
+      const diners = [];
+      for (const mid of hh.member_ids) {
+        const q = this.person(mid);
+        if (q !== null && q !== p && q.alive && !q.gone && q.trip === null && q.inside === p.inside &&
+            q.activity === "relax_home") diners.push(q);
+      }
+      if (!diners.length) return false;
+      hh.dinner_day = day;
+      hh.groceries = Math.max(0, hh.groceries - diners.length - 1);
+      for (const q of diners) {
+        this._gain(q, now);
+        this.settle(q, now);
+        this.ends.delete(q.i);
+        this._begin(q, now, "dinner_home", DINNER_MINUTES);
+      }
+      this._begin(p, now, "dinner_home", DINNER_MINUTES);
+      return true;
     }
 
     // A stay where the person is. A leisure stay ends when the place shuts; at a shut place it is home.
@@ -566,9 +615,46 @@
       this.schedule(p, arrive);
     }
 
+    // A parent with a car drives a pupil to school and straight back home (folk.md 4's school runs), so the car
+    // is on the street both ways and the pupil rides as its passenger. Only a member relaxing or eating at home,
+    // and only when they are back before they set off for their own shift.
+    _school_run(child, now, school) {
+      const hh = this.hh_of(child);
+      const home = this.home_place(child);
+      if (hh === null || home === null || child.inside !== home || child.trip !== null) return;
+      const day = Math.floor(now / DAY);
+      const { DRIVE, Trip } = fm();
+      for (const mid of hh.member_ids) {
+        const d = this.person(mid);
+        if (d === null || d.age < 18 || !d.alive || d.gone || !d.owns_car || d.trip !== null) continue;
+        if (d.inside !== home || (d.activity !== "relax_home" && d.activity !== "eat_home")) continue;
+        const out = ft().road_leg(this.town, DRIVE, home, school, now);
+        const back = ft().road_leg(this.town, DRIVE, school, home, out[2]);
+        const job = d.job;
+        if (job !== null && job.workdays.includes(day % 7) && d.worked_day !== day &&
+            back[2] - day * DAY > this._set_off(d)) continue;
+        this._gain(d, now);
+        this.settle(d, now);
+        this.ends.delete(d.i);
+        this._leave(d);
+        d.trip = new Trip([out, back], home, "relax_home", back[2] + 1, "car");
+        d.state = "travelling";
+        d.activity = "school_run";
+        d.activity_place = school;
+        this.out.set(d.i, null);
+        this.counters.trips += 1;
+        this.counters.school_runs += 1;
+        this.stay.set(d.i, [now, back[2]]);
+        this.schedule(d, back[2]);
+        this._driven.set(child.i, [d.i, now]);
+        return;
+      }
+    }
+
     _arrive(sim, p, now) {
       const t = p.trip;
       p.trip = null;
+      this._driven.delete(p.i);
       this.out.delete(p.i);
       p.activity = t.then;
       p.state = "busy";
@@ -671,7 +757,8 @@
           new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
             { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05),
           this._hang_option(sim, p, now, 120),
-          this._park_option(p, now, 90),
+          ((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend) : null) ||
+            this._park_option(p, now, 90),
         ];
       } else { // evening
         const left = m < bed ? Math.max(30, bed - m) : 30;
@@ -694,6 +781,36 @@
       }
       return new Option("A walk round the block", "stroll", this.home_place(p), 2 * STROLL_MINUTES, 0,
         { health: 0.4 }, ACT.stroll[0], 0.05);
+    }
+
+    // A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or null.
+    _day_out_option(p, now, spend) {
+      const home = this.home_place(p);
+      if (home === null) return null;
+      const car = this._has_car(p);
+      const ck = `${home}|day_out|${car}`;
+      let got = this._fav_cache.get(ck);
+      if (got === undefined) {
+        const net = ft().net(this.town);
+        const cands = [];
+        for (const [pid, place] of this.town.places) {
+          if (!(`${place.kind}/${place.style}` in DAY_OUT) || !this.allowed(pid)) continue;
+          const w = net.minutes(home, pid, "walk");
+          if (w <= DAY_OUT_WALK || (car && net.minutes(home, pid, "car") <= DAY_OUT_CAR)) cands.push([w, pid]);
+        }
+        cands.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+        got = cands.map(c => c[1]);
+        this._fav_cache.set(ck, got);
+      }
+      for (const pid of got) {
+        const place = this.town.places.get(pid);
+        const [act, label, cost, age] = DAY_OUT[`${place.kind}/${place.style}`];
+        if (p.age >= age && this._usable(pid, now, DAY_OUT_MINUTES)) {
+          return new Option(label, act, pid, DAY_OUT_MINUTES, cost === null ? spend : cost,
+            { adventure: 0.4, thrift: -0.2 }, ACT[act][0], 0.1);
+        }
+      }
+      return null;
     }
 
     _hang_option(sim, p, now, minutes) {
@@ -797,6 +914,23 @@
       this._play(sim, p, now, opt);
     }
 
+    // Bargain, pickpocket, rained out: luck-shifted keyed rolls (`dice.odds`), every roll in the luck log.
+    _outcomes(sim, p, now, activity) {
+      const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now, "luck");
+      const rolls = [PICKPOCKET];
+      if (activity === "shopping" || activity === "buy_groceries") rolls.unshift(BARGAIN);
+      if ((activity === "walk_park" || activity === "stroll") && sim.weather === "rain") rolls.push(RAINED_OUT);
+      for (const [what, valence, chance, money, fun] of rolls) {
+        const prob = G.dice.odds(chance, valence, p.luck);
+        const roll = rr.random();
+        G.people.log_roll(sim, p, what, prob, roll);
+        if (roll < prob) {
+          p.money += money;
+          if (fun) p.adjust("fun", fun);
+        }
+      }
+    }
+
     _play(sim, p, now, opt) {
       if (opt.place === null || opt.place === undefined) {
         opt = new Option("Go home and relax", "relax_home", this.home_place(p), 60);
@@ -809,6 +943,7 @@
         const hh = this.hh_of(p);
         if (hh !== null) hh.groceries += GROCERY_MEALS;
       }
+      if (!HOME_ACTS.includes(opt.activity)) this._outcomes(sim, p, now, opt.activity);
       if (opt.activity === "sleep") {
         this._go_home(sim, p, now, "sleep", this._wake_tick(p, now));
         return;
@@ -906,21 +1041,28 @@
       return [place.entry[0], place.entry[1]];
     }
 
-    // [x, y, mode] of a traveller at tick, or null while aboard a train or a passenger.
-    // A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one.
+    // A child in a car rides in a parent's school run, or is drawn as the car itself unless a sibling it shares the
+    // car with is the passenger of a school run or has a lower index.
     _passenger(p, leg) {
+      const t0 = p.trip.legs[0][1];
+      const run = this._driven.get(p.i);
+      if (run !== undefined && run[1] === t0) return true;
       const hh = this.hh_of(p);
       if (hh === null) return false;
       for (const mid of hh.member_ids) {
         const q = this.people[Number(mid.slice(1))];
-        if (q.i >= p.i) continue;
+        if (q === p) continue;
         if (q.trip !== null && q.trip.dest === p.trip.dest && q.age < 18 && q.trip.mode === p.trip.mode) {
-          if (q.trip.legs.length && q.trip.legs[0][1] === p.trip.legs[0][1] && q.trip.legs[0][0] === leg[0]) return true;
+          if (q.trip.legs.length && q.trip.legs[0][1] === t0 && q.trip.legs[0][0] === leg[0]) {
+            const qr = this._driven.get(q.i);
+            if (q.i < p.i || (qr !== undefined && qr[1] === t0)) return true;
+          }
         }
       }
       return false;
     }
 
+    // [x, y, mode] of a traveller at tick, or null while aboard a train or a passenger.
     _leg_xy(p, tick) {
       const { WALK, DRIVE, WAIT, K_WALK, K_CAR, K_AMBULANCE, K_WAIT } = fm();
       const trip = p.trip;
@@ -1146,7 +1288,7 @@
       const home = home_id && sim.homes ? sim.homes.get(home_id) : undefined;
       const [x, y] = this.xy(p, sim.clock.tick);
       const rels = {};
-      const entries = Object.entries(p.relationships).sort((a, b) => b[1].affinity - a[1].affinity ||
+      const entries = Array.from(p.relationships.entries()).sort((a, b) => b[1].affinity - a[1].affinity ||
         (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
       for (const [oid, r] of entries) rels[oid] = people.rel_row(sim, oid, r);
       const members = [];
@@ -1377,7 +1519,7 @@
   }
 
   G.folk = {
-    DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
+    DAY_OUT, DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES, BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
     GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,

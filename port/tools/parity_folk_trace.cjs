@@ -5,9 +5,10 @@
 //   node port/tools/parity_folk_trace.cjs SEED DAYS --js      print the JS trace only
 //   node port/tools/parity_folk_trace.cjs SEED DAYS --py      print the Python trace only
 //
-// Trace lines (integers and strings only; `named=` is reported but not compared, as the named sim is not folk's):
+// The weather is pinned to the same rule in both (the named sim's rng drifts between the twins, and folk read the
+// weather for rained_out). Trace lines (integers and strings only; `named=` is reported but not compared, as the named sim is not folk's):
 //   H <tick> crowd=<n> cs=<crowd checksum> occ=<folk per place> named=<occ(), named added> boardings=<today>
-//     steps=<folk steps>                                every hour
+//     steps=<folk steps> money=<everyone's cents> luck=<luck log rows>   every hour
 //   B <tick> <i> <activity> <place> <stay end>        every stay begun (Folk._begin)
 //   T <tick> <i> <dest> <mode> <arrival tick>         every trip set off (Folk._go)
 //   C <tick> <i> <kind> <option|option|...> <pick> <by>   every 50th choice
@@ -24,6 +25,16 @@ function checksum(arr) {
   for (const v of arr) s = (s * 131 + (v % M + M)) % M;
   return s;
 }
+
+// Everyone's cash in whole cents, summed (fares, pay, outcomes): a check on money without printing floats.
+function money(f) {
+  let s = 0;
+  for (const p of f.people) s += Math.floor(p.money * 100);
+  return s;
+}
+
+// The trace's own weather, the same in both twins (rain at some of the 06:00 and 14:00 rolls).
+const traceWeather = tick => ((Math.floor(tick / 60) * 7) % 5 < 2 ? "rain" : "clear");
 
 function jsTrace(seed, days) {
   const G = require("./engine.cjs").load();
@@ -49,6 +60,11 @@ function jsTrace(seed, days) {
       lines.push(`C ${now} ${p.i} ${kind} ${c.options.join("|")} ${c.choice} ${c.by}`);
     }
   };
+  const Sim = G.sim.Simulation.prototype, roll = Sim._roll_weather;
+  Sim._roll_weather = function () { // the named sim's rng drifts between the twins, so pin the weather folk read
+    roll.call(this);
+    this.weather = traceWeather(this.clock.tick);
+  };
   const sim = new G.sim.Simulation(seed, null, null, null, { world: "region", folk: N_FOLK });
   const f = sim.folk;
   const end = sim.clock.tick + days * 1440;
@@ -58,15 +74,16 @@ function jsTrace(seed, days) {
     if (t % 60 === 0) {
       const crowd = f.crowd(sim);
       lines.push(`H ${t} crowd=${crowd.length / 4} cs=${checksum(crowd)} occ=${checksum(f.count)} named=${checksum(f.occ())} ` +
-        `boardings=${f.today.boardings} steps=${f.counters.steps}`);
+        `boardings=${f.today.boardings} steps=${f.counters.steps} money=${money(f)} luck=${f.luck_log.length}`);
     }
   }
   Object.assign(Folk, { _begin: begin, _go: go, choose });
+  Sim._roll_weather = roll;
   return lines;
 }
 
 const PY = String.raw`
-import sys
+import math, sys
 sys.path.insert(0, ".")
 from gameofailife import folk
 from gameofailife.sim import Simulation
@@ -95,6 +112,11 @@ def _choose(self, sim, p, now, kind):
         c = p.choices[-1]
         out.append("C %d %d %s %s %d %s" % (now, p.i, kind, "|".join(c["options"]), c["choice"], c["by"]))
 F._begin, F._go, F.choose = _begin, _go, _choose
+roll = Simulation._roll_weather
+def _roll(self):
+    roll(self)
+    self.weather = "rain" if ((self.clock.tick // 60) * 7) % 5 < 2 else "clear"
+Simulation._roll_weather = _roll
 sim = Simulation(seed=seed, world="region", folk=n)
 f = sim.folk
 end = sim.clock.tick + days * 1440
@@ -103,9 +125,9 @@ while sim.clock.tick < end:
     t = sim.clock.tick
     if t % 60 == 0:
         crowd = f.crowd(sim)
-        out.append("H %d crowd=%d cs=%d occ=%d named=%d boardings=%d steps=%d" % (
+        out.append("H %d crowd=%d cs=%d occ=%d named=%d boardings=%d steps=%d money=%d luck=%d" % (
             t, len(crowd) // 4, checksum(crowd), checksum(f.count), checksum(f.occ()), f.today["boardings"],
-            f.counters["steps"]))
+            f.counters["steps"], sum(math.floor(p.money * 100) for p in f.people), len(f.luck_log)))
 sys.stdout.write("\n".join(out) + "\n")
 `;
 
