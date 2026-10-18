@@ -54,7 +54,7 @@
       budget.run(() => { while (J.i < J.steps.length) { J.steps[J.i++](); flush(J.c); if (performance.now() - t0 >= lim) break; } });
       if (J.i < J.steps.length) return false;
       if (e.c) C.mp -= e.c.width * e.c.height;
-      e.c = J.c; e.job = null; e.stale = false; e.tag = J.tag != null ? J.tag : null; C.built++;
+      e.c = J.c; e.job = null; e.stale = !!J.dirty; e.tag = J.tag != null ? J.tag : null; C.built++;
       C.mp += e.c.width * e.c.height;
       evict();
       return true;
@@ -84,13 +84,13 @@
       }
     };
     // Idle prefetch (view.md 3.2): bake one missing chunk of (layer, level) over the world rect r = {x0, y0, x1,
-    // y1}, when the budget has room left this frame. True when it baked (or worked on) one.
+    // y1}, when the budget has room left this frame. True when it baked (or worked on) one; stale ones wait.
     C.prefetch = function (layer, level, r, budget) {
       if (budget.left() < 3) return false;
       const [cx0, cy0, cx1, cy1] = C.range(level, r);
       for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
         const e = map.get(keyOf(layer, level, cx, cy));
-        if (e && e.c && !e.stale) continue;
+        if (e && e.c) continue; // (a stale one re-bakes when it is next drawn)
         work(entry(layer, level, cx, cy), budget);
         return true;
       }
@@ -130,10 +130,11 @@
     C.invalidate = function (wx0, wy0, wx1, wy1, layers) {
       for (const e of map.values()) {
         if (layers && !layers.includes(e.layer)) continue;
-        if (e.wx0 < wx1 && e.wx0 + e.span > wx0 && e.wy0 < wy1 && e.wy0 + e.span > wy0) { e.stale = true; if (e.job) e.job = null; }
+        // (a bake under way finishes and shows, marked stale, rather than starting over at every change)
+        if (e.wx0 < wx1 && e.wx0 + e.span > wx0 && e.wy0 < wy1 && e.wy0 + e.span > wy0) { e.stale = true; if (e.job) e.job.dirty = true; }
       }
     };
-    C.staleAll = layers => { for (const e of map.values()) if (!layers || layers.includes(e.layer)) { e.stale = true; if (e.job && e.c) e.job = null; } };
+    C.staleAll = layers => { for (const e of map.values()) if (!layers || layers.includes(e.layer)) { e.stale = true; if (e.job) e.job.dirty = true; } };
     C.clear = layers => { for (const [k, e] of map) if (!layers || layers.includes(e.layer)) { if (e.c) C.mp -= e.c.width * e.c.height; map.delete(k); } };
     C.entries = () => [...map.values()];
     C.size = () => { let n = 0; for (const e of map.values()) if (e.c) n++; return n; };

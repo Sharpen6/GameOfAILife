@@ -1487,7 +1487,8 @@
     };
     let lastLowView = null, lastNearView = null;
     // idle prefetch: the far levels over the whole map, so a zoom out finds them baked
-    const prefetch = () => { const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
+    // (only into room the cache has, or the trim that makes room would evict what it bakes)
+    const prefetch = () => { if (chunks.mp + 512 * 512 > lowCap() - nearPx()) return; const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
     function drawLow(v, lod, now) {
       const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom), tLow = performance.now();
       scene.levelNow = lv;
