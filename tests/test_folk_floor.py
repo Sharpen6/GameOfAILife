@@ -11,6 +11,7 @@ pay for at generation, children left with no adult go to family, the region's ca
 - Capacity: more townsfolk than the region's homes take raise folk_gen.TooManyFolk (a ValueError naming the limit),
   the same limit in JS; `python3 -m gameofailife --folk N` runs with the limit and says so.
 - Page: a townsperson page settles before it reads health, so two reads agree.
+- stats.city.start_population counts the cast and the townsfolk generated at the start (not the newborns).
 """
 
 from __future__ import annotations
@@ -271,6 +272,25 @@ class CapacityTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr[-2000:])
         self.assertRegex(out.stderr, r"--folk 2500: the region has homes for at most \d+ townsfolk \(asked for 2500\);"
                                      r" running with --folk \d+\.")
+
+
+START_JS = """
+const sim = new G.sim.Simulation(1, null, null, null, { world: "region", folk: 200 });
+const st = sim.stats_json(true);
+console.log(JSON.stringify({ start: st.city.start_population, population: st.city.population }));
+"""
+
+
+class StartPopulationTest(unittest.TestCase):
+    def test_the_cast_and_the_townsfolk_at_the_start(self):
+        sim = Simulation(1, world="region", folk=200)
+        city = sim.stats_json(full=True)["city"]
+        self.assertEqual(city["start_population"], len(sim.agents) + 200)
+        self.assertEqual(city["population"], city["start_population"])
+        if NODE:
+            self.assertEqual(node(START_JS), {"start": city["start_population"], "population": city["population"]})
+        v2 = Simulation(1)  # Millbrook alone: the cast
+        self.assertEqual(v2.stats_json(full=True)["city"]["start_population"], len(v2.agents))
 
 
 class PageHealthTest(unittest.TestCase):

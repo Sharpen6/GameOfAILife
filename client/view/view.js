@@ -508,11 +508,14 @@
       });
       mini = opt.minimap === false ? null : CV.makeMinimap(host, scene, cam, { open: prefs.minimap, homes: prefs.homes, onToggle: () => { if (mini) mini.draw(performance.now(), true); syncMenu(); persist(true); placeControls(); refreshReserved(); }, onFollowCancel: syncChip });
       placeControls();
-      // initial view: the stored camera, else Downtown's centre (the map centre for older towns)
+      // initial view: the stored camera, else the region's default view (view.md 3.7), else Downtown's centre (the
+      // map centre for older towns)
       const fit = cam.fitZoom();
       if (prefs.zoom && prefs.x != null && opt.persist !== false) {
         [cam.x, cam.y] = scene.proj.toWorld(prefs.x, prefs.y);
         cam.zoom = Math.max(Math.min(0.25, fit), Math.min(3, prefs.zoom));
+      } else if (!opt.zoom && cam.home()) {
+        // the region: Millbrook and Riverton Central at a quarter zoom
       } else {
         const d = targetOf({ district: "downtown" });
         const c = d ? d.w : scene.proj.toWorld(town.w / 2, town.h / 2);

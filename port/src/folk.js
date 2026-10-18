@@ -127,6 +127,7 @@
     constructor(sim, n, isolated = false, populate = null) {
       this.sim = sim;
       this.n = Math.trunc(n);
+      this.start_n = 0;
       this.isolated = !!isolated;
       this.v = 0;
       this.people = [];
@@ -169,6 +170,7 @@
       }
       if (populate === null) populate = G.folk_gen.populate;
       populate(this, sim, this.n);
+      this.start_n = this.people.length; // generated at the start (stats' start_population; not the newborns)
       this._start(sim);
     }
 
@@ -1415,8 +1417,8 @@
     // Everyone's share of the city block: counts, money and moods by district (stats sums them in).
     city_parts(sim) {
       this._bind();
-      const out = { population: 0, adults: 0, children: 0, employed: 0, pupils: 0, money: 0, mood: 0, health: 0,
-        outdoors: this.out.size + this.strollers.size, districts: {} };
+      const out = { population: 0, start_population: this.start_n, adults: 0, children: 0, employed: 0, pupils: 0,
+        money: 0, mood: 0, health: 0, outdoors: this.out.size + this.strollers.size, districts: {} };
       for (const p of this.people) {
         if (!p.alive || p.gone) continue;
         out.population += 1;

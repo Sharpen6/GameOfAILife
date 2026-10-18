@@ -161,6 +161,7 @@ class Folk:
     def __init__(self, sim, n: int, isolated: bool = False, *, populate=None):
         self.sim = sim
         self.n = int(n)
+        self.start_n = 0
         self.isolated = bool(isolated)
         self.v = 0
         self.people: list[Person] = []
@@ -203,6 +204,7 @@ class Folk:
             from . import folk_gen
             populate = folk_gen.populate
         populate(self, sim, self.n)
+        self.start_n = len(self.people)  # generated at the start (stats' start_population; not the newborns)
         self._start(sim)
 
     def _bind(self) -> None:
@@ -1378,8 +1380,9 @@ class Folk:
     def city_parts(self, sim) -> dict:
         """Everyone's share of the city block: counts, money and moods by district (stats sums them in)."""
         self._bind()
-        out = {"population": 0, "adults": 0, "children": 0, "employed": 0, "pupils": 0, "money": 0, "mood": 0,
-               "health": 0, "outdoors": len(self.out) + len(self.strollers), "districts": {}}
+        out = {"population": 0, "start_population": self.start_n, "adults": 0, "children": 0, "employed": 0,
+               "pupils": 0, "money": 0, "mood": 0, "health": 0, "outdoors": len(self.out) + len(self.strollers),
+               "districts": {}}
         for p in self.people:
             if not p.alive or p.gone:
                 continue

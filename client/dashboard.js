@@ -1164,9 +1164,13 @@
     const hours = p.hours ? `${p.hours[0]}:00–${p.hours[1]}:00` : "always open";
     return `${p.name} (${hours})${who}`;
   }
+  // A household's display name: the named households by name, a townsfolk household ("fh122") as "Townsfolk"
+  // (the frames carry no townsfolk household names; the home card's owner line names them).
   function hhName(id) {
     const h = S.hhById[id];
-    return h ? h.name : id ? pretty(id).replace(/^\w/, c => c.toUpperCase()) : "";
+    if (h) return h.name;
+    if (typeof id === "string" && /^fh\d+$/.test(id)) return "Townsfolk";
+    return id ? pretty(id).replace(/^\w/, c => c.toUpperCase()) : "";
   }
   function homeLine(homeId) {
     const st = S.homes[homeId] || {};
@@ -2202,7 +2206,10 @@
     empty.hidden = rows.length > 0;
     if (!rows.length) empty.textContent = F.q ? `Nobody matches “${F.q}”.` : "Nobody yet.";
     const w = S.stats.city.wealth;
-    setHtml(el(".dash-rankfoot", S.rankView), `Median <b>${money(w.median)}</b> · <b>${w.in_debt}</b> in debt · top 10% hold <b>${w.top10_share}%</b>`);
+    // city-wide numbers: with townsfolk they cover more people than the list shows, so the footer says so
+    const pop = S.stats.city.population || 0, named = ((S.state && S.state.agents) || []).filter(a => a.alive !== false).length;
+    const scope = pop > named ? `City-wide, ${pop.toLocaleString("en-US")} people: ` : "";
+    setHtml(el(".dash-rankfoot", S.rankView), `${scope}Median <b>${money(w.median)}</b> · <b>${w.in_debt}</b> in debt · top 10% hold <b>${w.top10_share}%</b>`);
     const deaths = S.stats.city.recent_deaths || [];
     setHtml(el(".dash-memoriam", S.rankView), deaths.length ? `<h3>In memoriam</h3><ul>${deaths.map(d =>
       `<li>${esc(d.name)}, ${d.age} · ${esc(String(d.time || "").split(" ").slice(0, 2).join(" "))} · ${esc(d.how || "")}</li>`).join("")}</ul>` : "");
@@ -2419,8 +2426,11 @@
       : h.listing === "for_rent" || (h.owner === "landlord" && h.rent) ? `${money(h.rent)}/week rent` : null;
     const lot = S.lots[h.place];
     const hist = (h.history || []).slice().reverse().map(x => `<li><span class="dash-muted">${esc(x.time)}</span> ${esc(x.event)}${x.household ? ` · ${esc(hhName(x.household))}` : ""}${x.price ? ` · ${money(x.price)}${x.event === "rented" ? "/week" : ""}` : ""}</li>`).join("");
-    const residents = (h.residents || []).map(n => `<button type="button" class="dash-pchip" data-person="${esc(n)}">${esc(n)}</button>`).join("");
+    // a main character's chip opens them; townsfolk have no page yet, so their names are plain text
+    const named = new Set(((S.state && S.state.agents) || []).map(a => a.name));
+    const residents = (h.residents || []).map(n => named.has(n) ? `<button type="button" class="dash-pchip" data-person="${esc(n)}">${esc(n)}</button>` : `<span class="dash-resident">${esc(n)}</span>`).join("");
     const isFlat = !!h.unit;
+    const flats = isFlat ? (S.unitsOf[h.place] || []).length : 0;
     return `<button type="button" class="dash-back">${backTo}</button>
       <h2>${icon(isFlat ? "flat" : h.hh && h.owner === h.hh ? "own" : "rent")}${esc(h.name)}</h2>
       <div class="dash-muted">${esc(tierLabel(h.tier))} · ${plural(h.bedrooms, "bedroom")} · ${esc(districtName(h.district))}</div>
@@ -2431,17 +2441,23 @@
         ${weekly ? `<dt>Weekly cost</dt><dd>${weekly}</dd>` : ""}${h.listing === "for_sale" ? `<dt>Asking price</dt><dd>${money(h.price)}</dd>` : ""}</dl>
       ${h.emergency ? emergencyHtml(h.emergency) : ""}
       <h3>Residents</h3>${residents ? `<div class="dash-chiprow">${residents}</div>` : '<div class="dash-muted">Nobody lives here.</div>'}
-      <div class="dash-acts"><button type="button" class="dash-btn" data-act="map">Show on map</button>${isFlat ? `<button type="button" class="dash-btn" data-act="block">All 6 flats</button>` : ""}</div>
+      <div class="dash-acts"><button type="button" class="dash-btn" data-act="map">Show on map</button>${isFlat ? `<button type="button" class="dash-btn" data-act="block">All ${flats} flats</button>` : ""}</div>
       ${hist ? `<h3>History</h3><ul class="dash-list">${hist}</ul>` : ""}`;
   }
   function blockCardHtml(placeId, backTo) {
     const p = S.placeById[placeId], lot = S.lots[placeId], units = S.unitsOf[placeId] || [];
     const stage = stageOf(lot);
     const lived = units.filter(u => S.homes[u.id] && S.homes[u.id].hh).length;
-    const byUnit = {};
-    for (const u of units) byUnit[u.unit] = u;
-    const floors = [];
-    for (let f = 3; f >= 1; f--) floors.push(["A", "B"].map(side => byUnit[`${f}${side}`]).filter(Boolean));
+    // the floors from the units themselves ("12B": floor 12, side B), the top floor first, sides in order
+    const byFloor = new Map();
+    for (const u of units) {
+      const m = /^(\d+)(.*)$/.exec(String(u.unit || ""));
+      const f = m ? Number(m[1]) : 0;
+      if (!byFloor.has(f)) byFloor.set(f, []);
+      byFloor.get(f).push(u);
+    }
+    const floors = [...byFloor.keys()].sort((a, b) => b - a)
+      .map(f => byFloor.get(f).sort((a, b) => String(a.unit).localeCompare(String(b.unit))));
     const unitHtml = u => {
       const st = S.homes[u.id] || {};
       const who = st.hh ? esc(hhName(st.hh)) : st.listing === "for_rent" ? `<span class="dash-mk for_rent">to let</span> ${money(st.price)}/wk` : "empty";
@@ -2452,8 +2468,8 @@
       <div class="dash-muted">${units.length} flats · ${esc(districtName(p && p.district))} · ${esc(landlordName())} · ${lived} lived in</div>
       <div class="dash-cond">${lot ? stageChip(stage, lot.condition) : ""}<span class="dash-track"><span class="dash-fill" style="width:${lot ? clamp(lot.condition, 0, 100) : 0}%;background:${STAGE_COLOR[stage]}"></span></span>
         ${lot && lot.works ? '<span class="dash-tag">builders in</span>' : ""}${lot && lot.moving ? '<span class="dash-tag">moving</span>' : ""}</div>
-      <div class="dash-legend-note">The building's condition is shared by all six flats. Top floor first.</div>
-      <div class="dash-units">${floors.map(row => `<div class="dash-floor">${row.map(unitHtml).join("")}</div>`).join("")}</div>
+      <div class="dash-legend-note">The building's condition is shared by all ${units.length} flats. Top floor first.</div>
+      <div class="dash-units${floors.length > 6 ? " dash-units-tall" : ""}">${floors.map(row => `<div class="dash-floor">${row.map(unitHtml).join("")}</div>`).join("")}</div>
       <div class="dash-acts"><button type="button" class="dash-btn" data-act="map">Show on map</button></div>`;
   }
 

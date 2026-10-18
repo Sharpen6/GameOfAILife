@@ -166,6 +166,7 @@
       this.homes = housing.build_homes(this.town); // home id -> Home
       this.lots = housing.build_lots(this.town, this.homes); // residential place id -> Lot (its condition)
       [this.agents, this.households] = cast.build_cast(this.town, this.homes, seed);
+      this.start_named = this.agents.size; // the cast at the start (stats' start_population; not the newborns)
       housing.init(this);
       this.stats = new stats.CityStats();
       this.weather = "clear";

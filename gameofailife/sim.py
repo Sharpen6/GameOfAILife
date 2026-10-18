@@ -170,6 +170,7 @@ class Simulation:
         self.homes = housing.build_homes(self.town)  # home id -> Home
         self.lots = housing.build_lots(self.town, self.homes)  # residential place id -> Lot (its condition)
         self.agents, self.households = cast.build_cast(self.town, self.homes, seed)
+        self.start_named = len(self.agents)  # the cast at the start (stats' start_population; not the newborns)
         housing.init(self)
         self.stats = stats.CityStats()
         self.weather = "clear"

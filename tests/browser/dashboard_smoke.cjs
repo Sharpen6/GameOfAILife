@@ -7,8 +7,9 @@
 // It serves client/ on 127.0.0.1, opens the page in headless Chromium at a desktop and a phone size and checks:
 // no console errors, no sideways scroll, the HUD, the tabs and their keys, picking and selecting a person,
 // a major event making a toast and a map ping, the map colours, the home card for a house and for a block of
-// flats, LLM decisions being asked for, the slow-AI chip, the browser build (no character pages, no LLM log)
-// and the phone bottom sheet with the inset it gives the map. The "rules" run and the end of the phone run
+// flats (and, in a re-sent welcome, region blocks of 10 and 24 flats: every flat listed, top floor first), LLM
+// decisions being asked for, the slow-AI chip, the browser build (no character pages, no LLM log) and the phone
+// bottom sheet with the inset it gives the map. The "rules" run and the end of the phone run
 // check that arrows used by the tab bar or the sheet grip never pan the map, the debt stub on a positive net
 // worth, that a burst of majors is always shown or counted (and error cards push none out), the phone mood
 // arrow, the long-press tooltip on touch, and the fixture's agents[0] == agent. Both the rules run and the phone
@@ -390,6 +391,61 @@ async function browserBuild(browser, base) {
   check(/no AI players/.test(await page.locator("#dash-llm .dash-llm-empty").innerText()), "the empty state explains why");
   await shot(page, "browser");
   check(errors.length === 0, "?browser: no console errors", errors);
+  await page.close();
+}
+
+// Region blocks of flats have 8 to 24 flats on up to 12 floors: a re-sent welcome with a 10-flat and a 24-flat
+// block in the town (units 1A..5B and 1A..12B), whose cards must list every flat, top floor first, say how many
+// flats share the condition, and scroll the tall one. A flat in a Millbrook block counts its block's 6 flats.
+async function tallBlocks(browser, base) {
+  console.log("desktop tall blocks");
+  const { page, errors } = await openPage(browser, base, "", { width: 1280, height: 800 });
+  await pause(page);
+  const ok = await page.evaluate(() => new Promise(resolve => {
+    const orig = devHost.onmessage;
+    devHost.onmessage = m => {
+      if (m.type !== "welcome") { orig(m); return; }
+      devHost.onmessage = orig;
+      const blocks = [["linden_tower", "Linden Tower", 5], ["oak_heights", "Oak Heights", 12]];
+      for (const [id, name, floors] of blocks) {
+        m.town.places.push({ id, name, kind: "home", x: 60 + floors, y: 30, w: 4, h: 3, entry: [61 + floors, 33], face: "s",
+          hours: null, district: "eastgate", style: "apartments", floors, tier: "flat", units: floors * 2 });
+        for (let f = 1; f <= floors; f++) {
+          for (const side of ["A", "B"]) {
+            m.town.homes.push({ id: `${id}_${f}${side.toLowerCase()}`, place: id, unit: `${f}${side}`, name: `${name}, flat ${f}${side}`,
+              tier: "flat", bedrooms: side === "A" ? 1 : 2, base_value: 7200, rent: 180 });
+          }
+        }
+      }
+      Dash.welcome(m);
+      resolve(true);
+    };
+    devHost.send({ type: "hello", role: "god" });
+    setTimeout(() => resolve(false), 3000);
+  }));
+  check(ok, "the fake host re-sent the welcome");
+  for (const [id, floors] of [["linden_tower", 5], ["oak_heights", 12]]) {
+    await page.evaluate(i => Dash.openHome(i), id);
+    await page.waitForTimeout(200);
+    const got = await page.evaluate(() => {
+      const card = document.querySelector("#dash-people .dash-card");
+      const grid = card && card.querySelector(".dash-units");
+      return { units: [...card.querySelectorAll(".dash-unit b")].map(b => b.textContent),
+        note: (card.querySelector(".dash-legend-note") || {}).textContent || "",
+        overflow: grid ? getComputedStyle(grid).overflowY : null, scrolls: grid ? grid.scrollHeight > grid.clientHeight + 1 : false };
+    });
+    const want = [];
+    for (let f = floors; f >= 1; f--) want.push(`${f}A`, `${f}B`);
+    check(JSON.stringify(got.units) === JSON.stringify(want), `the ${floors * 2}-flat block card lists every flat, top floor first`, got.units);
+    check(got.note.includes(`all ${floors * 2} flats`), `the ${floors * 2}-flat block card counts its flats`, got.note);
+    if (floors > 6) check(got.overflow === "auto" && got.scrolls, "the 24-flat block's grid scrolls", got);
+  }
+  await shot(page, "tall-block");
+  await page.evaluate(() => Dash.openHome("birch_court_1a"));
+  await page.waitForFunction(() => document.querySelector('#dash-people .dash-card [data-act="block"]'), null, { timeout: 5000 }).catch(() => {});
+  const btn = await page.evaluate(() => { const b = document.querySelector('#dash-people .dash-card [data-act="block"]'); return b ? b.textContent : null; });
+  check(btn === "All 6 flats", "a flat's card counts its block's flats", btn);
+  check(errors.length === 0, "tall blocks: no console errors", errors);
   await page.close();
 }
 
@@ -918,6 +974,7 @@ async function phoneRealMap(browser, base) {
     await rules(browser, base);
     await slowAi(browser, base);
     await browserBuild(browser, base);
+    await tallBlocks(browser, base);
     await phone(browser, base);
     await screenFixes(browser, base);
     for (const live of [300, 450]) await liveOlder(browser, base, live);

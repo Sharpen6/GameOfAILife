@@ -193,7 +193,7 @@ def _city_block(sim: Simulation, people: list[_Person], parts: dict | None = Non
     lucks = [a.luck for a in alive]
     counts = sim.life.counts  # every birth and death of both tiers, once life counts them
     block = {
-        "population": len(alive), "start_population": len(sim.agents),
+        "population": len(alive), "start_population": getattr(sim, "start_named", len(sim.agents)),
         "deaths": counts["deaths"] if "deaths" in counts else len(dead), "births": counts.get("births", 0),
         "adults": len(adults), "children": len(alive) - len(adults),
         "working": sum(1 for a in alive if a.job and a.job.hourly_wage > 0),

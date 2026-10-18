@@ -166,7 +166,7 @@
     for (const n of ["hunger", "energy", "social", "fun"]) needs[n] = _int(_mean(alive.map(a => a.needs[n])));
     const counts = sim.life.counts; // every birth and death of both tiers, once life counts them
     const block = {
-      population: alive.length, start_population: sim.agents.size,
+      population: alive.length, start_population: sim.start_named ?? sim.agents.size,
       deaths: hasOwn(counts, "deaths") ? counts.deaths : dead.length, births: counts.births ?? 0,
       adults: adults.length, children: alive.length - adults.length,
       working: count(alive, a => a.job && a.job.hourly_wage > 0),
