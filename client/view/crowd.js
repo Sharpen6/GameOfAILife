@@ -9,7 +9,8 @@
 // rest as marks) merged by depth with everything upright; mid: 2 x 3 px walkers and 4 x 3 px vehicles;
 // far: 1 px dots (vehicles 2 px). pick(wx, wy, r) -> {kind: "agent", id: "f417", folk: true}. stats().crowdDrawn
 // counts the people drawn whose foot point is in the view (those just outside it are drawn too, uncounted).
-// Classic script on window.CityView; no random numbers (view.md 7).
+// Drawing (items, marks, pick, pos, each) runs on the frame's time (setNow, from view.js); each(fn) feeds the
+// minimap. Classic script on window.CityView; no random numbers (view.md 7).
 "use strict";
 (function () {
   const CV = window.CityView = window.CityView || {};

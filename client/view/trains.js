@@ -6,7 +6,8 @@
 // long and facing its segment; depth = proj.depth(centre) + 0.05; doors open while at_station.
 // CV.makeTrains(scene, M) registers with scene.addMovers: near sprites (art.trainCar(color, dir, kind, open)
 // when the art has it, else a box in the line's colour), mid marks and far segments, picks
-// {kind: "train", id, line, riders}. Classic script on window.CityView; no random numbers.
+// {kind: "train", id, line, riders}; drawTransit(g, stations) is the Transit layer. Drawing runs on the frame's
+// time (setNow, from view.js). Classic script on window.CityView; no random numbers.
 "use strict";
 (function () {
   const CV = window.CityView = window.CityView || {};
