@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .town import TownMap
 
 CAST_SIZE = 60
+START_ENERGY = 85  # the city starts at 05:00, just after waking: energy 85-100 (the drawn 60-90 halved onto it)
 
 
 def job(title: str, place: str, wage: float, start: int, end: int, days=(0, 1, 2, 3, 4)) -> Job:
@@ -167,6 +168,7 @@ def build_cast(town: TownMap, homes: dict[str, Home], seed: int) -> tuple[dict[s
                       x=place.entry[0], y=place.entry[1], inside=place.id, profile=Profile(traits),
                       savings=float(savings))
         agent.needs = {n: rng.uniform(60, 90) for n in agent.needs}
+        agent.needs["energy"] = START_ENERGY + (agent.needs["energy"] - 60) / 2  # the day starts like a morning
         households[hid].member_ids.append(aid)
         agents[aid] = agent
         return agent

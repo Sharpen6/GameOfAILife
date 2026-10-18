@@ -523,7 +523,7 @@ Useful flags:
 | `--headless` | off | Simulates without a server and prints what happened. |
 | `--days N` | `3` | How many days to simulate with `--headless`. |
 | `--world` | `region` | `region`: Millbrook in the 256 by 192 tile region with its railway and townsfolk. `millbrook`: v2's 80 by 50 tile town alone, with no region, trains or townsfolk (v3's social life, health, babies, careers and weekly money still apply to its 60). |
-| `--folk N` | `1000` | How many townsfolk live in the region (`0` for a region with nobody but the 60; always 0 with `--world millbrook`). |
+| `--folk N` | `1000` | How many townsfolk live in the region (`0` for a region with nobody but the 60; always 0 with `--world millbrook`). At most what the region's homes take: 1,348 on seed 1 (1,334 on seed 2, 1,323 on seed 3). A larger N runs with that maximum and says so on stderr; the page's `?folk=` does the same with a notice. |
 
 ### What you see and can do as God
 

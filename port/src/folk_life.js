@@ -127,6 +127,7 @@
         hh.clean_sundays += 1;
       } else {
         hh.clean_sundays = 0;
+        if (home.owner === hh.id) hh.tax_deferred = true; // a broke owner's property tax waits (hardship)
         if (hh.grace_until > now) {
           // in grace
         } else if (hh.arrears > 0 && hh.last_funds !== null && f >= hh.last_funds + H.ARREARS_PROGRESS) {
@@ -278,6 +279,39 @@
     const names = mem.map(p => p.name).join(", ");
     for (const p of mem) release(sim, p, true);
     _left_event(sim, hh, ids, `${names} can no longer pay for ${home.name} and leave town.`);
+  }
+
+  // After a death: children left in a household with no adult go to a relative's household in town (an adult
+  // family tie, in id order), else they leave town to family elsewhere (`left_town`, one event).
+  function orphans(sim, hh) {
+    const folk = _folk(sim);
+    if (hh === null || hh === undefined || hh.gone) return;
+    const mem = members(folk, hh);
+    if (!mem.length || mem.some(p => p.age >= ADULT_AGE)) return;
+    let host = null;
+    for (const p of mem) {
+      for (const oid of [...p.relationships.keys()].sort()) {
+        const q = folk.person(oid);
+        if (!_here(q) || q.age < ADULT_AGE || q.household_id === hh.id) continue;
+        const r = p.relationships.get(oid);
+        if (r.kind === "family") {
+          host = q;
+          break;
+        }
+      }
+      if (host !== null) break;
+    }
+    if (host !== null) {
+      const dst = folk.household(host.household_id);
+      _move_people(folk, mem, dst);
+      _refresh(sim, mem);
+      _remember(sim, mem, `Moved in with ${host.name}.`);
+      return;
+    }
+    const ids = mem.map(p => p.id);
+    const names = mem.length <= 2 ? mem.map(p => p.name).join(" and ") : mem.map(p => p.name).join(", ");
+    for (const p of mem) release(sim, p, true);
+    _left_event(sim, hh, ids, `${names} go to live with family out of town.`);
   }
 
   // --- birthdays ---
@@ -610,6 +644,6 @@
     BILLS_PER_ADULT, CAR_BILL, PENSION, PENSION_AGE, SAVE_BASE, SAVE_THRIFT, ARREARS_MOVE, FORCED_PER_BEDROOM,
     FIX_FACTOR, RENT_SHARE, RENT_WEEKS, SCHOOL_AGE, TEEN_AGE, ADULT_AGE, PARENT_GAP, _cents, members, adults, funds,
     weekly_income, pay_shift, pensions, weekly, nightly, richest, fall_behind, on_birthday, nearest_school, join, split,
-    cheapest_rental, release, vacancies, new_household, on_household_empty, folk_move, folk_vacate,
+    cheapest_rental, release, vacancies, new_household, on_household_empty, folk_move, folk_vacate, orphans,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -76,6 +76,9 @@
   // With no grocer in reach (no market or grocer's within FAV_WALK on foot, or FAV_CAR by car), groceries are
   // ordered in from home: the same shop for DELIVERY_FEE more, DELIVERY_MINUTES at home to order and take them in.
   const DELIVERY_FEE = 8, DELIVERY_MINUTES = 15;
+  // The food floor: a household whose fridge is empty at a meal at home and whose payer cannot pay for groceries gets
+  // a food parcel (FOOD_PARCEL meals, free: the food bank), so nobody goes without food; remembered once a week.
+  const FOOD_PARCEL = 10, PARCEL_NOTE_DAYS = 7;
   // A day out (folk.md 5 day_off d), by "kind/style": [activity, label, cost or null for the shopping spend, min age]
   const DAY_OUT = {
     "shop/mall": ["shopping", "A day at the mall", null, 0],
@@ -134,7 +137,7 @@
       this.luck_log = []; // the last 5000 luck changes (folk_life appends and trims)
       this.counters = { steps: 0, choices: 0, habit: 0, shifts: 0, school_days: 0, trips: 0, boardings: 0,
         train_trips: 0, late: 0, sick_days: 0, starved: 0,
-        school_runs: 0 };
+        school_runs: 0, food_parcels: 0 };
       this.today = { boardings: 0, train_trips: 0, lines: {} }; // since midnight
       this._lines = null; // train id -> line id
       this.cpu = []; // ms per tick, the last CPU_KEEP
@@ -516,8 +519,7 @@
         return;
       }
       if (act === "sleep" && p.state === "busy") {
-        const hh = this.hh_of(p);
-        if (hh !== null && hh.groceries > 0) hh.groceries -= 1;
+        this._eat_in(p); // breakfast
         this._begin(p, now, "eat_home", 30);
         return;
       }
@@ -592,19 +594,43 @@
     // with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its payer can
     // afford them.
     _home_meal(p, now) {
-      const hh = this.hh_of(p);
-      if (hh !== null) {
-        if (hh.groceries <= 0) {
-          const payer = this._payer(p) || p;
-          const cost = GROCERY_COST + DELIVERY_FEE;
-          if (payer.money + payer.savings >= cost) {
-            payer.money -= cost;
-            hh.groceries += GROCERY_MEALS;
-          }
-        }
-        if (hh.groceries > 0) hh.groceries -= 1;
-      }
+      this._eat_in(p);
       this._begin(p, now, "eat_home", MEAL_MINUTES);
+    }
+
+    // A meal at home takes a grocery. With the fridge empty the household orders groceries in first (GROCERY_COST +
+    // DELIVERY_FEE) when its payer can afford them, else it gets a food parcel (`_parcel`).
+    _eat_in(p) {
+      const hh = this.hh_of(p);
+      if (hh === null) return;
+      if (hh.groceries <= 0) {
+        const payer = this._payer(p) || p;
+        const cost = GROCERY_COST + DELIVERY_FEE;
+        if (payer.money + payer.savings >= cost) {
+          payer.money -= cost;
+          hh.groceries += GROCERY_MEALS;
+        } else {
+          this._parcel(hh);
+        }
+      }
+      hh.groceries -= 1;
+    }
+
+    // The food bank: FOOD_PARCEL meals for a household that cannot pay for groceries, in its members' memory once
+    // every PARCEL_NOTE_DAYS.
+    _parcel(hh) {
+      hh.groceries += FOOD_PARCEL;
+      this.counters.food_parcels += 1;
+      const sim = this.sim;
+      const day = Math.floor(sim.clock.tick / DAY);
+      if (day - hh.parcel_day >= PARCEL_NOTE_DAYS) {
+        hh.parcel_day = day;
+        const stamp = sim.clock.stamp();
+        for (const mid of hh.member_ids) {
+          const q = this.person(mid);
+          if (q !== null && q.alive && !q.gone && q.age >= 5) q.remember(stamp, "Picked up a food parcel from the food bank.");
+        }
+      }
     }
 
     // The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one grocery
@@ -844,11 +870,14 @@
       const dinner = 17 * 60 <= m && m < 21 * 60 && hh !== null && hh.groceries > 0;
       const home_act = dinner && p._needs.hunger < 70 ? "dinner_home" : "relax_home";
       const relax_gains = ACT[home_act][0];
+      const meal = home_act === "dinner_home"; // dinner at home takes DINNER_MINUTES, then they choose again
+      const at_home = minutes => (meal ? DINNER_MINUTES : minutes);
       let opts;
       if (kind === "after_work") {
         const cafe_key = hungry ? "eat_out" : "coffee";
         opts = [
-          new Option("Go home and relax", home_act, home, 90, 0, { family: 0.3 }, relax_gains, 0.2),
+          new Option(meal ? "Go home for dinner" : "Go home and relax", home_act, home, at_home(90), 0,
+            { family: 0.3 }, relax_gains, 0.2),
           this._grocery_option(p, now, home, low ? 1.0 : -0.8),
           new Option(hungry ? "Eat out" : "Coffee", hungry ? "eat_out" : "coffee",
             this._pick(p, cafe_key, now, 40), hungry ? 40 : 20, hungry ? MEAL_COST : COFFEE_COST,
@@ -863,7 +892,8 @@
           : new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
             { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05);
         opts = [
-          new Option("Stay home", home_act, home, 120, 0, { family: 0.3 }, relax_gains, 0.15),
+          new Option(meal ? "Dinner at home" : "Stay home", home_act, home, at_home(120), 0, { family: 0.3 },
+            relax_gains, 0.15),
           shop,
           this._hang_option(sim, p, now, 120),
           ((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend) : null) ||
@@ -872,7 +902,8 @@
       } else { // evening
         const left = m < bed ? Math.max(30, bed - m) : 30;
         opts = [
-          new Option("Relax at home", home_act, home, left, 0, { family: 0.3 }, relax_gains, 0.25),
+          new Option(meal ? "Dinner at home" : "Relax at home", home_act, home, at_home(left), 0,
+            { family: 0.3 }, relax_gains, 0.25),
           new Option("Dinner out", "eat_out", this._pick(p, "eat_out", now, 60), 60, DINNER_COST,
             { social: 0.3, thrift: -0.4 }, ACT.eat_out[0], -0.1),
           this._hang_option(sim, p, now, 120),
@@ -1051,6 +1082,9 @@
       if (opt.activity === "buy_groceries" || opt.activity === "order_groceries") {
         const hh = this.hh_of(p);
         if (hh !== null) hh.groceries += GROCERY_MEALS;
+      } else if (opt.activity === "dinner_home") { // a meal at home takes a grocery (offered only with one in)
+        const hh = this.hh_of(p);
+        if (hh !== null && hh.groceries > 0) hh.groceries -= 1;
       }
       if (!HOME_ACTS.includes(opt.activity)) this._outcomes(sim, p, now, opt.activity);
       if (opt.activity === "sleep") {
@@ -1701,7 +1735,7 @@
     DAY_OUT, DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES, BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
-    GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,
-    join, split, release, on_birthday, settle,
+    GROCERY_MEALS, DELIVERY_FEE, FOOD_PARCEL, PARCEL_NOTE_DAYS, urgency, Option, Folk, is_free, send_to, hospitalise,
+    kill, on_job_change, add_person, add_baby, join, split, release, on_birthday, settle,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -3,9 +3,9 @@
 // ?seed=N picks the city (default 1, canonical Millbrook); ?dice=N fixes the outcome dice, which are fresh on
 // every load otherwise; ?speed=N starts at that speed (0, 1, 2, 4, 8 or 16); ?world=region|millbrook picks the
 // region around Millbrook (the default) or the town alone; ?folk=N sets how many townsfolk live in the region
-// (default 1000; none in millbrook). If the region cannot start, the page falls back to Millbrook alone and says
-// so. The live city stays inside this closure: the page sees only what the host sends the God view, as it would
-// from the real server.
+// (default 1000; none in millbrook; more than the region's homes take, about 1,300, is cut to that with a notice).
+// If the region cannot start, the page falls back to Millbrook alone and says so. The live city stays inside this
+// closure: the page sees only what the host sends the God view, as it would from the real server.
 (function (global) {
   "use strict";
   const G = global.GameOfAILife;
@@ -67,20 +67,31 @@
   if (folk && !(G.folk && G.folk.Folk)) folk = 0; // the townsfolk's port is not in this build yet
   try {
     let sim;
+    const later = say => {
+      if (global.document && global.document.readyState === "loading") {
+        global.document.addEventListener("DOMContentLoaded", say);
+      } else {
+        say();
+      }
+    };
     try {
-      sim = new G.sim.Simulation(seed, null, null, dice, { world, folk });
+      try {
+        sim = new G.sim.Simulation(seed, null, null, dice, { world, folk });
+      } catch (err) {
+        if (!(err && err.name === "TooManyFolk" && err.limit > 0)) throw err;
+        // more townsfolk than the region's homes take: as many as they do, and say so
+        const asked = folk;
+        folk = err.limit;
+        sim = new G.sim.Simulation(seed, null, null, dice, { world, folk });
+        later(() => notice(`The region has homes for at most ${folk} townsfolk; showing ${folk}, not ${asked}`));
+      }
     } catch (err) {
       if (world === "millbrook") throw err;
       console.error("GameOfAILife: the region could not start", err);
       world = "millbrook";
       folk = 0;
       sim = new G.sim.Simulation(seed, null, null, dice, { world, folk });
-      const say = () => notice("The region could not start; showing Millbrook");
-      if (global.document && global.document.readyState === "loading") {
-        global.document.addEventListener("DOMContentLoaded", say);
-      } else {
-        say();
-      }
+      later(() => notice("The region could not start; showing Millbrook"));
     }
     host = new G.host.LocalHost(sim, G.host.SPEEDS.includes(speed) ? speed : 1);
     global.WebSocket = host.socket();

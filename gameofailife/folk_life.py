@@ -120,7 +120,8 @@ def pensions(sim) -> None:
 def weekly(sim) -> None:
     """Sunday 23:00, after housing.weekly_charges, for every folk household with an adult: housing (rent, hardship
     rent or property tax) split by the adults to the cent, bills, savings covering a negative balance, v2's arrears
-    rule (silent), saving, then an emergency fixed once affordable twice over. Three Sundays in arrears: a cheaper
+    rule (silent; an owner in the red defers the property tax until two clean Sundays), saving, then an emergency
+    fixed once affordable twice over. Three Sundays in arrears: a cheaper
     rental at up to 3 a bedroom, else the household leaves town."""
     folk = _folk(sim)
     now = sim.clock.tick
@@ -149,6 +150,8 @@ def weekly(sim) -> None:
             hh.clean_sundays += 1
         else:
             hh.clean_sundays = 0
+            if home.owner == hh.id:
+                hh.tax_deferred = True  # a broke owner's property tax waits until two clean Sundays (hardship)
             if hh.grace_until > now:
                 pass
             elif hh.arrears > 0 and hh.last_funds is not None and f >= hh.last_funds + housing.ARREARS_PROGRESS:
@@ -296,6 +299,40 @@ def fall_behind(sim, hh) -> None:
     for p in mem:
         release(sim, p, quiet=True)
     _left_event(sim, hh, ids, f"{names} can no longer pay for {home.name} and leave town.")
+
+
+def orphans(sim, hh) -> None:
+    """After a death: children left in a household with no adult go to a relative's household in town (an adult
+    family tie, in id order), else they leave town to family elsewhere (`left_town`, one event)."""
+    folk = _folk(sim)
+    if hh is None or hh.gone:
+        return
+    mem = members(folk, hh)
+    if not mem or any(p.age >= ADULT_AGE for p in mem):
+        return
+    host = None
+    for p in mem:
+        for oid in sorted(p.relationships):
+            q = folk.person(oid)
+            if not _here(q) or q.age < ADULT_AGE or q.household_id == hh.id:
+                continue
+            r = p.relationships[oid]
+            if getattr(r.kind, "value", r.kind) == "family":
+                host = q
+                break
+        if host is not None:
+            break
+    if host is not None:
+        dst = folk.household(host.household_id)
+        _move_people(folk, mem, dst)
+        _refresh(sim, mem)
+        _remember(sim, mem, f"Moved in with {host.name}.")
+        return
+    ids = [p.id for p in mem]
+    names = " and ".join(p.name for p in mem) if len(mem) <= 2 else ", ".join(p.name for p in mem)
+    for p in mem:
+        release(sim, p, quiet=True)
+    _left_event(sim, hh, ids, f"{names} go to live with family out of town.")
 
 
 # --- birthdays ----------------------------------------------------------------------------------------------------

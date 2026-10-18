@@ -24,6 +24,7 @@ DECAY_SCALE = {
     "sleep": {"energy": 0.0, "hunger": 0.35, "social": 0.0, "fun": 0.0},
     "work": {"social": 0.0, "fun": 1.3, "hunger": 0.6},
     "hospital": {"social": 0.5, "fun": 0.5},
+    "ward": {"social": 0.5, "fun": 0.5},  # life's hospital stay (life._ward_care feeds and heals them hourly)
 }
 # Health as the named have it (sim._decay): hunger at 0 costs HUNGER_HEALTH a minute; every need above WELL_ABOVE
 # heals HEAL a minute up to life.max_health. Person.settle applies both in closed form, so reading a townsperson's
@@ -50,6 +51,7 @@ class FolkHousehold(agent.Household):
     j: int = -1
     gone: bool = False
     dinner_day: int = -1
+    parcel_day: int = -1000  # the day a food parcel was last remembered (folk.FOOD_PARCEL)
 
 
 @dataclass(eq=False)
@@ -133,8 +135,8 @@ class Person:
         if dt <= 0:
             return
         self._nt = tick
-        if not self.alive:
-            return  # the dead keep their last needs
+        if not self.alive or self.gone:
+            return  # the dead, and those who left town, keep their last needs
         if self.age < 5:
             self._heal(dt)  # under-5s are held at 75 by folk.py: always well
             return

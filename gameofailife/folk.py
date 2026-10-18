@@ -99,6 +99,9 @@ GROCERY_MEALS = 10
 # With no grocer in reach (no market or grocer's within FAV_WALK on foot, or FAV_CAR by car), groceries are
 # ordered in from home: the same shop for DELIVERY_FEE more, DELIVERY_MINUTES at home to order and take them in.
 DELIVERY_FEE, DELIVERY_MINUTES = 8, 15
+# The food floor: a household whose fridge is empty at a meal at home and whose payer cannot pay for groceries gets
+# a food parcel (FOOD_PARCEL meals, free: the food bank), so nobody goes without food; it is remembered once a week.
+FOOD_PARCEL, PARCEL_NOTE_DAYS = 10, 7
 # Outcomes of an outing (folk.md 5), keyed dice into the luck log: (what, valence, chance, money, fun)
 BARGAIN = ("bargain", 1, 0.05, 15, 0)  # shopping or groceries
 PICKPOCKET = ("pickpocket", -1, 0.003, -60, 0)  # any outing
@@ -168,7 +171,7 @@ class Folk:
         self.luck_log = deque(maxlen=5000)
         self.counters = {"steps": 0, "choices": 0, "habit": 0, "shifts": 0, "school_days": 0, "trips": 0,
                          "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0,
-                         "school_runs": 0}
+                         "school_runs": 0, "food_parcels": 0}
         self.today = {"boardings": 0, "train_trips": 0, "lines": {}}  # since midnight
         self._lines = None  # train id -> line id
         self.cpu = deque(maxlen=CPU_KEEP)  # process_time per tick, seconds
@@ -530,9 +533,7 @@ class Folk:
             self.choose(sim, p, now, "evening" if m >= EVENING else "after_work")
             return
         if act == "sleep" and p.state == "busy":
-            hh = self.hh_of(p)
-            if hh is not None and hh.groceries > 0:
-                hh.groceries -= 1
+            self._eat_in(p)  # breakfast
             self._begin(p, now, "eat_home", 30)
             return
         job = p.job
@@ -592,20 +593,40 @@ class Folk:
         return LUNCH if m < LUNCH and LUNCH + MEAL_MINUTES <= leave else leave
 
     def _home_meal(self, p, now: int) -> None:
-        """A meal at home (off sick, or lunch before a late shift), as breakfast is (eat_home, a grocery if there is
-        one); with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its
-        payer can afford them."""
-        hh = self.hh_of(p)
-        if hh is not None:
-            if hh.groceries <= 0:
-                payer = self._payer(p) or p
-                cost = GROCERY_COST + DELIVERY_FEE
-                if payer.money + payer.savings >= cost:
-                    payer.money -= cost
-                    hh.groceries += GROCERY_MEALS
-            if hh.groceries > 0:
-                hh.groceries -= 1
+        """A meal at home (off sick, or lunch before a late shift), as breakfast is: eat_home and a grocery."""
+        self._eat_in(p)
         self._begin(p, now, "eat_home", MEAL_MINUTES)
+
+    def _eat_in(self, p) -> None:
+        """A meal at home takes a grocery. With the fridge empty the household orders groceries in first
+        (GROCERY_COST + DELIVERY_FEE) when its payer can afford them, else it gets a food parcel (`_parcel`)."""
+        hh = self.hh_of(p)
+        if hh is None:
+            return
+        if hh.groceries <= 0:
+            payer = self._payer(p) or p
+            cost = GROCERY_COST + DELIVERY_FEE
+            if payer.money + payer.savings >= cost:
+                payer.money -= cost
+                hh.groceries += GROCERY_MEALS
+            else:
+                self._parcel(hh)
+        hh.groceries -= 1
+
+    def _parcel(self, hh) -> None:
+        """The food bank: FOOD_PARCEL meals for a household that cannot pay for groceries, in its members' memory
+        once every PARCEL_NOTE_DAYS."""
+        hh.groceries += FOOD_PARCEL
+        self.counters["food_parcels"] += 1
+        sim = self.sim
+        day = sim.clock.tick // DAY
+        if day - hh.parcel_day >= PARCEL_NOTE_DAYS:
+            hh.parcel_day = day
+            stamp = sim.clock.stamp()
+            for mid in hh.member_ids:
+                q = self.person(mid)
+                if q is not None and q.alive and not q.gone and q.age >= 5:
+                    q.remember(stamp, "Picked up a food parcel from the food bank.")
 
     def _dinner(self, p, now: int, day: int) -> bool:
         """The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one
@@ -841,10 +862,16 @@ class Folk:
         dinner = 17 * 60 <= m < 21 * 60 and hh is not None and hh.groceries > 0
         home_act = "dinner_home" if dinner and p._needs["hunger"] < 70 else "relax_home"
         relax_gains = ACT[home_act][0]
+        meal = home_act == "dinner_home"  # dinner at home takes DINNER_MINUTES, then they choose again
+
+        def at_home(minutes: int) -> int:
+            return DINNER_MINUTES if meal else minutes
+
         if kind == "after_work":
             cafe_key = "eat_out" if hungry else "coffee"
             opts = [
-                Option("Go home and relax", home_act, home, 90, 0, {"family": 0.3}, relax_gains, 0.2),
+                Option("Go home for dinner" if meal else "Go home and relax", home_act, home, at_home(90), 0,
+                       {"family": 0.3}, relax_gains, 0.2),
                 self._grocery_option(p, now, home, 1.0 if low else -0.8),
                 Option("Eat out" if hungry else "Coffee", "eat_out" if hungry else "coffee",
                        self._pick(p, cafe_key, now, 40), 40 if hungry else 20, MEAL_COST if hungry else COFFEE_COST,
@@ -859,7 +886,8 @@ class Folk:
                     Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
                            {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05))
             opts = [
-                Option("Stay home", home_act, home, 120, 0, {"family": 0.3}, relax_gains, 0.15),
+                Option("Dinner at home" if meal else "Stay home", home_act, home, at_home(120), 0, {"family": 0.3},
+                       relax_gains, 0.15),
                 shop,
                 self._hang_option(sim, p, now, 120),
                 ((self._day_out_option(p, now, spend) if (p.i + now // DAY) % 2 == 0 else None)
@@ -868,7 +896,8 @@ class Folk:
         else:  # evening
             left = max(30, bed - m) if m < bed else 30
             opts = [
-                Option("Relax at home", home_act, home, left, 0, {"family": 0.3}, relax_gains, 0.25),
+                Option("Dinner at home" if meal else "Relax at home", home_act, home, at_home(left), 0,
+                       {"family": 0.3}, relax_gains, 0.25),
                 Option("Dinner out", "eat_out", self._pick(p, "eat_out", now, 60), 60, DINNER_COST,
                        {"social": 0.3, "thrift": -0.4}, ACT["eat_out"][0], -0.1),
                 self._hang_option(sim, p, now, 120),
@@ -1016,6 +1045,10 @@ class Folk:
             hh = self.hh_of(p)
             if hh is not None:
                 hh.groceries += GROCERY_MEALS
+        elif opt.activity == "dinner_home":  # a meal at home takes a grocery (offered only with one in the fridge)
+            hh = self.hh_of(p)
+            if hh is not None and hh.groceries > 0:
+                hh.groceries -= 1
         if opt.activity not in HOME_ACTS:
             self._outcomes(sim, p, now, opt.activity)
         if opt.activity == "sleep":
@@ -1415,13 +1448,14 @@ class Folk:
         except (ImportError, AttributeError):
             life_block = None
         trip = p.trip
+        needs = {k: round(v, 1) for k, v in p.needs.items()}  # settles first, so health below is as of now
         return {
             "kind": "folk", "luck_settable": p.alive and not p.gone, "id": p.id, "name": p.name, "age": p.age,
             "sex": p.sex, "alive": p.alive, "gone": p.gone, "state": p.state, "activity": p.activity,
             "place": p.activity_place, "inside": p.inside, "x": x, "y": y, "luck": round(p.luck, 1),
             "money": round(p.money, 2), "savings": round(p.savings, 2), "worth": self.worth(sim, p),
             "health": round(p.health, 1), "mood": round(p.mood), "reputation": round(p.reputation),
-            "needs": {k: round(v, 1) for k, v in p.needs.items()},
+            "needs": needs,
             "job": p.job.to_json() if p.job is not None else None,
             "commute": list(p.commute) if p.commute else None,
             "home": {"id": home_id, "name": home.name if home else None,

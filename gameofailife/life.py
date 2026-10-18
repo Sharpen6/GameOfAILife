@@ -329,20 +329,20 @@ def tick(sim) -> None:
         day = sim.clock.day
         for pid in list(ids):
             p = _person(sim, pid)
-            if p is not None and p.alive:
+            if p is not None and p.alive and not getattr(p, "gone", False):  # nobody who left town
                 daily(sim, p, day)
     if sim.clock.weekday == money.SUNDAY and money.WINDOW[0] <= m < money.WINDOW[1]:
         k = m - money.WINDOW[0]
         for base in (k, k + 600, k + 1200):
             for pid in list(lc.by_slot.get(base, ())):
                 p = _person(sim, pid)
-                if p is not None and p.alive and p.is_adult:
+                if p is not None and p.alive and p.is_adult and not getattr(p, "gone", False):
                     money.weekly(sim, p)
 
 
 def _run_agenda(sim, kind: str, pid: str, arg) -> None:
     p = _person(sim, pid)
-    if p is None or not p.alive:
+    if p is None or not p.alive or getattr(p, "gone", False):
         return
     if kind == "birth":
         if p.life.pregnant is not None:
@@ -361,14 +361,25 @@ def _run_agenda(sim, kind: str, pid: str, arg) -> None:
 
 
 def _ward_care(sim, t: int) -> None:
-    """Hourly, for the named in a hospital ward: fed, rested and treated (v2's `hospital` activity heals .15 a
-    minute; a stay of days would otherwise starve on the ward's spread-out gains)."""
+    """Hourly, for everyone in a hospital ward (the named, then the townsfolk in index order): fed, rested and
+    treated (v2's `hospital` activity heals .15 a minute; a stay of days would otherwise starve on the ward's
+    spread-out gains). A townsperson's lazy needs are settled to now first."""
     for a in sim.agents.values():
         life = a.life
         if a.alive and life is not None and life.ward_until > t:
             for n in ("hunger", "energy"):
                 a.needs[n] = max(a.needs[n], 60.0)
             a.health = min(max_health(a), a.health + WARD_HEAL)
+    folk = getattr(sim, "folk", None)
+    for p in getattr(folk, "people", ()):
+        life = p.life
+        if life is not None and life.ward_until > t and p.alive and not p.gone:
+            p.settle(t)
+            needs = p._needs
+            for n in ("hunger", "energy"):
+                if needs[n] < 60.0:
+                    needs[n] = 60.0
+            p.health = min(max_health(p), p.health + WARD_HEAL)
 
 
 def legacy_ageing(sim) -> None:
@@ -697,6 +708,11 @@ def die(sim, p, how: str) -> None:
     _event(sim, p, f"{p.name} {how}, aged {p.age}.", "death", importance=2 if loved else 1)
     housing.on_death(sim, p)
     on_death(sim, p)
+    from . import folk_life
+
+    folk = getattr(sim, "folk", None)
+    if folk is not None and hasattr(folk, "household"):
+        folk_life.orphans(sim, folk.household(p.household_id))  # children left with no adult go to family
 
 
 def on_death(sim, p) -> None:

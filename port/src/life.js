@@ -277,7 +277,7 @@
       const day = sim.clock.day;
       for (const pid of ids.slice()) {
         const p = _person(sim, pid);
-        if (p !== null && p !== undefined && p.alive) daily(sim, p, day);
+        if (p !== null && p !== undefined && p.alive && !p.gone) daily(sim, p, day); // nobody who left town
       }
     }
     const M = G.money;
@@ -286,13 +286,14 @@
       for (const base of [k, k + 600, k + 1200]) {
         for (const pid of (lc.by_slot.get(base) ?? []).slice()) {
           const p = _person(sim, pid);
-          if (p !== null && p !== undefined && p.alive && p.is_adult) M.weekly(sim, p);
+          if (p !== null && p !== undefined && p.alive && p.is_adult && !p.gone) M.weekly(sim, p);
         }
       }
     }
   }
 
-  // Hourly, for the named in a hospital ward: fed, rested and treated.
+  // Hourly, for everyone in a hospital ward (the named, then the townsfolk in index order): fed, rested and treated.
+  // A townsperson's lazy needs are settled to now first.
   function _ward_care(sim, t) {
     for (const a of sim.agents.values()) {
       const life = a.life;
@@ -301,11 +302,21 @@
         a.health = Math.min(max_health(a), a.health + WARD_HEAL);
       }
     }
+    const people = sim.folk && sim.folk.people ? sim.folk.people : [];
+    for (const p of people) {
+      const life = p.life;
+      if (life !== null && life !== undefined && life.ward_until > t && p.alive && !p.gone) {
+        p.settle(t);
+        const needs = p._needs;
+        for (const n of ["hunger", "energy"]) if (needs[n] < 60.0) needs[n] = 60.0;
+        p.health = Math.min(max_health(p), p.health + WARD_HEAL);
+      }
+    }
   }
 
   function _run_agenda(sim, kind, pid, arg) {
     const p = _person(sim, pid);
-    if (p === null || p === undefined || !p.alive) return;
+    if (p === null || p === undefined || !p.alive || p.gone) return;
     if (kind === "birth") {
       if (p.life.pregnant !== null) {
         const other = p.life.pregnant[1];
@@ -626,6 +637,10 @@
     _event(sim, p, `${p.name} ${how}, aged ${p.age}.`, "death", loved ? 2 : 1);
     G.housing.on_death(sim, p);
     on_death(sim, p);
+    const folk = sim.folk;
+    if (folk && typeof folk.household === "function") {
+      G.folk_life.orphans(sim, folk.household(p.household_id)); // children left with no adult go to family
+    }
   }
 
   // After a death: see life.py. Runs once per death.

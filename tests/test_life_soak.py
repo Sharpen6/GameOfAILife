@@ -3,7 +3,8 @@
 
 births and deaths over three seeds 15-45; ill now 3-12%; at luck 0 <= 15% of workers fired; News importance 1+ <= 30
 a day; raises 1 in 6 to 1 in 2 reviews; money at the end: median adult worth 0.9-1.7x start, 25-50% poorer, 3-15%
-in debt, Gini 0.48-0.72. Deaths and News leave out folk.py's starvation deaths (F2a's), which are reported apart.
+in debt, Gini 0.48-0.72; nobody starves (the food bank, life's ward care and affordable homes: stage 5), at luck 0
+too. Deaths and News leave out folk.py's starvation deaths (F2a's), which are reported apart.
 
 `python3 -m tests.test_life_soak SEED DAYS [LUCK]` prints one run's numbers.
 """
@@ -60,6 +61,7 @@ def measure(seed: int, days: int, luck: float | None = None, folk: int = FOLK) -
         "seed": seed, "days": days, "luck": luck, "cpu": round(cpu, 1), "people": len(everyone),
         "births": c["births"], "deaths": c["deaths"],
         "starved": getattr(sim.folk, "counters", {}).get("starved", 0),  # folk.py's (F2a), not life's mortality
+        "food_parcels": getattr(sim.folk, "counters", {}).get("food_parcels", 0),
         "ill_now": sum(1 for p in everyone if p.life is not None and p.life.conditions) / max(1, len(everyone)),
         "workers": workers0, "fired": c["fired"], "laid_off": c["laid_off"], "hired": c["hired"],
         "reviews": c["reviews"], "raises": c["raises"], "warnings": c["warnings"],
@@ -88,6 +90,10 @@ class LifeSoak(unittest.TestCase):
         deaths = sum(r["deaths"] - r["starved"] for r in self.runs)  # life's mortality; starving is folk.py's
         self.assertTrue(15 * scale <= births <= 45 * scale, births)
         self.assertTrue(15 * scale <= deaths <= 45 * scale, deaths)
+
+    def test_nobody_starves(self):
+        for r in self.runs + [self.unlucky]:
+            self.assertEqual(r["starved"], 0, r)
 
     def test_ill_now(self):
         for r in self.runs:

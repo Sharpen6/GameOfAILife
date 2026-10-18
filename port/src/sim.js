@@ -91,6 +91,9 @@
     ward: { social: 0.5, fun: 0.5 }, // life's hospital stay, like v2's afternoon in hospital
   };
 
+  // Sleep: lying down between NAP_FROM and NAP_UNTIL with more than NAP_LONG minutes to the wake time is a 3-hour nap;
+  // any other bedtime sleeps to the wake time, at most SLEEP_MAX minutes (an early night before a lie-in included).
+  const NAP_FROM = 9 * 60, NAP_UNTIL = 19 * 60, NAP_LONG = 4 * 60, SLEEP_MAX = 13 * 60;
   const LIGHT_CYCLE = 6; // minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
   const STOP_AT_LIGHTS = ["car", "taxi"]; // they wait at a red light on entering a junction; buses and ambulances don't
   const ONE_WAY = ["taxi", "ambulance"]; // vehicles that take a character to one place: on arrival they are on foot again
@@ -671,7 +674,8 @@
         }
         wake += this.rng.randrange(0, 25);
         let minutes = pyMod(wake - m, G.clock.MINUTES_PER_DAY);
-        if (minutes > 11 * 60 || minutes < 60) minutes = 180; // a nap in the daytime
+        if (minutes < 60 || (NAP_FROM <= m && m < NAP_UNTIL && minutes > NAP_LONG)) minutes = 180; // a daytime nap
+        else if (minutes > SLEEP_MAX) minutes = SLEEP_MAX; // an early night sleeps to the wake time, not round the clock
         agent.busy_until = tick + minutes;
       } else {
         agent.busy_until = tick + act.minutes;
@@ -1684,7 +1688,7 @@
   G.sim = {
     ANSWER_SECONDS, LEARN_SECONDS, INVITE_MINUTES, PENSION, BILLS_PER_ADULT, CAR_BILL, HOSPITAL_FEE, GROCERY_COST,
     SHIFT_MARGIN, LEISURE, HISTORY_SIZE, NEWS_SIZE, HEADLINES_SIZE, LLM_LOG_SIZE, AGENT_LLM_FORKS, income_tax,
-    Activity, ACTIVITIES, DECAY_SCALE, LIGHT_CYCLE, STOP_AT_LIGHTS, ONE_WAY, BUS_GIVE_UP, FLIGHT_MINUTES, WANDER,
+    Activity, ACTIVITIES, DECAY_SCALE, NAP_FROM, NAP_UNTIL, NAP_LONG, SLEEP_MAX, LIGHT_CYCLE, STOP_AT_LIGHTS, ONE_WAY, BUS_GIVE_UP, FLIGHT_MINUTES, WANDER,
     WANDER_EVERY, MEET, NEWS_EVERY, WORLDS, _r1, SimDice, Simulation,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

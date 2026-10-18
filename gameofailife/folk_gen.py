@@ -55,6 +55,14 @@ SCHOOL_LATE = 30  # minutes: the region's schools start at 08:30, Riverton High 
 # --- seekers and money (folk.md 4.6, 4.9) -----------------------------------------------------------------------
 STUDY_P, IDLE_P = 0.3, 0.07
 PENSION = 400
+PENSION_AGE = 65
+# --- homes a household can live on (the poverty floor at the start) ---------------------------------------------
+# A household whose adults are all past PENSION_AGE lives on PENSION each: it takes only a home whose housing charge
+# (rent, or property tax when owned) plus BILLS a head and FOOD_WEEK a person (groceries) fits in that, keeps a car
+# only while CAR still fits, and takes the cheapest fitting home when none fits. A household with no paid job and an
+# adult under PENSION_AGE (BENEFIT a week each) moves, after job matching, to the cheapest fitting vacant home when
+# that is cheaper and its costs are above its income.
+BILLS, CAR, FOOD_WEEK, BENEFIT = 80, 40, 60, 200  # folk_life.BILLS_PER_ADULT, CAR_BILL; career.BENEFIT
 NO_SAVINGS_P = 0.25
 SAVINGS_CAP = 20000
 SAVINGS_WEEKS = {"low": (0, 4), "mid": (2, 10), "high": (10, 30), "retired": (3, 15)}
@@ -481,10 +489,18 @@ def populate(folk, sim, n: int) -> None:
             near = station_near[home.place] = geo.station_walk(home.place) <= STATION_NEAR
         p_car = CAR_P[home.tier] * (CAR_NEAR_STATION if near else 1.0)
         rr = hh_rr[hh.j]
+        budget = pension_budget(folk, hh)
+        if budget is not None:
+            budget -= home_cost(home)
         for pid in hh.member_ids:
             p = people[int(pid[1:])]
             if p.age >= 18:
                 p.owns_car = rr.random() < p_car
+                if p.owns_car and budget is not None:  # pensioners keep a car only while it fits the pension
+                    if budget < CAR:
+                        p.owns_car = False
+                    else:
+                        budget -= CAR
     # 5. schools
     assign_schools(sim, folk, geo, isolated)
     # 6. seekers
@@ -507,6 +523,8 @@ def populate(folk, sim, n: int) -> None:
     # 7-8. jobs
     match_rr = stream(seed, NS_GEN, "match")
     match_jobs(sim, folk, geo, seekers, isolated, match_rr)
+    # 8b. no wage and costs above the benefit: somewhere cheaper
+    rehouse(sim, folk, geo)
     # 9. money
     for hh in hhs:
         rr = hh_rr[hh.j]
@@ -572,30 +590,85 @@ def need_of(folk, hh) -> float:
     return total
 
 
-def move_in(sim, folk) -> None:
-    """Households by means (u desc, j) take the first free home with 2 x bedrooms >= need; every 10th home in value
-    order is held back and used only when nothing else fits. A shortfall raises."""
-    homes = region_homes(sim)
+class TooManyFolk(ValueError):
+    """More townsfolk than the region's homes take on this seed; `limit` is the most that fit."""
+
+    def __init__(self, n: int, limit: int):
+        super().__init__(f"the region has homes for at most {limit} townsfolk (asked for {n})")
+        self.n = n
+        self.limit = limit
+
+
+def home_cost(home) -> int:
+    """A home's weekly housing charge at the start: property tax when it is owned, else its rent."""
+    return housing.property_tax(home) if home.start == "owned" else int(home.rent)
+
+
+def pension_budget(folk, hh) -> float | None:
+    """What a household whose adults are all past PENSION_AGE has a week for housing (and cars) once bills and
+    groceries are paid; None for any other household."""
+    adults = 0
+    for pid in hh.member_ids:
+        p = folk.people[int(pid[1:])]
+        if p.age >= 18:
+            if p.age < PENSION_AGE:
+                return None
+            adults += 1
+    if not adults:
+        return None
+    return PENSION * adults - BILLS * adults - FOOD_WEEK * len(hh.member_ids)
+
+
+def _assign(homes: list, rows: list) -> list | None:
+    """move_in's rule on plain rows [(need, budget)] in move-in order: each takes the first free home with
+    2 x bedrooms >= need (and housing within budget when it has one), every 10th home in value order held back
+    and used only when nothing else fits; with a budget and nothing within it, the cheapest fitting home. The picks
+    (indices into homes), or None when some row finds no home."""
     free, held = [], []
     for k, h in enumerate(homes):
-        (held if k % 10 == 9 else free).append(h)
-    order = sorted(folk.households, key=lambda hh: (-hh.u, hh.j))
-    for hh in order:
-        need = need_of(folk, hh)
+        (held if k % 10 == 9 else free).append(k)
+    picks = []
+    for need, budget in rows:
         pick = None
-        for k, h in enumerate(free):
-            if 2 * h.bedrooms >= need:
-                pick = h
-                del free[k]
-                break
-        if pick is None:
-            for k, h in enumerate(held):
-                if 2 * h.bedrooms >= need:
-                    pick = h
-                    del held[k]
+        for pool in (free, held):
+            for x, k in enumerate(pool):
+                h = homes[k]
+                if 2 * h.bedrooms >= need and (budget is None or home_cost(h) <= budget):
+                    pick = k
+                    del pool[x]
                     break
+            if pick is not None:
+                break
+        if pick is None and budget is not None:
+            best = None
+            for pool in (free, held):
+                for x, k in enumerate(pool):
+                    h = homes[k]
+                    if 2 * h.bedrooms >= need:
+                        key = (home_cost(h), h.id)
+                        if best is None or key < best[0]:
+                            best = (key, pool, x, k)
+            if best is not None:
+                pick = best[3]
+                del best[1][best[2]]
         if pick is None:
-            raise RuntimeError(f"no region home fits household {hh.id} ({len(hh.member_ids)} people)")
+            return None
+        picks.append(pick)
+    return picks
+
+
+def move_in(sim, folk) -> None:
+    """Households by means (u desc, j) take the first free home with 2 x bedrooms >= need; every 10th home in value
+    order is held back and used only when nothing else fits. A household of pensioners takes only a home it can
+    live on (`pension_budget`), else the cheapest that fits. More people than the homes take raises TooManyFolk."""
+    homes = region_homes(sim)
+    order = sorted(folk.households, key=lambda hh: (-hh.u, hh.j))
+    picks = _assign(homes, [(need_of(folk, hh), pension_budget(folk, hh)) for hh in order])
+    if picks is None:
+        n = len(folk.people)
+        raise TooManyFolk(n, capacity(sim.seed, homes, named_names(sim), n))
+    for hh, k in zip(order, picks):
+        pick = homes[k]
         hh.home_id = pick.id
         pick.household = hh.id
         if pick.start == "owned":
@@ -603,6 +676,93 @@ def move_in(sim, folk) -> None:
             hh.weekly_rent = 0.0
         else:
             hh.weekly_rent = float(pick.rent)
+
+
+def capacity(seed: int, homes: list, taken: set, below: int) -> int:
+    """The most townsfolk (under `below`) whose households, dealt from the seed's deck as populate deals them, all
+    find a home in `homes` by move_in's rule: a binary search over n, each try a fresh deal."""
+    def fits(n: int) -> bool:
+        scratch = GenFolk(n)
+        cards, deck_rr = make_deck(seed)
+        total = 0
+        names = set(taken)
+        while total < n:
+            if not cards:
+                cards, deck_rr = _reshuffle(deck_rr)
+            kind = cards.pop()
+            j = len(scratch.households)
+            hh = make_household(None, scratch, j, kind, n - total, names, stream(seed, NS_GEN, "hh", j))
+            scratch.households.append(hh)
+            total += len(hh.member_ids)
+        order = sorted(scratch.households, key=lambda hh: (-hh.u, hh.j))
+        return _assign(homes, [(need_of(scratch, hh), pension_budget(scratch, hh)) for hh in order]) is not None
+
+    lo, hi = 0, below  # fits(lo), not fits(hi)
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _fixed_costs(sim, folk, hh) -> float:
+    """A household's weekly housing charge, bills and cars, and groceries for everyone."""
+    home = sim.homes[hh.home_id]
+    total = float(home_cost(home)) + FOOD_WEEK * len(hh.member_ids)
+    for pid in hh.member_ids:
+        p = folk.people[int(pid[1:])]
+        if p.age >= 18:
+            total += BILLS + (CAR if p.owns_car else 0)
+    return total
+
+
+def rehouse(sim, folk, geo: Geo) -> None:
+    """After job matching: a household with no paid job and an adult under PENSION_AGE whose costs are above its
+    income (BENEFIT each under PENSION_AGE, PENSION each past it) moves to the cheapest vacant start home that fits
+    and costs less, in household order; its pupils' commutes follow from the new home."""
+    homes = region_homes(sim)  # the vacant ones left, by value
+    high = HIGH_SCHOOL if HIGH_SCHOOL in sim.town.places else None
+    for hh in folk.households:
+        mem = [folk.people[int(pid[1:])] for pid in hh.member_ids]
+        adults = [p for p in mem if p.age >= 18]
+        if not adults or any(p.job is not None and p.job.hourly_wage > 0 for p in mem) \
+                or all(p.age >= PENSION_AGE for p in adults):
+            continue
+        income = 0
+        for p in adults:
+            income += PENSION if p.age >= PENSION_AGE else BENEFIT
+        cost = _fixed_costs(sim, folk, hh)
+        if cost <= income:
+            continue
+        now = home_cost(sim.homes[hh.home_id])
+        need = need_of(folk, hh)
+        best = None
+        for k, h in enumerate(homes):
+            if 2 * h.bedrooms >= need and home_cost(h) < now:
+                key = (home_cost(h), h.id)
+                if best is None or key < best[0]:
+                    best = (key, k)
+        if best is None:
+            continue
+        new = homes.pop(best[1])
+        old = sim.homes[hh.home_id]
+        old.household = None
+        if old.start == "owned":
+            old.owner = None
+        homes.append(old)
+        homes.sort(key=lambda h: (-h.base_value, h.id))
+        hh.home_id = new.id
+        new.household = hh.id
+        if new.start == "owned":
+            new.owner = hh.id
+            hh.weekly_rent = 0.0
+        else:
+            hh.weekly_rent = float(new.rent)
+        for p in mem:
+            if p.job is not None and p.job.title == "student" and p.commute is not None:
+                p.commute = pupil_commute(geo, new.place, p.job.place_id, high)
 
 
 # --- 5. schools --------------------------------------------------------------------------------------------------
@@ -647,9 +807,7 @@ def assign_schools(sim, folk, geo: Geo, isolated: bool) -> None:
             place = home_of[p.hh]
             p.job = student_job(p.age, MILLBROOK_SCHOOL)
             left[MILLBROOK_SCHOOL] -= 1
-            walk = geo.walk(place, MILLBROOK_SCHOOL)
-            p.commute = (MILLBROOK_SCHOOL, walk, "walk") if walk <= SCHOOL_WALK else \
-                (MILLBROOK_SCHOOL, geo.car(place, MILLBROOK_SCHOOL), "car")
+            p.commute = pupil_commute(geo, place, MILLBROOK_SCHOOL, None)
             k += 1
     high = HIGH_SCHOOL if HIGH_SCHOOL in left else None
     for p in kids:
@@ -670,17 +828,23 @@ def assign_schools(sim, folk, geo: Geo, isolated: bool) -> None:
             if best is None:
                 continue  # no seat anywhere: home-schooled
             school = best[1]
-        walk = geo.walk(place, school)
-        mode, minutes = "walk", walk
-        if walk > SCHOOL_WALK:
-            mode, minutes = "car", geo.car(place, school)
-            if school == high:
-                tr = geo.train(place, high, False)
-                if tr is not None and tr <= TEEN_TRAIN_CAP and tr <= walk - TRAIN_SAVES:
-                    mode, minutes = "train", tr
         p.job = student_job(p.age, school)
         left[school] -= 1
-        p.commute = (school, minutes, mode)
+        p.commute = pupil_commute(geo, place, school, high)
+
+
+def pupil_commute(geo: Geo, place: str, school: str, high: str | None) -> tuple:
+    """(school, minutes, mode) from home `place`: a walk of up to SCHOOL_WALK, else driven; a teen bound for
+    `high` (Riverton High) takes the train when it saves TRAIN_SAVES on the walk and takes at most TEEN_TRAIN_CAP."""
+    walk = geo.walk(place, school)
+    mode, minutes = "walk", walk
+    if walk > SCHOOL_WALK:
+        mode, minutes = "car", geo.car(place, school)
+        if school == high:
+            tr = geo.train(place, high, False)
+            if tr is not None and tr <= TEEN_TRAIN_CAP and tr <= walk - TRAIN_SAVES:
+                mode, minutes = "train", tr
+    return (school, minutes, mode)
 
 
 # --- 7-8. jobs ---------------------------------------------------------------------------------------------------

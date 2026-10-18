@@ -78,6 +78,11 @@
     return amount;
   }
 
+  // The household's charges on Sunday night: the housing charge (housing.weekly_cost) and the adults' bills and cars.
+  function _fixed(sim, hh) {
+    return G.housing.weekly_cost(sim, hh) + G.housing.bills(sim, hh);
+  }
+
   // `p`'s money week (an adult's Sunday slot, life.md 5.8): see money.py.
   function weekly(sim, p) {
     const { career, dice, housing, people } = G;
@@ -96,6 +101,9 @@
     let spend = life.lifestyle;
     const hh = people.household(sim, p);
     const adults = people.members(sim, p).filter(m => m.is_adult);
+    if (hh !== null && hh !== undefined) { // the habit only out of what the pay leaves after housing and the bills
+      spend = Math.min(spend, Math.max(0.0, pay - _fixed(sim, hh) / Math.max(1, adults.length)));
+    }
     let tight;
     if (hh !== null && hh !== undefined && sim.agents.has(p.id)) {
       const spare = housing.funds(sim, hh) - 10 * housing.weekly_outgo(sim, hh);
@@ -109,6 +117,9 @@
     // In the red after last Sunday's bills: no extras until out of it (the habit itself still follows the pay).
     if (hh !== null && hh !== undefined && hh.last_funds !== null && hh.last_funds !== undefined && hh.last_funds < 0) {
       spend = 0.0;
+    } else if (hh !== null && hh !== undefined && (hh.last_funds === null || hh.last_funds === undefined)
+      && housing.funds(sim, hh) < _fixed(sim, hh)) {
+      spend = 0.0; // the first Sunday (no bills paid yet), already short of tonight's charges
     } else if (tight) spend *= 0.5;
     p.money -= spend;
     const rr = dice.stream(people.dice_seed(sim), dice.WEEK_MONEY, p.id, sim.clock.day);
@@ -139,6 +150,6 @@
 
   G.money = {
     SUNDAY, WINDOW, LIFESTYLE_BASE, LIFESTYLE_THRIFT, LIFESTYLE_ADVENTURE, LIFESTYLE_UP, LIFESTYLE_DOWN, WEALTH_SPEND,
-    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _owns_home, _shock, weekly,
+    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _owns_home, _shock, _fixed, weekly,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

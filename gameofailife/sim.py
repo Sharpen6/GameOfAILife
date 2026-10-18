@@ -105,6 +105,9 @@ DECAY_SCALE = {
     "ward": {"social": 0.5, "fun": 0.5},  # life's hospital stay, like v2's afternoon in hospital
 }
 
+# Sleep: lying down between NAP_FROM and NAP_UNTIL with more than NAP_LONG minutes to the wake time is a 3-hour nap;
+# any other bedtime sleeps to the wake time, at most SLEEP_MAX minutes (an early night before a lie-in included).
+NAP_FROM, NAP_UNTIL, NAP_LONG, SLEEP_MAX = 9 * 60, 19 * 60, 4 * 60, 13 * 60
 LIGHT_CYCLE = 6  # minutes: N-S green 0-2, yellow 2-3, E-W green 3-5, yellow 5-6
 STOP_AT_LIGHTS = ("car", "taxi")  # they wait at a red light on entering a junction; buses and ambulances don't
 ONE_WAY = ("taxi", "ambulance")  # vehicles that take a character to one place: on arrival they are on foot again
@@ -668,8 +671,10 @@ class Simulation:
                 wake = min(7 * 60, agent.job.start_hour * 60 - max(90, (self.commute_minutes(agent) or 0) + 60))
             wake += self.rng.randrange(0, 25)
             minutes = (wake - m) % MINUTES_PER_DAY
-            if minutes > 11 * 60 or minutes < 60:  # a nap in the daytime
+            if minutes < 60 or (NAP_FROM <= m < NAP_UNTIL and minutes > NAP_LONG):  # a nap in the daytime
                 minutes = 180
+            elif minutes > SLEEP_MAX:  # an early night sleeps to the wake time, but not round the clock
+                minutes = SLEEP_MAX
             agent.busy_until = tick + minutes
         else:
             agent.busy_until = tick + act.minutes

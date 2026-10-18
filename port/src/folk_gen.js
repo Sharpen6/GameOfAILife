@@ -34,6 +34,9 @@
   // --- seekers and money ---
   const STUDY_P = 0.3, IDLE_P = 0.07;
   const PENSION = 400;
+  const PENSION_AGE = 65;
+  // --- homes a household can live on (the poverty floor at the start): see folk_gen.py ---
+  const BILLS = 80, CAR = 40, FOOD_WEEK = 60, BENEFIT = 200; // folk_life.BILLS_PER_ADULT, CAR_BILL; career.BENEFIT
   const NO_SAVINGS_P = 0.25;
   const SAVINGS_CAP = 20000;
   const SAVINGS_WEEKS = { low: [0, 4], mid: [2, 10], high: [10, 30], retired: [3, 15] };
@@ -396,9 +399,17 @@
       }
       const p_car = CAR_P[home.tier] * (near ? CAR_NEAR_STATION : 1.0);
       const rr = hh_rr[hh.j];
+      let budget = pension_budget(folk, hh);
+      if (budget !== null) budget -= home_cost(home);
       for (const pid of hh.member_ids) {
         const p = people[_idx(pid)];
-        if (p.age >= 18) p.owns_car = rr.random() < p_car;
+        if (p.age >= 18) {
+          p.owns_car = rr.random() < p_car;
+          if (p.owns_car && budget !== null) { // pensioners keep a car only while it fits the pension
+            if (budget < CAR) p.owns_car = false;
+            else budget -= CAR;
+          }
+        }
       }
     }
     // 5. schools
@@ -420,6 +431,8 @@
     // 7-8. jobs
     const match_rr = stream(seed, FM().NS_GEN, "match");
     match_jobs(sim, folk, geo, seekers, isolated, match_rr);
+    // 8b. no wage and costs above the benefit: somewhere cheaper
+    rehouse(sim, folk, geo);
     // 9. money
     for (const hh of hhs) {
       const rr = hh_rr[hh.j];
@@ -478,32 +491,88 @@
     return total;
   }
 
-  // Households by means (u desc, j) take the first free home with 2 x bedrooms >= need; every 10th home is held.
-  function move_in(sim, folk) {
-    const homes = region_homes(sim);
-    const free = [], held = [];
-    homes.forEach((h, k) => (k % 10 === 9 ? held : free).push(h));
-    const order = sortedBy(folk.households, hh => [-hh.u, hh.j]);
-    for (const hh of order) {
-      const need = need_of(folk, hh);
-      let pick = null;
-      for (let k = 0; k < free.length; k++) {
-        if (2 * free[k].bedrooms >= need) {
-          pick = free[k];
-          free.splice(k, 1);
-          break;
-        }
+  // More townsfolk than the region's homes take on this seed; `limit` is the most that fit.
+  class TooManyFolk extends Error {
+    constructor(n, limit) {
+      super(`the region has homes for at most ${limit} townsfolk (asked for ${n})`);
+      this.name = "TooManyFolk";
+      this.n = n;
+      this.limit = limit;
+    }
+  }
+
+  // A home's weekly housing charge at the start: property tax when it is owned, else its rent.
+  const home_cost = home => (home.start === "owned" ? G.housing.property_tax(home) : Math.trunc(home.rent));
+
+  // What a household whose adults are all past PENSION_AGE has a week for housing (and cars) once bills and groceries
+  // are paid; null for any other household.
+  function pension_budget(folk, hh) {
+    let adults = 0;
+    for (const pid of hh.member_ids) {
+      const p = folk.people[_idx(pid)];
+      if (p.age >= 18) {
+        if (p.age < PENSION_AGE) return null;
+        adults += 1;
       }
-      if (pick === null) {
-        for (let k = 0; k < held.length; k++) {
-          if (2 * held[k].bedrooms >= need) {
-            pick = held[k];
-            held.splice(k, 1);
+    }
+    if (!adults) return null;
+    return PENSION * adults - BILLS * adults - FOOD_WEEK * hh.member_ids.length;
+  }
+
+  // move_in's rule on plain rows [[need, budget]] in move-in order: see folk_gen.py. The picks (indices into homes),
+  // or null when some row finds no home.
+  function _assign(homes, rows) {
+    const free = [], held = [];
+    homes.forEach((h, k) => (k % 10 === 9 ? held : free).push(k));
+    const picks = [];
+    for (const [need, budget] of rows) {
+      let pick = null;
+      for (const pool of [free, held]) {
+        for (let x = 0; x < pool.length; x++) {
+          const h = homes[pool[x]];
+          if (2 * h.bedrooms >= need && (budget === null || home_cost(h) <= budget)) {
+            pick = pool[x];
+            pool.splice(x, 1);
             break;
           }
         }
+        if (pick !== null) break;
       }
-      if (pick === null) throw new Error(`no region home fits household ${hh.id} (${hh.member_ids.length} people)`);
+      if (pick === null && budget !== null) {
+        let best = null;
+        for (const pool of [free, held]) {
+          for (let x = 0; x < pool.length; x++) {
+            const h = homes[pool[x]];
+            if (2 * h.bedrooms >= need) {
+              const key = [home_cost(h), h.id];
+              if (best === null || _lt(key, best[0])) best = [key, pool, x, pool[x]];
+            }
+          }
+        }
+        if (best !== null) {
+          pick = best[3];
+          best[1].splice(best[2], 1);
+        }
+      }
+      if (pick === null) return null;
+      picks.push(pick);
+    }
+    return picks;
+  }
+
+  // Households by means (u desc, j) take the first free home with 2 x bedrooms >= need; every 10th home is held. A
+  // household of pensioners takes only a home it can live on, else the cheapest that fits; too many people raises
+  // TooManyFolk.
+  function move_in(sim, folk) {
+    const homes = region_homes(sim);
+    const order = sortedBy(folk.households, hh => [-hh.u, hh.j]);
+    const picks = _assign(homes, order.map(hh => [need_of(folk, hh), pension_budget(folk, hh)]));
+    if (picks === null) {
+      const n = folk.people.length;
+      throw new TooManyFolk(n, capacity(sim.seed, homes, named_names(sim), n));
+    }
+    order.forEach((hh, x) => {
+      const pick = homes[picks[x]];
       hh.home_id = pick.id;
       pick.household = hh.id;
       if (pick.start === "owned") {
@@ -511,6 +580,91 @@
         hh.weekly_rent = 0.0;
       } else {
         hh.weekly_rent = pick.rent;
+      }
+    });
+  }
+
+  // The most townsfolk (under `below`) whose households, dealt from the seed's deck as populate deals them, all find
+  // a home in `homes` by move_in's rule: a binary search over n, each try a fresh deal.
+  function capacity(seed, homes, taken, below) {
+    const fits = n => {
+      const scratch = new GenFolk(n);
+      let [cards, deck_rr] = make_deck(seed);
+      let total = 0;
+      const names = new Set(taken);
+      while (total < n) {
+        if (!cards.length) [cards, deck_rr] = _reshuffle(deck_rr);
+        const kind = cards.pop();
+        const j = scratch.households.length;
+        const hh = make_household(null, scratch, j, kind, n - total, names, stream(seed, FM().NS_GEN, "hh", j));
+        scratch.households.push(hh);
+        total += hh.member_ids.length;
+      }
+      const order = sortedBy(scratch.households, hh => [-hh.u, hh.j]);
+      return _assign(homes, order.map(hh => [need_of(scratch, hh), pension_budget(scratch, hh)])) !== null;
+    };
+    let lo = 0, hi = below;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (fits(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  // A household's weekly housing charge, bills and cars, and groceries for everyone.
+  function _fixed_costs(sim, folk, hh) {
+    const home = sim.homes.get(hh.home_id);
+    let total = home_cost(home) + FOOD_WEEK * hh.member_ids.length;
+    for (const pid of hh.member_ids) {
+      const p = folk.people[_idx(pid)];
+      if (p.age >= 18) total += BILLS + (p.owns_car ? CAR : 0);
+    }
+    return total;
+  }
+
+  // After job matching: a household with no paid job and an adult under PENSION_AGE whose costs are above its income
+  // moves to the cheapest vacant start home that fits and costs less: see folk_gen.py.
+  function rehouse(sim, folk, geo) {
+    let homes = region_homes(sim);
+    const high = sim.town.places.has(HIGH_SCHOOL) ? HIGH_SCHOOL : null;
+    for (const hh of folk.households) {
+      const mem = hh.member_ids.map(pid => folk.people[_idx(pid)]);
+      const adults = mem.filter(p => p.age >= 18);
+      if (!adults.length || mem.some(p => p.job !== null && p.job.hourly_wage > 0)
+        || adults.every(p => p.age >= PENSION_AGE)) continue;
+      let income = 0;
+      for (const p of adults) income += p.age >= PENSION_AGE ? PENSION : BENEFIT;
+      const cost = _fixed_costs(sim, folk, hh);
+      if (cost <= income) continue;
+      const now = home_cost(sim.homes.get(hh.home_id));
+      const need = need_of(folk, hh);
+      let best = null;
+      homes.forEach((h, k) => {
+        if (2 * h.bedrooms >= need && home_cost(h) < now) {
+          const key = [home_cost(h), h.id];
+          if (best === null || _lt(key, best[0])) best = [key, k];
+        }
+      });
+      if (best === null) continue;
+      const nu = homes.splice(best[1], 1)[0];
+      const old = sim.homes.get(hh.home_id);
+      old.household = null;
+      if (old.start === "owned") old.owner = null;
+      homes.push(old);
+      homes = sortedBy(homes, h => [-h.base_value, h.id]);
+      hh.home_id = nu.id;
+      nu.household = hh.id;
+      if (nu.start === "owned") {
+        nu.owner = hh.id;
+        hh.weekly_rent = 0.0;
+      } else {
+        hh.weekly_rent = nu.rent;
+      }
+      for (const p of mem) {
+        if (p.job !== null && p.job.title === "student" && p.commute !== null) {
+          p.commute = pupil_commute(geo, nu.place, p.job.place_id, high);
+        }
       }
     }
   }
@@ -551,9 +705,7 @@
         const place = home_of.get(p.hh);
         p.job = student_job(p.age, MILLBROOK_SCHOOL);
         left.set(MILLBROOK_SCHOOL, left.get(MILLBROOK_SCHOOL) - 1);
-        const walk = geo.walk(place, MILLBROOK_SCHOOL);
-        p.commute = walk <= SCHOOL_WALK ? [MILLBROOK_SCHOOL, walk, "walk"]
-          : [MILLBROOK_SCHOOL, geo.car(place, MILLBROOK_SCHOOL), "car"];
+        p.commute = pupil_commute(geo, place, MILLBROOK_SCHOOL, null);
         k += 1;
       }
     }
@@ -574,23 +726,28 @@
         if (best === null) continue; // no seat anywhere: home-schooled
         school = best[1];
       }
-      const walk = geo.walk(place, school);
-      let mode = "walk", minutes = walk;
-      if (walk > SCHOOL_WALK) {
-        mode = "car";
-        minutes = geo.car(place, school);
-        if (school === high) {
-          const tr = geo.train(place, high, false);
-          if (tr !== null && tr <= TEEN_TRAIN_CAP && tr <= walk - TRAIN_SAVES) {
-            mode = "train";
-            minutes = tr;
-          }
-        }
-      }
       p.job = student_job(p.age, school);
       left.set(school, left.get(school) - 1);
-      p.commute = [school, minutes, mode];
+      p.commute = pupil_commute(geo, place, school, high);
     }
+  }
+
+  // [school, minutes, mode] from home `place`: see folk_gen.py.
+  function pupil_commute(geo, place, school, high) {
+    const walk = geo.walk(place, school);
+    let mode = "walk", minutes = walk;
+    if (walk > SCHOOL_WALK) {
+      mode = "car";
+      minutes = geo.car(place, school);
+      if (school === high) {
+        const tr = geo.train(place, high, false);
+        if (tr !== null && tr <= TEEN_TRAIN_CAP && tr <= walk - TRAIN_SAVES) {
+          mode = "train";
+          minutes = tr;
+        }
+      }
+    }
+    return [school, minutes, mode];
   }
 
   // --- 7-8. jobs ---
@@ -1139,6 +1296,8 @@
     KINDS, DECK_SCALE, CAR_P, WALK_CAP, CAR_CAP, TRAIN_CAP, MB_PUPILS, HIGH_SCHOOL, MILLBROOK_SCHOOL, PENSION,
     SHIFT_OFFSETS, SCHOOL_LATE, stream, shift_offset, shift_hours, weekly_pay, Geo, ListBoard, board, set_rel,
     named_names, unique_name, baby_name, ages_for,
+    PENSION_AGE, BILLS, CAR, FOOD_WEEK, BENEFIT, TooManyFolk, home_cost, pension_budget, _assign, capacity, rehouse,
+    pupil_commute,
     make_deck, make_household, populate, region_homes, need_of, move_in, student_job, seats, assign_schools,
     job_rows, match_jobs, give_money, make_ties, newcomer, GenFolk, GenSim, build_lots, add_region_homes, generate,
     dump, _overlap,

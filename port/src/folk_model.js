@@ -19,6 +19,7 @@
     sleep: { energy: 0.0, hunger: 0.35, social: 0.0, fun: 0.0 },
     work: { social: 0.0, fun: 1.3, hunger: 0.6 },
     hospital: { social: 0.5, fun: 0.5 },
+    ward: { social: 0.5, fun: 0.5 }, // life's hospital stay (life._ward_care feeds and heals them hourly)
   };
   // Health as the named have it (sim._decay): hunger at 0 costs HUNGER_HEALTH a minute; every need above WELL_ABOVE
   // heals HEAL a minute up to life.max_health. Person.settle applies both in closed form, so reading a townsperson's
@@ -35,6 +36,7 @@
       this.j = j;
       this.gone = false;
       this.dinner_day = -1;
+      this.parcel_day = -1000; // the day a food parcel was last remembered (folk.FOOD_PARCEL)
     }
   }
 
@@ -104,7 +106,7 @@
       const dt = tick - this._nt;
       if (dt <= 0) return;
       this._nt = tick;
-      if (!this.alive) return; // the dead keep their last needs
+      if (!this.alive || this.gone) return; // the dead, and those who left town, keep their last needs
       if (this.age < 5) {
         this._heal(dt); // under-5s are held at 75 by folk.js: always well
         return;

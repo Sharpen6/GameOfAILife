@@ -97,11 +97,20 @@ def _shock(sim, p, rr, table, valence: int, what: str) -> int:
     return amount
 
 
+def _fixed(sim, hh) -> float:
+    """The household's charges on Sunday night: the housing charge (housing.weekly_cost) and the adults' bills and
+    cars (housing.bills)."""
+    from . import housing
+
+    return housing.weekly_cost(sim, hh) + housing.bills(sim, hh)
+
+
 def weekly(sim, p) -> None:
     """`p`'s money week (an adult's Sunday slot, life.md 5.8): the benefit; lifestyle spending (none while the
-    household is in the red after last Sunday's bills, halved while it tightens its belt); one bad and one good
-    shock; interest on debt; treated chronic conditions; and, for the household's richest adult, the children's
-    costs."""
+    household is in the red after last Sunday's bills or, before its first Sunday's bills, already short of them;
+    halved while it tightens its belt; the habit never more than p's pay leaves after their share of the housing
+    charge and bills, spending out of wealth on top); one bad and one good shock; interest on debt; treated chronic conditions; and, for the household's
+    richest adult, the children's costs."""
     from . import career, dice, housing, people
 
     life = p.life
@@ -124,6 +133,8 @@ def weekly(sim, p) -> None:
     spend = life.lifestyle
     hh = people.household(sim, p)
     adults = [m for m in people.members(sim, p) if m.is_adult]
+    if hh is not None:  # the habit only out of what the pay leaves after the housing charge and the bills
+        spend = min(spend, max(0.0, pay - _fixed(sim, hh) / max(1, len(adults))))
     if hh is not None and p.id in sim.agents:
         spare = housing.funds(sim, hh) - 10 * housing.weekly_outgo(sim, hh)
         if spare > 0:
@@ -136,6 +147,8 @@ def weekly(sim, p) -> None:
         tight = life.tight_until > sim.clock.tick
     if hh is not None and hh.last_funds is not None and hh.last_funds < 0:  # in the red after last Sunday's bills:
         spend = 0.0  # no extras until out of it (the habit itself still follows the pay)
+    elif hh is not None and hh.last_funds is None and housing.funds(sim, hh) < _fixed(sim, hh):
+        spend = 0.0  # the first Sunday (no bills paid yet), already short of tonight's charges
     elif tight:
         spend *= 0.5
     p.money -= spend
