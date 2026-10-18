@@ -231,7 +231,7 @@ def nearest(sim: Simulation, agent: Agent, kinds: tuple[str, ...], origin=None, 
     best, best_key = None, None
     # --- region ---
     town = sim.town
-    region = getattr(town, "world", "millbrook") == "region"
+    region = town.world == "region"
     if region:
         local = town.in_frozen(*here[0])
         cap = MAX_OUTING_MINUTES if max_minutes is None else max_minutes
@@ -277,7 +277,7 @@ def named_may_visit(sim: Simulation, agent: Agent, place_id: str, max_minutes: i
     place = town.places.get(place_id)
     if place is None:
         return False
-    if getattr(town, "world", "millbrook") != "region" or place_id in town.millbrook_ids:
+    if town.world != "region" or place_id in town.millbrook_ids:
         return True
     here = _spot(sim, agent)
     if town.in_frozen(*here[0]):
