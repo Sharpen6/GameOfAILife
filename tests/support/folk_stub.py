@@ -32,8 +32,8 @@ class SimStub(folk_gen.GenSim):
         if populate and n:
             folk_gen.populate(self.folk, self, n)
 
-    def event(self, text, agent=None, tag="news", importance=None, agents=None, **_kw):
-        ev = {"text": text, "tag": tag, "agent": getattr(agent, "id", agent), "importance": importance,
+    def event(self, text, agent=None, kind=None, *, tag="news", importance=None, agents=None, **_kw):
+        ev = {"text": text, "tag": tag, "kind": kind, "agent": getattr(agent, "id", agent), "importance": importance,
               "agents": [getattr(a, "id", a) for a in (agents or ())], "tick": self.clock.tick}
         self.events.append(ev)
         return ev

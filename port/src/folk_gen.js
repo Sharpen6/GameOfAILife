@@ -346,6 +346,7 @@
   function populate(folk, sim, n) {
     const isolated = Boolean(folk.isolated);
     sim.folk = folk; // people.person(sim, "f<i>") must find the people being made
+    if (folk.sim === null || folk.sim === undefined) folk.sim = sim;
     const seed = sim.seed;
     const geo = new Geo(sim);
     const taken = named_names(sim);
@@ -859,7 +860,8 @@
         while (have < want && tries < 12) {
           tries += 1;
           const q = pool[rr.int(0, pool.length - 1)];
-          if (q === p || q.hh === p.hh || Math.abs(q.age - p.age) > FRIEND_AGE_GAP || p.relationships.has(q.id)) continue;
+          if (q === p || q.hh === p.hh || Math.abs(q.age - p.age) > FRIEND_AGE_GAP) continue;
+          if (p.relationships.has(q.id)) continue;
           if ((count.get(ck(q.i, "d")) || 0) >= 3) continue;
           set_rel(sim, p.id, q.id, RK.FRIEND, rr.uniform(30, 60));
           have += 1;
@@ -990,6 +992,7 @@
       this.people = [];
       this.households = [];
       this.seekers = 0;
+      this.sim = null;
     }
 
     person(pid) {
@@ -1045,6 +1048,13 @@
     household_by_id(hid) {
       const hh = this.households.get(hid);
       return hh !== undefined ? hh : this.folk.household(hid);
+    }
+
+    event(text, agent = null, kind = null, opts = {}) {
+      const ev = { text, tag: opts.tag || "news", agents: (opts.agents || []).map(a => (a && a.id) || a),
+        tick: this.clock.tick };
+      this.events.push(ev);
+      return ev;
     }
   }
 
