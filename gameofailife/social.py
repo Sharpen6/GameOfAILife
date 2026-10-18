@@ -105,7 +105,7 @@ def _count(sim, key: str, n: int = 1) -> None:
     sim.social.counts[key] += n
     today = getattr(getattr(sim, "life", None), "today", None)
     if today is not None:
-        today[key] += n
+        today[key] = today.get(key, 0) + n
 
 
 def _first(name: str) -> str:
@@ -1071,7 +1071,7 @@ def _lending(sim) -> None:
     + .3 (1 - thrift), +1, borrower luck)."""
     day = sim.clock.day
     loans = _loans(sim)
-    owing = {row["borrower"] for row in loans}
+    owing = {row.get("borrower") for row in loans}
     iso = people.isolated(sim)
     for p in people.everyone(sim):
         if p.money >= -200 or not p.is_adult or p.id in owing or _cool(p, "borrow", day):

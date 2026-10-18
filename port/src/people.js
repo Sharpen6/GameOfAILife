@@ -189,6 +189,11 @@
       sim._folk_news[1] += 1;
       return sim._folk_news[1] <= FOLK_NEWS_CAP;
     }
+    const day = sim.clock.day;
+    if (sim._folk_news_day !== day) { // a new game day, whoever clears sim.life.today
+      sim._folk_news_day = day;
+      if (today instanceof Map) today.set("folk_news", 0); else today.folk_news = 0;
+    }
     const n = (today instanceof Map ? (today.get("folk_news") || 0) : (today.folk_news || 0)) + 1;
     if (today instanceof Map) today.set("folk_news", n); else today.folk_news = n;
     return n <= FOLK_NEWS_CAP;
