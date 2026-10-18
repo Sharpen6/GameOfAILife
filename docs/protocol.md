@@ -1503,7 +1503,10 @@ Townsfolk are not characters: no `fork` is ever about one and no controller can 
 `{"kind": "folk", "luck_settable", "id", "name", "age", "sex", "alive", "gone", "state", "activity", "place",
 "inside", "x", "y", "luck", "money", "savings", "worth", "health", "mood", "reputation", "needs", "job", "commute",
 "home", "household_id", "household", "vehicle", "relationships", "memory", "choices", "traits", "life"}`: `gone`
-is true once they have left the region, `commute` `[work place id, minutes, mode]` or `null`, `home` `{"id", "name", "place"}`,
+is true once they have left the region, `job` as on a named page (a townsperson on a region job keeps their own start: on
+its `hours`, or 15 or 30 minutes before or after, finishing as much earlier or later; the region's schools but
+Riverton High start at 08:30; Millbrook's jobs and school keep their hours),
+`commute` `[work place id, minutes, mode]` or `null`, `home` `{"id", "name", "place"}`,
 `household` their household's living members' names, `choices` the settled choices of their life so far
 (the named get forks instead), `life` as on a named page (see [Life](#life)). A named character's page has
 `"kind": "named"`.

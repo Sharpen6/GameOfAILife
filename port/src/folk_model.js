@@ -20,6 +20,10 @@
     work: { social: 0.0, fun: 1.3, hunger: 0.6 },
     hospital: { social: 0.5, fun: 0.5 },
   };
+  // Health as the named have it (sim._decay): hunger at 0 costs HUNGER_HEALTH a minute; every need above WELL_ABOVE
+  // heals HEAL a minute up to life.max_health. Person.settle applies both in closed form, so reading a townsperson's
+  // needs (a page, the hourly stats) never changes what their health comes to.
+  const HUNGER_HEALTH = 0.03, HEAL = 0.004, WELL_ABOVE = 40.0;
 
   const folk_id = i => `f${i}`;
   const household_id = j => `fh${j}`;
@@ -100,13 +104,41 @@
       const dt = tick - this._nt;
       if (dt <= 0) return;
       this._nt = tick;
-      if (!this.alive || this.age < 5) return; // the dead keep their last needs; under-5s are held at 75 by folk.js
+      if (!this.alive) return; // the dead keep their last needs
+      if (this.age < 5) {
+        this._heal(dt); // under-5s are held at 75 by folk.js: always well
+        return;
+      }
       const { NEEDS, NEED_DECAY } = G.agent;
       const scale = DECAY_SCALE[this.state === "busy" ? this.activity : ""] || {};
       const needs = this._needs;
+      let well = dt; // the minutes every need stays above WELL_ABOVE
+      let starve = 0.0; // the minutes hunger spends at 0
       for (const n of NEEDS) {
-        const v = needs[n] - NEED_DECAY[n] * (n in scale ? scale[n] : 1.0) * dt;
+        const v0 = needs[n];
+        const rate = NEED_DECAY[n] * (n in scale ? scale[n] : 1.0);
+        if (v0 <= WELL_ABOVE) {
+          well = 0;
+        } else if (rate > 0 && v0 - rate * dt <= WELL_ABOVE) {
+          const left = (v0 - WELL_ABOVE) / rate;
+          if (left < well) well = left;
+        }
+        if (n === "hunger" && rate > 0 && v0 - rate * dt < 0) starve = dt - v0 / rate;
+        const v = v0 - rate * dt;
         needs[n] = v < 0.0 ? 0.0 : v > 100.0 ? 100.0 : v;
+      }
+      if (well > 0) this._heal(well);
+      if (starve > 0) {
+        const h = this.health - HUNGER_HEALTH * starve;
+        this.health = h < 0.0 ? 0.0 : h;
+      }
+    }
+
+    _heal(minutes) {
+      const top = G.life.max_health(this);
+      if (this.health < top) {
+        const h = this.health + HEAL * minutes;
+        this.health = h > top ? top : h;
       }
     }
 
@@ -205,6 +237,7 @@
   const people_module = () => G.people;
 
   G.folk_model = { FOLK_DEFAULT, NS_FOLK, NS_GEN, NS_TOWN, NS_TEXT, NS_STROLL, NS_FOLK_HOME, WALK, DRIVE, WAIT, RIDE,
-    K_WALK, K_CAR, K_AMBULANCE, K_WAIT, K_OUTDOORS, MEMORY_KEEP, CHOICES_KEEP, INBOX_KEEP, DECAY_SCALE, folk_id,
+    K_WALK, K_CAR, K_AMBULANCE, K_WAIT, K_OUTDOORS, MEMORY_KEEP, CHOICES_KEEP, INBOX_KEEP, DECAY_SCALE, HUNGER_HEALTH, HEAL,
+    WELL_ABOVE, folk_id,
     household_id, FolkHousehold, Trip, Person, people_module };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

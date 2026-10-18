@@ -190,6 +190,40 @@ class TripTest(unittest.TestCase):
                 self.check_trip(tr, a, b, tick, car)
         self.assertGreater(n, 400)
 
+    def test_the_search_repeats_every_period_and_trip_minutes_is_its_minutes(self):
+        """The search is memoized by the departure's phase (tick % period, the lcm of the lines' cycles): a trip a
+        period later is the same trip shifted by it, and trip_minutes is the trip's minutes without its legs."""
+        r = rail._rail(self.town)
+        self.assertEqual(r.period, 120)  # lines of 60- and 40-minute cycles
+        n = 0
+        for i, (a, b) in enumerate(self.pairs[:60]):
+            car = i % 3 == 0
+            for tick in (i, 500 + 7 * i):
+                tr = rail.trip_via_roads(self.town, self.net, a, b, tick, car)
+                later = rail.trip_via_roads(self.town, self.net, a, b, tick + 5 * r.period, car)
+                self.assertEqual(rail.trip_minutes(self.town, self.net, a, b, tick, car),
+                                 None if tr is None else tr.minutes)
+                if tr is None:
+                    self.assertIsNone(later)
+                    continue
+                n += 1
+                self.assertEqual((later.minutes, later.board, later.alight), (tr.minutes, tr.board, tr.alight))
+                shift = 5 * r.period
+                self.assertEqual([(k, t0 + shift, t1 + shift) for k, t0, t1, _ in tr.legs],
+                                 [(k, t0, t1) for k, t0, t1, _ in later.legs])
+        self.assertGreater(n, 50)
+
+    def test_folk_road_legs_share_their_routes(self):
+        """folk_transit keeps a road leg's Route (immutable) in its own cache, so the day's repeated trips share it."""
+        from gameofailife import folk_transit
+        a, b = self.pairs[5]
+        one = folk_transit.road_leg(self.town, folk_transit.WALK, a, b, 100)
+        two = folk_transit.road_leg(self.town, folk_transit.WALK, a, b, 900)
+        self.assertIs(one[3], two[3])
+        fresh = self.net.route(a, b, "walk", keep=False)
+        self.assertEqual((one[3].pts, one[3].t8, one[3].mode), (fresh.pts, fresh.t8, "walk"))
+        self.assertEqual((two[1], two[2]), (900, 900 + max(1, fresh.minutes)))
+
     def test_worst_minutes_bounds_every_departure(self):
         for i, (a, b) in enumerate(self.pairs[:40]):
             car = i % 3 == 0

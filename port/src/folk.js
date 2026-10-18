@@ -21,6 +21,13 @@
   const LATE_GRACE = 5; // minutes late before reputation suffers
   const EVENING = 19 * 60; // choices after this are "evening" ones
   const DINNER_FROM = 17 * 60 + 30, DINNER_UNTIL = 19 * 60 + 30, DINNER_MINUTES = 45; // the family dinner, once a day
+  // Off sick (life.can_work false), a townsperson rests at home (sick_home) until the next of these meals or bedtime,
+  // eats at home (eat_home, a grocery) and rests again; breakfast is on waking, as every day.
+  const LUNCH = 12 * 60 + 30;
+  const SICK_MEALS = [LUNCH, 18 * 60 + 30];
+  // A late shift's morning at home (they set off after LUNCH + MEAL_MINUTES) breaks for lunch at LUNCH, a meal at
+  // home as off sick: breakfast, the shift's own lunch break and nothing more would starve them by inches.
+  const MEAL_MINUTES = 30;
   const STROLL_EVERY = 5; // minutes between a park stroller's hops
   const STROLL_MINUTES = 10; // one way of a stroll round the block when no park is in reach
   const FAV_WALK = 25, FAV_CAR = 15, FAV_KEEP = 3; // favourites: the nearest FAV_KEEP within these minutes
@@ -28,7 +35,7 @@
   const CPU_KEEP = 1440; // ticks of timings kept for the perf report
   const WARD = "ward";
   const FREE = ["relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-    "idle", "stroll", "movie", "golf", "read"]; // activities that can be interrupted (is_free)
+    "idle", "stroll", "movie", "golf", "read", "order_groceries"]; // activities that can be interrupted (is_free)
 
   // activity -> [need gains over the whole stay, outdoors]. Decay is folk_model's (DECAY_SCALE by activity).
   const ACT = {
@@ -43,6 +50,7 @@
     coffee: [{ energy: 15, social: 5 }, false],
     eat_out: [{ hunger: 55, social: 10, fun: 6 }, false],
     buy_groceries: [{}, false],
+    order_groceries: [{}, false],
     shopping: [{ fun: 20 }, false],
     hang_out: [{ social: 40, fun: 25 }, false],
     walk_park: [{ fun: 30, social: 4 }, true],
@@ -54,7 +62,7 @@
     idle: [{}, false],
   };
   const SLEEP_ENERGY = 0.17;
-  const HOME_ACTS = ["sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home"];
+  const HOME_ACTS = ["sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries"];
   const KEEP_OPEN = HOME_ACTS.concat(["work", "school", WARD, "idle"]); // stays that do not end at closing time
   const LEISURE = { // favourite key -> [place kind, styles or null for any]
     coffee: ["cafe", ["cafe", "bakery"]],
@@ -65,6 +73,9 @@
   };
   const GROCERY_COST = 35, COFFEE_COST = 4, MEAL_COST = 14, DINNER_COST = 20, HANG_COST = 8;
   const GROCERY_MEALS = 10;
+  // With no grocer in reach (no market or grocer's within FAV_WALK on foot, or FAV_CAR by car), groceries are
+  // ordered in from home: the same shop for DELIVERY_FEE more, DELIVERY_MINUTES at home to order and take them in.
+  const DELIVERY_FEE = 8, DELIVERY_MINUTES = 15;
   // A day out (folk.md 5 day_off d), by "kind/style": [activity, label, cost or null for the shopping spend, min age]
   const DAY_OUT = {
     "shop/mall": ["shopping", "A day at the mall", null, 0],
@@ -144,7 +155,9 @@
       this._bed = new Map();
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
+      this._shifts = new Map(); // i -> [job, minutes its day starts and ends late: folk_gen.shift_offset]
       this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
+      this.sent = new Set(); // people on a send_to errand (an invite, a date): not free until its stay ends
       this._locator = (p, tick) => this._locate(p, tick);
       this._bind();
       if (this.n <= 0) {
@@ -350,25 +363,11 @@
 
     // --- needs ---
 
-    // Needs to `now` (folk_model's decay), hunger at 0 costing health.
+    // Needs and health to `now` (folk_model's Person.settle: decay, healing while well, hunger at 0 costing health);
+    // under-5s are held at 75.
     settle(p, now) {
-      const { NEEDS, NEED_DECAY } = G.agent;
-      if (p.age < 5) {
-        for (const n of NEEDS) p._needs[n] = 75.0;
-        p._nt = now;
-        return;
-      }
-      const dt = now - p._nt;
-      if (dt > 0) {
-        const scale = fm().DECAY_SCALE[p.state === "busy" ? p.activity : ""] || {};
-        const rate = NEED_DECAY.hunger * ("hunger" in scale ? scale.hunger : 1.0);
-        const h = p._needs.hunger;
-        if (rate > 0 && h - rate * dt < 0) {
-          const starve = dt - h / rate;
-          p.health = Math.max(0.0, p.health - 0.03 * starve);
-        }
-      }
       p.settle(now);
+      if (p.age < 5) for (const n of G.agent.NEEDS) p._needs[n] = 75.0;
     }
 
     // The stay that ends now (or is cut short) gives its gains, pro rata.
@@ -415,8 +414,25 @@
       }
       const [minutes, mode] = this._commute_of(p);
       if (mode === "train") spare = SHIFT_MARGIN; // train commuters time it to the train, so they ride together
-      return p.job.start_hour * 60 - minutes - spare;
+      return this._start_minute(p) - minutes - spare;
     }
+
+    // Minutes p's shift or school day starts and ends after its job's hours (folk_gen.shift_offset: their own on a
+    // region job row, 08:30 at a region school but Riverton High), kept while the job is the same.
+    _shift(p) {
+      const job = p.job;
+      const got = this._shifts.get(p.i);
+      if (got !== undefined && got[0] === job) return got[1];
+      const off = G.folk_gen.shift_offset(this.sim, p);
+      this._shifts.set(p.i, [job, off]);
+      return off;
+    }
+
+    // The minute of the day p's shift or school day starts.
+    _start_minute(p) { return p.job.start_hour * 60 + this._shift(p); }
+
+    // The minute of the day p's shift or school day ends.
+    _end_minute(p) { return p.job.end_hour * 60 + this._shift(p); }
 
     _bed_minute(p) {
       let bed = this._bed.get(p.i);
@@ -455,9 +471,12 @@
     step(sim, p, now) {
       this.settle(p, now);
       if (p.health <= 0) {
-        this.counters.starved += 1;
-        G.life.die(sim, p, "starved");
-        if (p.alive) kill(sim, p, "starved"); // a life stub that does not kill: keep them off the wheel anyway
+        // Starved when hunger at 0 took the last of their health; otherwise (the damp, a chill) they collapse, as a
+        // named does at health 0.
+        const how = p._needs.hunger <= 0 ? "starved" : "collapsed and could not be saved";
+        if (how === "starved") this.counters.starved += 1;
+        G.life.die(sim, p, how);
+        if (p.alive) kill(sim, p, how); // a life stub that does not kill: keep them off the wheel anyway
         return;
       }
       const end = this.ends.get(p.i);
@@ -471,6 +490,7 @@
         this._arrive(sim, p, now);
         return;
       }
+      this.sent.delete(p.i); // the errand's stay is over (or it was cut short): free time is theirs again
       this._gain(p, now);
       const [day, m] = divmod(now, DAY);
       const home = this.home_place(p);
@@ -504,28 +524,36 @@
       const job = p.job;
       const bed = this._bed_minute(p);
       const night = m >= bed || m < this._wake_minute(p, day);
-      if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < job.end_hour * 60 - 60) {
+      if (act === "sick_home" && p.state === "busy" && !night) {
+        this._home_meal(p, now); // a rest off sick ends at a meal at home
+        return;
+      }
+      if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < this._end_minute(p) - 60) {
         const [commute, mode] = this._commute_of(p);
         const leave = this._set_off(p);
         const early = m < leave;
         if (early && (p.inside === home || home === null) && !night) {
-          this._begin(p, now, "relax_home", leave - m);
+          if (act === "relax_home" && LUNCH <= m && m < LUNCH + 60 && m + MEAL_MINUTES <= leave) {
+            this._home_meal(p, now); // lunch before a late shift
+          } else {
+            this._begin(p, now, "relax_home", Folk._lunch_break(m, leave) - m);
+          }
           return;
         }
         if (early && home !== null && leave - m > 60 && !night) {
-          this._go_home(sim, p, now, "relax_home", day * DAY + leave);
+          this._go_home(sim, p, now, "relax_home", day * DAY + Folk._lunch_break(m, leave));
           return;
         }
         if (!early || !night) {
           p.worked_day = day;
           if (!G.life.can_work(sim, p)) {
             this.counters.sick_days += 1;
-            this._go_home(sim, p, now, "sick_home", this._wake_tick(p, now));
+            this._sick_rest(sim, p, now);
             return;
           }
           const work = job.title === "student" || p.age < 18 ? "school" : "work";
           if (work === "school" && mode === "car") this._school_run(p, now, job.place_id);
-          this._go(sim, p, now, job.place_id, work, day * DAY + job.end_hour * 60, 30, mode);
+          this._go(sim, p, now, job.place_id, work, day * DAY + this._end_minute(p), 30, mode);
           return;
         }
       }
@@ -533,8 +561,50 @@
         this._go_home(sim, p, now, "sleep", this._wake_tick(p, now));
         return;
       }
+      if (!G.life.can_work(sim, p)) { // off sick (or home from hospital) on a day off too: rest, not out
+        this._sick_rest(sim, p, now);
+        return;
+      }
       if (DINNER_FROM <= m && m < DINNER_UNTIL && home !== null && p.inside === home && this._dinner(p, now, day)) return;
       this.choose(sim, p, now, m >= EVENING ? "evening" : "day_off");
+    }
+
+    // Off sick: rest at home until the next of SICK_MEALS or bedtime (overnight, until they wake).
+    _sick_rest(sim, p, now) {
+      const [day, m] = divmod(now, DAY);
+      let until = this._bed_minute(p);
+      for (const meal of SICK_MEALS) {
+        if (m < meal && meal < until) {
+          until = meal;
+          break;
+        }
+      }
+      this._go_home(sim, p, now, "sick_home", until > m ? day * DAY + until : this._wake_tick(p, now));
+    }
+
+    // The minute a morning at home before the shift ends: LUNCH when lunch fits before they set off, else when they
+    // set off.
+    static _lunch_break(m, leave) {
+      return m < LUNCH && LUNCH + MEAL_MINUTES <= leave ? LUNCH : leave;
+    }
+
+    // A meal at home (off sick, or lunch before a late shift), as breakfast is (eat_home, a grocery if there is one);
+    // with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its payer can
+    // afford them.
+    _home_meal(p, now) {
+      const hh = this.hh_of(p);
+      if (hh !== null) {
+        if (hh.groceries <= 0) {
+          const payer = this._payer(p) || p;
+          const cost = GROCERY_COST + DELIVERY_FEE;
+          if (payer.money + payer.savings >= cost) {
+            payer.money -= cost;
+            hh.groceries += GROCERY_MEALS;
+          }
+        }
+        if (hh.groceries > 0) hh.groceries -= 1;
+      }
+      this._begin(p, now, "eat_home", MEAL_MINUTES);
     }
 
     // The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one grocery
@@ -678,7 +748,7 @@
       this._enter(p, t.dest);
       const job = p.job;
       if ((t.then === "work" || t.then === "school") && job !== null) {
-        const late = now - (Math.floor(now / DAY) * DAY + job.start_hour * 60);
+        const late = now - (Math.floor(now / DAY) * DAY + this._start_minute(p));
         if (late > LATE_GRACE) {
           this.counters.late += 1;
           p.reputation = Math.max(0.0, p.reputation - 1);
@@ -733,6 +803,25 @@
       return true;
     }
 
+    // A market, or a grocer's (a shop of style "shop"), among the person's favourites: within FAV_WALK on foot, or
+    // FAV_CAR by car with a car (opening hours aside).
+    _grocer_in_reach(p) {
+      if (this._favs(p, "groceries").length) return true;
+      for (const pid of this._favs(p, "shopping")) if (this.town.places.get(pid).style === "shop") return true;
+      return false;
+    }
+
+    // Buy groceries at the first open grocer in reach; with none in reach, order them in from home (the isolated and
+    // the old in the far suburbs would starve otherwise).
+    _grocery_option(p, now, home, base) {
+      if (this._grocer_in_reach(p)) {
+        return new Option("Buy groceries", "buy_groceries", this._pick(p, "groceries", now, 25), 25, GROCERY_COST,
+          { thrift: 0.2, family: 0.3 }, {}, base);
+      }
+      return new Option("Order groceries in", "order_groceries", home, DELIVERY_MINUTES, GROCERY_COST + DELIVERY_FEE,
+        { thrift: 0.2, family: 0.3 }, {}, base);
+    }
+
     _pick(p, key, now, minutes) {
       for (const pid of this._favs(p, key)) if (this._usable(pid, now, minutes)) return pid;
       if (key === "groceries") {
@@ -760,8 +849,7 @@
         const cafe_key = hungry ? "eat_out" : "coffee";
         opts = [
           new Option("Go home and relax", home_act, home, 90, 0, { family: 0.3 }, relax_gains, 0.2),
-          new Option("Buy groceries", "buy_groceries", this._pick(p, "groceries", now, 25), 25, GROCERY_COST,
-            { thrift: 0.2, family: 0.3 }, {}, low ? 1.0 : -0.8),
+          this._grocery_option(p, now, home, low ? 1.0 : -0.8),
           new Option(hungry ? "Eat out" : "Coffee", hungry ? "eat_out" : "coffee",
             this._pick(p, cafe_key, now, 40), hungry ? 40 : 20, hungry ? MEAL_COST : COFFEE_COST,
             { social: 0.4, thrift: -0.3 }, ACT[hungry ? "eat_out" : "coffee"][0], 0.0),
@@ -771,8 +859,7 @@
         const spend = Math.trunc(15 + 45 * (1 - thrift));
         // Low on groceries, the shopping trip is for groceries: see folk.py.
         const shop = low
-          ? new Option("Buy groceries", "buy_groceries", this._pick(p, "groceries", now, 25), 25, GROCERY_COST,
-            { thrift: 0.2, family: 0.3 }, {}, 1.0)
+          ? this._grocery_option(p, now, home, 1.0)
           : new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
             { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05);
         opts = [
@@ -850,8 +937,8 @@
       const thrift = "thrift" in traits ? traits.thrift : 0.5;
       const m = now % DAY;
       const rate = TRAVEL_COST * (m >= NIGHT_FROM * 60 || m < NIGHT_UNTIL * 60 ? NIGHT_TRAVEL : 1);
-      const here = this.where.get(p.i) || this.home_place(p);
       const home = this.home_place(p);
+      const here = this.where.get(p.i) || home;
       const car = this._has_car(p);
       const direct = this._trip_minutes(here, home, car);
       const scores = [];
@@ -867,9 +954,9 @@
         let afford = 0.0;
         if (opt.cost > 0) afford = opt.cost <= own ? -opt.cost / Math.max(own, 50) * thrift : -2.0;
         let score = opt.base + STYLE * style + need + afford;
-        if (opt.place !== home || opt.activity === "stroll") {
-          let extra = this._trip_minutes(here, opt.place, car) + this._trip_minutes(opt.place, home, car) - direct;
-          if (opt.activity === "stroll") extra = 2 * STROLL_MINUTES;
+        if (opt.activity === "stroll" || opt.place !== home) {
+          const extra = opt.activity === "stroll" ? 2 * STROLL_MINUTES
+            : this._trip_minutes(here, opt.place, car) + this._trip_minutes(opt.place, home, car) - direct;
           if (extra > 0) score -= extra * rate;
         }
         scores.push(G.py.pyRound(score, 3));
@@ -909,13 +996,13 @@
       const opts = this.options(sim, p, now, kind);
       const scores = this.score_options(sim, p, opts, now);
       const order = [0, 1, 2, 3].sort((a, b) => scores[b] - scores[a] || a - b);
-      const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now);
       let pick, by;
       if (scores[order[0]] - scores[order[1]] >= OBVIOUS_MARGIN) {
         pick = order[0];
         by = "habit";
         this.counters.habit += 1;
       } else {
+        const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now); // keyed: made only when the noise decides
         let best = null;
         pick = 0;
         for (let k = 0; k < 4; k++) {
@@ -961,7 +1048,7 @@
         const payer = this._payer(p) || p;
         payer.money -= opt.cost;
       }
-      if (opt.activity === "buy_groceries") {
+      if (opt.activity === "buy_groceries" || opt.activity === "order_groceries") {
         const hh = this.hh_of(p);
         if (hh !== null) hh.groceries += GROCERY_MEALS;
       }
@@ -1373,18 +1460,19 @@
   // --- life.md 3.2: the folk functions life calls ---
 
   // Alive, in town, awake, not at or heading to work or school, not in hospital, in free time (and not due at a
-  // shift within the hour).
+  // shift within the hour), and not on an errand someone sent them on (`send_to`: an invite, a date, a friend's
+  // outing) until its stay ends, so nobody pulls them off it.
   function is_free(sim, p) {
     const f = _folk_of(sim);
     if (f === null || !(p instanceof fm().Person) || !p.alive || p.gone || p.age < 5) return false;
-    if (!FREE.includes(p.activity)) return false;
+    if (!FREE.includes(p.activity) || f.sent.has(p.i)) return false;
     const job = p.job;
     if (job !== null) {
       const now = sim.clock.tick;
       const [day, m] = divmod(now, DAY);
       if (job.workdays.includes(day % 7) && p.worked_day !== day) {
         const leave = f._set_off(p);
-        if (leave - 60 <= m && m < job.end_hour * 60) return false;
+        if (leave - 60 <= m && m < f._end_minute(p)) return false;
       }
     }
     return true;
@@ -1403,6 +1491,8 @@
     else f._gain(p, now);
     f.settle(p, now);
     f.ends.delete(p.i);
+    if (ward) f.sent.delete(p.i);
+    else f.sent.add(p.i);
     if (f.where.get(p.i) === place_id) {
       f._begin(p, now, activity, minutes);
       return true;
@@ -1483,6 +1573,7 @@
     f.out.delete(p.i);
     f._leave(p);
     f.ends.delete(p.i);
+    f.sent.delete(p.i);
     p.next_tick = -1;
     p.state = "idle";
     p.activity = "idle";

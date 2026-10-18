@@ -311,6 +311,18 @@ class FolkDaysTest(unittest.TestCase):
                 self.assertTrue(0.12 <= evening / n <= 0.35, (seed, d, evening, n))
             self.assertLessEqual(probe.peak, 400, seed)
 
+    def test_the_rush_is_spread_over_the_hour(self):
+        """Starts are staggered (folk_gen.shift_offset), so the street does not empty at 08:00 between those who start
+        at 08:00 and those who start at 09:00: on weekdays at least half the morning peak is outdoors at 08:00."""
+        if not integrated():
+            self.skipTest("needs folk_gen's staggered starts")
+        for seed, probe in self.probes.items():
+            days = sorted({t // DAY for t in probe.outdoors if (t // DAY) % 7 < 5 and t % DAY == 480})
+            self.assertTrue(days, seed)
+            for d in days:
+                peak = max(probe.outdoors[t] for t in range(d * DAY + 420, d * DAY + 541) if t in probe.outdoors)
+                self.assertGreaterEqual(probe.outdoors[d * DAY + 480], 0.5 * peak, (seed, d, peak))
+
     def test_home_at_night(self):
         for seed, probe in self.probes.items():
             for at_home, total in probe.home_at_3:
@@ -494,6 +506,210 @@ class ApiTest(unittest.TestCase):
         p = next(q for q in f.living() if q.job is not None and q.age >= 18)
         m = f.commute_minutes(p, p.job.place_id)
         self.assertIsNotNone(m)
+
+
+class CompanionTest(unittest.TestCase):
+    """Someone sent on an errand (`send_to`: an invite, a date, a friend's outing) keeps it: nobody's company for
+    another outing and never re-sent until its stay ends; nobody at work, at school or asleep is company either."""
+
+    def test_an_errand_is_kept(self):
+        if not integrated():
+            self.skipTest("needs the real Simulation and social.pick_companion")
+        from gameofailife import people, social
+        from gameofailife.agent import RelationKind
+        sim = make_world(SEEDS[0], 200)
+        for _ in range(9 * 60):  # to 14:00 on day 0
+            sim.step()
+        f = sim.folk
+        free = [p for p in f.living() if p.age >= 18 and folk.is_free(sim, p) and p.trip is None]
+        p = free[0]
+        q = next(x for x in free if x.household_id != p.household_id)
+        p.relationships = {}
+        people.set_rel(sim, p.id, q.id, RelationKind.FRIEND, 70)
+        self.assertIs(social.pick_companion(sim, p, "visit"), q)
+        cafes = [pid for pid, pl in sim.town.places.items() if pl.kind == "cafe" and pl.is_open(14.5)
+                 and f.allowed(pid) and pid != q.inside]
+        self.assertTrue(folk.send_to(sim, q, cafes[0], "hang_out", 60))
+        self.assertFalse(folk.is_free(sim, q))
+        self.assertIsNone(social.pick_companion(sim, p, "visit"))
+        self.assertFalse(folk.send_to(sim, q, cafes[1], "hang_out", 60))
+        self.assertEqual(q.trip.dest if q.trip is not None else q.inside, cafes[0])
+        for _ in range(400):
+            sim.step()
+            if q.i not in f.sent:
+                break
+        self.assertNotIn(q.i, f.sent)  # the errand's stay ended: free time is theirs again
+
+    def test_company_is_free_all_day(self):
+        if not integrated():
+            self.skipTest("needs the real Simulation and social.pick_companion")
+        from unittest import mock
+
+        from gameofailife import social
+        sim = make_world(SEEDS[0], N)
+        f = sim.folk
+        real_send, real_pick = folk.send_to, social.pick_companion
+        bad, picks, resent, sent = [], [], [], []
+
+        def send_to(sim_, p, place_id, activity, minutes):
+            was = p.i in f.sent
+            ok = real_send(sim_, p, place_id, activity, minutes)
+            if ok and activity != folk.WARD:
+                sent.append(p.id)
+                if was:
+                    resent.append((sim_.clock.tick, p.id, place_id))
+            return ok
+
+        def pick(sim_, p, why):
+            q = real_pick(sim_, p, why)
+            if q is not None:
+                picks.append(q.id)
+                if q.i in f.sent or q.activity in ("work", "school", "sleep") or q.trip is not None and \
+                        q.trip.then in ("work", "school", "sleep"):
+                    bad.append((sim_.clock.tick, q.id, q.activity))
+            return q
+
+        with mock.patch.object(folk, "send_to", send_to), mock.patch.object(social, "pick_companion", pick):
+            for _ in range(DAY):
+                sim.step()
+        self.assertGreater(len(picks), 0)
+        self.assertGreater(len(sent), 0)
+        self.assertEqual(bad[:5], [])
+        self.assertEqual(resent[:5], [])
+
+
+class GroceriesAndHealthTest(unittest.TestCase):
+    """Nobody with money starves: a household with no grocer in reach (no market or grocer's within FAV_WALK on
+    foot, or FAV_CAR by car) orders its groceries in for DELIVERY_FEE more. Health heals as a named's does (every
+    need above WELL_ABOVE) up to life.max_health, hunger at 0 costs HUNGER_HEALTH a minute, both in closed form; off
+    sick they rest and eat at home, and a late shift lunches at home; a townsperson whose health runs out while fed
+    collapses rather than starves."""
+
+    def test_no_grocer_in_reach_orders_in(self):
+        sim = make_world(SEEDS[0], N)
+        f = sim.folk
+        now = sim.clock.tick
+        far = [p for p in f.living() if p.age >= 18 and not f._grocer_in_reach(p)]
+        near = [p for p in f.living() if p.age >= 18 and f._grocer_in_reach(p)]
+        self.assertTrue(far and near)
+        p, q = far[0], near[0]
+        for r in (p, q):
+            f.hh_of(r).groceries = 0
+        for kind in ("after_work", "day_off"):
+            opt = f.options(sim, p, now, kind)[1]
+            self.assertEqual((opt.activity, opt.place, opt.cost),
+                             ("order_groceries", f.home_place(p), folk.GROCERY_COST + folk.DELIVERY_FEE))
+            self.assertEqual(f.options(sim, q, now, kind)[1].activity, "buy_groceries")
+        hh = f.hh_of(p)
+        purse = p.money
+        f._play(sim, p, now, f.options(sim, p, now, "day_off")[1])
+        self.assertEqual(hh.groceries, folk.GROCERY_MEALS)
+        self.assertAlmostEqual(p.money, purse - folk.GROCERY_COST - folk.DELIVERY_FEE)
+        self.assertEqual((p.activity, p.inside), ("order_groceries", f.home_place(p)))
+        self.assertIsNone(p.trip)
+
+    def test_health_heals_and_hunger_costs(self):
+        from gameofailife import folk_model, life
+
+        def person(age=40, health=50.0, hunger=90.0):
+            q = Person(0, "Test Person", age, "f", 0)
+            q._needs = {n: 90.0 for n in agent.NEEDS}
+            q._needs["hunger"] = hunger
+            q._nt, q.activity, q.state, q.health = 0, "relax_home", "busy", health
+            return q
+
+        q = person()
+        q.settle(100)
+        self.assertAlmostEqual(q.health, 50.0 + folk_model.HEAL * 100)
+        pieces = person()
+        for t in range(10, 101, 10):
+            pieces.settle(t)
+        self.assertAlmostEqual(pieces.health, q.health, places=9)
+        for n in agent.NEEDS:
+            self.assertAlmostEqual(pieces._needs[n], q._needs[n], places=9)
+        rate = agent.NEED_DECAY["hunger"]
+        q = person(hunger=60.0)  # heals until hunger is down to WELL_ABOVE, then not
+        q.settle(400)
+        self.assertAlmostEqual(q.health, 50.0 + folk_model.HEAL * (60.0 - folk_model.WELL_ABOVE) / rate)
+        q = person(hunger=0.9)  # 10 minutes to empty, then 100 starving
+        q.settle(110)
+        self.assertAlmostEqual(q.health, 50.0 - folk_model.HUNGER_HEALTH * (110 - 0.9 / rate))
+        old = person(age=80, health=79.9)
+        old.settle(1000)
+        self.assertAlmostEqual(old.health, life.max_health(old))
+        baby = person(age=2, hunger=10.0)  # held at 75 by folk.py: always well
+        baby.settle(100)
+        self.assertAlmostEqual(baby.health, 50.0 + folk_model.HEAL * 100)
+
+    def test_off_sick_they_rest_and_eat_at_home(self):
+        if not integrated():
+            self.skipTest("needs life's conditions")
+        from gameofailife import life
+        sim = make_world(SEEDS[0], 200)
+        f = sim.folk
+        p = next(q for q in f.living() if q.age >= 18 and q.job is not None and q.job.hourly_wage > 0
+                 and q.job.workdays[:3] == (0, 1, 2) and q.life is not None)
+        home = f.home_place(p)
+        t = sim.clock.tick
+        p.life.conditions.append(life.Condition("flu", t, t + 6 * DAY, t + 3 * DAY, t, 20))
+        meals, acts, low = Counter(), Counter(), 100.0
+        last = None
+        for _ in range(3 * DAY):
+            sim.step()
+            if p.activity != last:
+                last = p.activity
+                acts[last] += 1
+                if last == "eat_home":
+                    meals[sim.clock.tick // DAY] += 1
+            self.assertIn(p.inside, (home, None))
+            low = min(low, p.needs["hunger"])
+        self.assertTrue(p.alive)
+        self.assertNotIn("work", acts)
+        self.assertGreater(acts["sick_home"], 0)
+        self.assertEqual([meals[d] >= 3 for d in range(3)], [True] * 3, meals)  # breakfast, lunch, dinner
+        self.assertGreater(low, 0.0)
+
+    def test_a_late_shift_lunches_at_home(self):
+        """Breakfast (cut short by a school run) and the shift's own lunch break starved a 15:00-23:00 nurse with
+        money by day 10 of the 60-day soak: a late shift's morning at home breaks for lunch at LUNCH."""
+        sim = make_world(SEEDS[0], N)
+        f = sim.folk
+        late = [p for p in f.living() if p.job is not None and p.job.hourly_wage > 0 and len(p.job.workdays) == 7
+                and f._set_off(p) >= folk.LUNCH + folk.MEAL_MINUTES and f.home_place(p) is not None]
+        self.assertTrue(late)
+        p = late[0]
+        home = f.home_place(p)
+        lunches, low, last = Counter(), 100.0, None
+        for _ in range(3 * DAY):
+            sim.step()
+            if p.activity != last:
+                last = p.activity
+                day, m = divmod(sim.clock.tick, DAY)
+                if last == "eat_home" and folk.LUNCH <= m < folk.LUNCH + 60:
+                    lunches[day] += 1
+                    self.assertEqual(p.inside, home)
+            low = min(low, p.needs["hunger"])
+        self.assertEqual([lunches[d] for d in range(3)], [1, 1, 1], p.id)
+        self.assertGreater(low, 20.0, p.id)
+
+    def test_collapse_is_not_starving(self):
+        if not integrated():
+            self.skipTest("needs life.die")
+        sim = make_world(SEEDS[0], 200)
+        f = sim.folk
+        now = sim.clock.tick
+        fed, hungry = [p for p in f.living() if p.age >= 18][:2]
+        for p, hunger in ((fed, 80.0), (hungry, 0.0)):
+            f.settle(p, now)
+            p._needs["hunger"] = hunger
+            p.health = 0.0
+        f.step(sim, fed, now)
+        self.assertFalse(fed.alive)
+        self.assertEqual(fed.died["how"], "collapsed and could not be saved")
+        self.assertEqual(f.counters["starved"], 0)
+        f.step(sim, hungry, now)
+        self.assertEqual(hungry.died["how"], "starved")
+        self.assertEqual(f.counters["starved"], 1)
 
 
 if __name__ == "__main__":

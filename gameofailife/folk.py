@@ -18,12 +18,13 @@ module functions below are the folk side of life.md 3.2's contract.
 
 from __future__ import annotations
 
+import importlib
 import time
 from collections import deque
 
 from . import folk_transit
-from .agent import NEED_DECAY, NEEDS
-from .folk_model import (DECAY_SCALE, K_AMBULANCE, K_CAR, K_OUTDOORS, K_WAIT, K_WALK, NS_FOLK, NS_STROLL, DRIVE,
+from .agent import NEEDS
+from .folk_model import (K_AMBULANCE, K_CAR, K_OUTDOORS, K_WAIT, K_WALK, NS_FOLK, NS_STROLL, DRIVE,
                          RIDE, WAIT, WALK, Person, Trip)
 
 DAY = 1440
@@ -37,6 +38,13 @@ SHIFT_SPREAD = 5
 LATE_GRACE = 5  # minutes late before reputation suffers
 EVENING = 19 * 60  # choices after this are "evening" ones
 DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES = 17 * 60 + 30, 19 * 60 + 30, 45  # the family dinner, once a day
+# Off sick (life.can_work False), a townsperson rests at home (sick_home) until the next of these meals or bedtime,
+# eats at home (eat_home, a grocery) and rests again; breakfast is on waking, as every day.
+LUNCH = 12 * 60 + 30
+SICK_MEALS = (LUNCH, 18 * 60 + 30)
+# A late shift's morning at home (they set off after LUNCH + MEAL_MINUTES) breaks for lunch at LUNCH, a meal at
+# home as off sick: breakfast, the shift's own lunch break and nothing more would starve them by inches.
+MEAL_MINUTES = 30
 STROLL_EVERY = 5  # minutes between a park stroller's hops
 STROLL_MINUTES = 10  # one way of a stroll round the block when no park is in reach
 FAV_WALK, FAV_CAR, FAV_KEEP = 25, 15, 3  # favourites: the nearest FAV_KEEP within these minutes
@@ -44,7 +52,7 @@ UNAVAILABLE = -9.0  # the score of an option whose place is shut or full
 CPU_KEEP = 1440  # ticks of CPU timings kept for the perf report
 WARD = "ward"
 FREE = ("relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-        "idle", "stroll", "movie", "golf", "read")  # activities that can be interrupted (is_free)
+        "idle", "stroll", "movie", "golf", "read", "order_groceries")  # activities that can be interrupted (is_free)
 
 # activity -> (need gains over the whole stay, outdoors). Decay is folk_model's (DECAY_SCALE by activity).
 ACT = {
@@ -59,6 +67,7 @@ ACT = {
     "coffee": ({"energy": 15, "social": 5}, False),
     "eat_out": ({"hunger": 55, "social": 10, "fun": 6}, False),
     "buy_groceries": ({}, False),
+    "order_groceries": ({}, False),
     "shopping": ({"fun": 20}, False),
     "hang_out": ({"social": 40, "fun": 25}, False),
     "walk_park": ({"fun": 30, "social": 4}, True),
@@ -70,7 +79,7 @@ ACT = {
     "idle": ({}, False),
 }
 SLEEP_ENERGY = 0.17
-HOME_ACTS = ("sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home")
+HOME_ACTS = ("sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries")
 KEEP_OPEN = HOME_ACTS + ("work", "school", WARD, "idle")  # stays that do not end at closing time
 LEISURE = {  # favourite key -> (place kind, styles or None for any)
     "coffee": ("cafe", ("cafe", "bakery")),
@@ -87,35 +96,43 @@ DAY_OUT = {("shop", "mall"): ("shopping", "A day at the mall", None, 0),
            ("townhall", "library"): ("read", "Read at the library", 0, 0)}
 DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES = 40, 25, 150  # reach from home, and the stay
 GROCERY_MEALS = 10
+# With no grocer in reach (no market or grocer's within FAV_WALK on foot, or FAV_CAR by car), groceries are
+# ordered in from home: the same shop for DELIVERY_FEE more, DELIVERY_MINUTES at home to order and take them in.
+DELIVERY_FEE, DELIVERY_MINUTES = 8, 15
 # Outcomes of an outing (folk.md 5), keyed dice into the luck log: (what, valence, chance, money, fun)
 BARGAIN = ("bargain", 1, 0.05, 15, 0)  # shopping or groceries
 PICKPOCKET = ("pickpocket", -1, 0.003, -60, 0)  # any outing
 RAINED_OUT = ("rained_out", -1, 0.5, 0, -10)  # a park walk or stroll in the rain
 
 
+_LAZY: dict = {}  # name -> module: folk's imports that would be cycles at load time, each looked up once
+
+
+def _lazy(name: str):
+    got = _LAZY.get(name)
+    if got is None:
+        got = _LAZY[name] = importlib.import_module(f"{__package__}.{name}")
+    return got
+
+
 def _dice():
-    from . import dice  # L1's module
-    return dice
+    return _lazy("dice")  # L1's module
 
 
 def _people():
-    from . import people
-    return people
+    return _lazy("people")
 
 
 def _life():
-    from . import life
-    return life
+    return _lazy("life")
 
 
 def _career():
-    from . import career
-    return career
+    return _lazy("career")
 
 
 def _folk_life():
-    from . import folk_life
-    return folk_life
+    return _lazy("folk_life")
 
 
 def urgency(level: float) -> float:
@@ -172,7 +189,9 @@ class Folk:
         self._bed: dict[int, int] = {}
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
+        self._shifts: dict[int, tuple] = {}  # i -> (job, minutes its day starts and ends late: folk_gen.shift_offset)
         self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
+        self.sent: dict[int, None] = {}  # people on a send_to errand (an invite, a date): not free until its stay ends
         self._bind()
         if self.n <= 0:
             self.n = 0
@@ -362,21 +381,12 @@ class Folk:
     # --- needs -----------------------------------------------------------------------------------------------
 
     def settle(self, p, now: int) -> None:
-        """Needs to `now` (folk_model's decay), hunger at 0 costing health, then the finished stay's gains."""
+        """Needs and health to `now` (folk_model's Person.settle: decay, healing while well, hunger at 0 costing
+        health); under-5s are held at 75."""
+        p.settle(now)
         if p.age < 5:
             for n in NEEDS:
                 p._needs[n] = 75.0
-            p._nt = now
-            return
-        dt = now - p._nt
-        if dt > 0:
-            scale = DECAY_SCALE.get(p.activity if p.state == "busy" else "", {})
-            rate = NEED_DECAY["hunger"] * scale.get("hunger", 1.0)
-            h = p._needs["hunger"]
-            if rate > 0 and h - rate * dt < 0:
-                starve = dt - h / rate
-                p.health = max(0.0, p.health - 0.03 * starve)
-        p.settle(now)
 
     def _gain(self, p, now: int) -> None:
         """The stay that ends now (or is cut short) gives its gains, pro rata."""
@@ -416,7 +426,27 @@ class Folk:
         minutes, mode = self._commute_of(p)
         if mode == "train":
             spare = SHIFT_MARGIN  # train commuters time it to the train, so they ride together
-        return p.job.start_hour * 60 - minutes - spare
+        return self._start_minute(p) - minutes - spare
+
+    def _shift(self, p) -> int:
+        """Minutes p's shift or school day starts and ends after its job's hours (folk_gen.shift_offset: their own
+        on a region job row, 08:30 at a region school but Riverton High), kept while the job is the same."""
+        job = p.job
+        got = self._shifts.get(p.i)
+        if got is not None and got[0] is job:
+            return got[1]
+        from . import folk_gen
+        off = folk_gen.shift_offset(self.sim, p)
+        self._shifts[p.i] = (job, off)
+        return off
+
+    def _start_minute(self, p) -> int:
+        """The minute of the day p's shift or school day starts."""
+        return p.job.start_hour * 60 + self._shift(p)
+
+    def _end_minute(self, p) -> int:
+        """The minute of the day p's shift or school day ends."""
+        return p.job.end_hour * 60 + self._shift(p)
 
     def _bed_minute(self, p) -> int:
         bed = self._bed.get(p.i)
@@ -459,10 +489,14 @@ class Folk:
     def step(self, sim, p, now: int) -> None:
         self.settle(p, now)
         if p.health <= 0:
-            self.counters["starved"] += 1
-            _life().die(sim, p, "starved")
+            # Starved when hunger at 0 took the last of their health; otherwise (the damp, a chill) they collapse,
+            # as a named does at health 0.
+            how = "starved" if p._needs["hunger"] <= 0 else "collapsed and could not be saved"
+            if how == "starved":
+                self.counters["starved"] += 1
+            _life().die(sim, p, how)
             if p.alive:  # a life stub that does not kill: keep them off the wheel anyway
-                kill(sim, p, "starved")
+                kill(sim, p, how)
             return
         end = self.ends.pop(p.i, None)
         if end is not None and now < end:
@@ -472,6 +506,7 @@ class Folk:
         if p.trip is not None:
             self._arrive(sim, p, now)
             return
+        self.sent.pop(p.i, None)  # the errand's stay is over (or it was cut short): free time is theirs again
         self._gain(p, now)
         day, m = divmod(now, DAY)
         home = self.home_place(p)
@@ -503,33 +538,74 @@ class Folk:
         job = p.job
         bed = self._bed_minute(p)
         night = m >= bed or m < self._wake_minute(p, day)
-        if job is not None and day % 7 in job.workdays and p.worked_day != day and m < job.end_hour * 60 - 60:
+        if act == "sick_home" and p.state == "busy" and not night:
+            self._home_meal(p, now)  # a rest off sick ends at a meal at home
+            return
+        if job is not None and day % 7 in job.workdays and p.worked_day != day and m < self._end_minute(p) - 60:
             commute, mode = self._commute_of(p)
             leave = self._set_off(p)
             early = m < leave
             if early and (p.inside == home or home is None) and not night:
-                self._begin(p, now, "relax_home", leave - m)
+                if act == "relax_home" and LUNCH <= m < LUNCH + 60 and m + MEAL_MINUTES <= leave:
+                    self._home_meal(p, now)  # lunch before a late shift
+                else:
+                    self._begin(p, now, "relax_home", self._lunch_break(m, leave) - m)
                 return
             if early and home is not None and leave - m > 60 and not night:
-                self._go_home(sim, p, now, "relax_home", day * DAY + leave)
+                self._go_home(sim, p, now, "relax_home", day * DAY + self._lunch_break(m, leave))
                 return
             if not early or not night:
                 p.worked_day = day
                 if not _life().can_work(sim, p):
                     self.counters["sick_days"] += 1
-                    self._go_home(sim, p, now, "sick_home", self._wake_tick(p, now))
+                    self._sick_rest(sim, p, now)
                     return
                 work = "school" if job.title == "student" or p.age < 18 else "work"
                 if work == "school" and mode == "car":
                     self._school_run(p, now, job.place_id)
-                self._go(sim, p, now, job.place_id, work, until=day * DAY + job.end_hour * 60, prefer=mode)
+                self._go(sim, p, now, job.place_id, work, until=day * DAY + self._end_minute(p), prefer=mode)
                 return
         if night:
             self._go_home(sim, p, now, "sleep", self._wake_tick(p, now))
             return
+        if not _life().can_work(sim, p):  # off sick (or home from hospital) on a day off too: rest, not out
+            self._sick_rest(sim, p, now)
+            return
         if DINNER_FROM <= m < DINNER_UNTIL and home is not None and p.inside == home and self._dinner(p, now, day):
             return
         self.choose(sim, p, now, "evening" if m >= EVENING else "day_off")
+
+    def _sick_rest(self, sim, p, now: int) -> None:
+        """Off sick: rest at home until the next of SICK_MEALS or bedtime (overnight, until they wake)."""
+        day, m = divmod(now, DAY)
+        until = self._bed_minute(p)
+        for meal in SICK_MEALS:
+            if m < meal < until:
+                until = meal
+                break
+        self._go_home(sim, p, now, "sick_home", day * DAY + until if until > m else self._wake_tick(p, now))
+
+    @staticmethod
+    def _lunch_break(m: int, leave: int) -> int:
+        """The minute a morning at home before the shift ends: LUNCH when lunch fits before they set off, else
+        when they set off."""
+        return LUNCH if m < LUNCH and LUNCH + MEAL_MINUTES <= leave else leave
+
+    def _home_meal(self, p, now: int) -> None:
+        """A meal at home (off sick, or lunch before a late shift), as breakfast is (eat_home, a grocery if there is
+        one); with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its
+        payer can afford them."""
+        hh = self.hh_of(p)
+        if hh is not None:
+            if hh.groceries <= 0:
+                payer = self._payer(p) or p
+                cost = GROCERY_COST + DELIVERY_FEE
+                if payer.money + payer.savings >= cost:
+                    payer.money -= cost
+                    hh.groceries += GROCERY_MEALS
+            if hh.groceries > 0:
+                hh.groceries -= 1
+        self._begin(p, now, "eat_home", MEAL_MINUTES)
 
     def _dinner(self, p, now: int, day: int) -> bool:
         """The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one
@@ -670,7 +746,7 @@ class Folk:
         self._enter(p, t.dest)
         job = p.job
         if t.then in ("work", "school") and job is not None:
-            late = now - (now // DAY * DAY + job.start_hour * 60)
+            late = now - (now // DAY * DAY + self._start_minute(p))
             if late > LATE_GRACE:
                 self.counters["late"] += 1
                 p.reputation = max(0.0, p.reputation - 1)
@@ -724,6 +800,25 @@ class Folk:
             return False
         return True
 
+    def _grocer_in_reach(self, p) -> bool:
+        """A market, or a grocer's (a shop of style "shop"), among the person's favourites: within FAV_WALK on
+        foot, or FAV_CAR by car with a car (opening hours aside)."""
+        if self._favs(p, "groceries"):
+            return True
+        for pid in self._favs(p, "shopping"):
+            if self.town.places[pid].style == "shop":
+                return True
+        return False
+
+    def _grocery_option(self, p, now: int, home, base: float) -> Option:
+        """Buy groceries at the first open grocer in reach; with none in reach, order them in from home (the
+        isolated and the old in the far suburbs would starve otherwise)."""
+        if self._grocer_in_reach(p):
+            return Option("Buy groceries", "buy_groceries", self._pick(p, "groceries", now, 25), 25, GROCERY_COST,
+                          {"thrift": 0.2, "family": 0.3}, {}, base)
+        return Option("Order groceries in", "order_groceries", home, DELIVERY_MINUTES, GROCERY_COST + DELIVERY_FEE,
+                      {"thrift": 0.2, "family": 0.3}, {}, base)
+
     def _pick(self, p, key: str, now: int, minutes: int) -> str | None:
         for pid in self._favs(p, key):
             if self._usable(pid, now, minutes):
@@ -750,8 +845,7 @@ class Folk:
             cafe_key = "eat_out" if hungry else "coffee"
             opts = [
                 Option("Go home and relax", home_act, home, 90, 0, {"family": 0.3}, relax_gains, 0.2),
-                Option("Buy groceries", "buy_groceries", self._pick(p, "groceries", now, 25), 25, GROCERY_COST,
-                       {"thrift": 0.2, "family": 0.3}, {}, 1.0 if low else -0.8),
+                self._grocery_option(p, now, home, 1.0 if low else -0.8),
                 Option("Eat out" if hungry else "Coffee", "eat_out" if hungry else "coffee",
                        self._pick(p, cafe_key, now, 40), 40 if hungry else 20, MEAL_COST if hungry else COFFEE_COST,
                        {"social": 0.4, "thrift": -0.3}, ACT["eat_out" if hungry else "coffee"][0], 0.0),
@@ -761,8 +855,7 @@ class Folk:
             spend = int(15 + 45 * (1 - thrift))
             # Low on groceries, the shopping trip is for groceries (L2's integrator item 1): the retired and the
             # jobless have no after_work choice, the only other place they are offered.
-            shop = (Option("Buy groceries", "buy_groceries", self._pick(p, "groceries", now, 25), 25, GROCERY_COST,
-                           {"thrift": 0.2, "family": 0.3}, {}, 1.0) if low else
+            shop = (self._grocery_option(p, now, home, 1.0) if low else
                     Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
                            {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05))
             opts = [
@@ -834,8 +927,8 @@ class Folk:
         thrift = traits.get("thrift", 0.5)
         m = now % DAY
         rate = TRAVEL_COST * (NIGHT_TRAVEL if m >= NIGHT_FROM * 60 or m < NIGHT_UNTIL * 60 else 1)
-        here = self.where.get(p.i) or self.home_place(p)
         home = self.home_place(p)
+        here = self.where.get(p.i) or home
         car = self._has_car(p)
         direct = self._trip_minutes(here, home, car)
         scores = []
@@ -854,10 +947,11 @@ class Folk:
             if opt.cost > 0:
                 afford = -opt.cost / max(own, 50) * thrift if opt.cost <= own else -2.0
             score = opt.base + STYLE * style + need + afford
-            if opt.place != home or opt.activity == "stroll":
-                extra = self._trip_minutes(here, opt.place, car) + self._trip_minutes(opt.place, home, car) - direct
+            if opt.activity == "stroll" or opt.place != home:
                 if opt.activity == "stroll":
                     extra = 2 * STROLL_MINUTES
+                else:
+                    extra = self._trip_minutes(here, opt.place, car) + self._trip_minutes(opt.place, home, car) - direct
                 if extra > 0:
                     score -= extra * rate
             scores.append(round(score, 3))
@@ -894,11 +988,11 @@ class Folk:
         opts = self.options(sim, p, now, kind)
         scores = self.score_options(sim, p, opts, now)
         order = sorted(range(4), key=lambda k: (-scores[k], k))
-        rr = _dice().stream(sim.dice_seed, NS_FOLK, p.i, now)
         if scores[order[0]] - scores[order[1]] >= OBVIOUS_MARGIN:
             pick, by = order[0], "habit"
             self.counters["habit"] += 1
         else:
+            rr = _dice().stream(sim.dice_seed, NS_FOLK, p.i, now)  # keyed: made only when the noise decides
             best, pick = None, 0
             for k in range(4):
                 s = scores[k] + rr.uniform(0, NOISE)
@@ -918,7 +1012,7 @@ class Folk:
         if opt.cost > 0:
             payer = self._payer(p) or p
             payer.money -= opt.cost
-        if opt.activity == "buy_groceries":
+        if opt.activity in ("buy_groceries", "order_groceries"):
             hh = self.hh_of(p)
             if hh is not None:
                 hh.groceries += GROCERY_MEALS
@@ -1312,10 +1406,9 @@ class Folk:
 
 def _folk_life_or_none():
     try:
-        from . import folk_life
+        return _lazy("folk_life")
     except ImportError:
         return None
-    return folk_life
 
 
 def _folk_of(sim) -> Folk | None:
@@ -1327,12 +1420,13 @@ def _folk_of(sim) -> Folk | None:
 
 def is_free(sim, p) -> bool:
     """Alive, in town, awake, not at or heading to work or school, not in hospital, in free time (and not due at
-    a shift within the hour)."""
+    a shift within the hour), and not on an errand someone sent them on (`send_to`: an invite, a date, a friend's
+    outing) until its stay ends, so nobody pulls them off it."""
     f = _folk_of(sim)
     if f is None or not isinstance(p, Person) or not p.alive or p.gone or p.age < 5:
         return False
     act = p.activity
-    if act not in FREE:
+    if act not in FREE or p.i in f.sent:
         return False
     job = p.job
     if job is not None:
@@ -1340,7 +1434,7 @@ def is_free(sim, p) -> bool:
         day, m = divmod(now, DAY)
         if day % 7 in job.workdays and p.worked_day != day:
             leave = f._set_off(p)
-            if leave - 60 <= m < job.end_hour * 60:
+            if leave - 60 <= m < f._end_minute(p):
                 return False
     return True
 
@@ -1363,6 +1457,10 @@ def send_to(sim, p, place_id, activity, minutes) -> bool:
         f._gain(p, now)
     f.settle(p, now)
     f.ends.pop(p.i, None)
+    if ward:
+        f.sent.pop(p.i, None)
+    else:
+        f.sent[p.i] = None
     if f.where.get(p.i) == place_id:
         f._begin(p, now, activity, minutes)
         return True
@@ -1444,6 +1542,7 @@ def kill(sim, p, how) -> None:
     f.out.pop(p.i, None)
     f._leave(p)
     f.ends.pop(p.i, None)
+    f.sent.pop(p.i, None)
     p.next_tick = -1
     p.state = "idle"
     p.activity = "idle"

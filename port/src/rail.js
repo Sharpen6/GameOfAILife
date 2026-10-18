@@ -241,6 +241,11 @@
       this.hubs = this.order.filter(s => this.serving.get(s).length > 1); // where riders change lines
       this.plans = new Map(); // "s|t" -> _plans(this, s, t)
       this.pair_worst = new Map(); // "s|t" -> the least worst wait + ride over the plans, or null
+      this.period = 1; // minutes after which every line's timetable repeats: the lcm of their cycles
+      const gcd = (x, y) => (y ? gcd(y, x % y) : x);
+      for (const ln of this.lines.values()) {
+        this.period = this.period * ln.cycle_minutes / gcd(this.period, ln.cycle_minutes);
+      }
     }
   }
 
@@ -419,41 +424,51 @@
 
   const keyLess = (p, q) => p[0] < q[0] || (p[0] === q[0] && (p[1] < q[1] || (p[1] === q[1] && p[2] < q[2])));
 
-  // The fastest train trip from end a to end b leaving at `tick`, or null. Its legs are chained from `tick`.
-  function trip_via_roads(town, net, a, b, tick, car = false) {
-    const r = _rail(town);
-    if (!r.lines.size) return null;
-    const acc = _access(r, net, a, car);
-    const egr = _egress(r, net, b);
+  // trip_via_roads' search: [minutes, [station, via, mode] of the access, [station, via] of the egress, rides] with
+  // each ride's [t0, t1, train id, board station] in minutes after the departure, or null. Memoized by the
+  // departure's phase (tick % r.period), the only way the tick enters it.
+  function _search(r, net, a, b, tick, car) {
+    const cache = _memo(net, "rail_trip");
+    const phase = pmod(tick, r.period);
+    const key = `${G.roads.endKey(a)}|${G.roads.endKey(b)}|${car ? 1 : 0}|${phase}`;
+    if (cache.has(key)) return cache.get(key);
     let best = null;
-    for (const [am, arank, s, avia, amode] of acc) {
-      for (const [em, erank, t, evia] of egr) {
+    for (const [am, arank, s, avia, amode] of _access(r, net, a, car)) {
+      for (const [em, erank, t, evia] of _egress(r, net, b)) {
         if (s === t) continue;
         for (const plan of _plans(r, s, t)) {
-          let now = tick + am;
+          let now = phase + am;
           const rides = [];
           plan.forEach(([ln, track, x, y], n) => {
             if (n) now += TRANSFER_MINUTES;
             const [k, w] = ln.board.get(sk(track, x))[pmod(now, ln.cycle_minutes)];
             const t0 = now + w;
             now = t0 + ln.ride(track, y, k, t0);
-            rides.push([t0, now, ln.train_ids[k], x]);
+            rides.push([t0 - phase, now - phase, ln.train_ids[k], x]);
           });
-          const key = [now + em - tick, arank, erank];
-          if (best === null || keyLess(key, best[0])) best = [key, [am, s, avia, amode], [em, t, evia], rides];
+          const rank = [now + em - phase, arank, erank];
+          if (best === null || keyLess(rank, best[0])) best = [rank, [s, avia, amode], [t, evia], rides];
         }
       }
     }
+    return _store(cache, key, best === null ? null : [best[0][0], best[1], best[2], best[3]]);
+  }
+
+  // The fastest train trip from end a to end b leaving at `tick`, or null. Its legs are chained from `tick`.
+  function trip_via_roads(town, net, a, b, tick, car = false) {
+    const r = _rail(town);
+    if (!r.lines.size) return null;
+    const best = _search(r, net, a, b, tick, car);
     if (best === null) return null;
-    const [[minutes], [, s, avia, amode], [, t, evia], rides] = best;
+    const [minutes, [s, avia, amode], [t, evia], rides] = best;
     const legs = [];
     let route = net.route(a, avia, amode, false);
     legs.push([amode === "car" ? DRIVE : WALK, tick, tick + route.minutes, route]);
     let now = tick + route.minutes;
     for (const [t0, t1, tid, x] of rides) {
-      legs.push([WAIT, now, t0, x]);
-      legs.push([RIDE, t0, t1, tid]);
-      now = t1;
+      legs.push([WAIT, now, tick + t0, x]);
+      legs.push([RIDE, tick + t0, tick + t1, tid]);
+      now = tick + t1;
     }
     if (typeof evia !== "string") {
       legs.push([WAIT, now, now + PLATFORM_MINUTES, t]);
@@ -462,6 +477,14 @@
     route = net.route(evia, b, "walk", false);
     legs.push([WALK, now, now + route.minutes, route]);
     return TrainTrip(minutes, s, t, legs);
+  }
+
+  // trip_via_roads(...).minutes without building the trip's legs, or null.
+  function trip_minutes(town, net, a, b, tick, car = false) {
+    const r = _rail(town);
+    if (!r.lines.size) return null;
+    const best = _search(r, net, a, b, tick, car);
+    return best === null ? null : best[0];
   }
 
   // The longest door-to-door train trip from a to b over every departure tick, or null; memoized as an int.
@@ -501,6 +524,6 @@
   G.rail = {
     WALK, DRIVE, WAIT, RIDE, PLATFORM_MINUTES, TRANSFER_MINUTES, PARK_RIDE_MAX, FARE, TOP, CACHE_CAP, track_tiles,
     Line, lines, fare, boarding, ride_minutes, train_xy, train_rows, timetable_json, rail_json, TrainTrip,
-    trip_via_roads, worst_minutes,
+    trip_via_roads, trip_minutes, worst_minutes,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

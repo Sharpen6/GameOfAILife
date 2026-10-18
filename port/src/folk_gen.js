@@ -27,6 +27,10 @@
   const TEEN_AGE = 11, TEEN_TRAIN_CAP = 45, HIGH_SCHOOL = "high_school";
   const SCHOOL_SEATS = 300;
   const MILLBROOK_SCHOOL = "school";
+  // --- staggered starts: not everyone on the street on the hour ---
+  const SHIFT_OFFSETS = [-30, -15, 0, 15, 30]; // minutes: a region worker's own start (and end) against the row's hours
+  // minutes: the region's schools start at 08:30, Riverton High (HIGH_SCHOOL) and Millbrook's at 08:00
+  const SCHOOL_LATE = 30;
   // --- seekers and money ---
   const STUDY_P = 0.3, IDLE_P = 0.07;
   const PENSION = 400;
@@ -43,6 +47,19 @@
 
   // --- dice ---
   const stream = (seed, ...parts) => G.dice.stream(seed, ...parts);
+
+  // Minutes p's working or school day starts and ends after its job's hours. A townsperson on a region job row keeps
+  // their own of SHIFT_OFFSETS (the key (NS_GEN, "shift", i) on sim.seed); a pupil at a region school but HIGH_SCHOOL
+  // starts SCHOOL_LATE later; Millbrook's rows and school (where the 60 work and learn) and no job: 0.
+  function shift_offset(sim, p) {
+    const job = p.job;
+    if (job === null || job === undefined) return 0;
+    const mb = sim.town.millbrook_ids;
+    if (mb && mb.has(job.place_id)) return 0;
+    if (job.title === "student") return job.place_id === HIGH_SCHOOL ? 0 : SCHOOL_LATE;
+    if (job.hourly_wage <= 0) return 0;
+    return SHIFT_OFFSETS[G.dice.key(sim.seed, FM().NS_GEN, "shift", p.i) % SHIFT_OFFSETS.length];
+  }
 
   const _round = x => Math.floor(x + 0.5);
 
@@ -426,7 +443,7 @@
         let wake = day0 + rr.int(360, 450);
         const job = p.job;
         if (job !== null && job.hourly_wage > 0 && job.workdays.includes(sim.clock.weekday) && p.commute !== null) {
-          const leave = day0 + job.start_hour * 60 - p.commute[1] - 15;
+          const leave = day0 + job.start_hour * 60 + shift_offset(sim, p) - p.commute[1] - 15;
           if (leave < wake) wake = leave;
         }
         p.next_tick = wake > now ? wake : now + 1;
@@ -1109,7 +1126,8 @@
         health: r2(p.health), money: r2(p.money), savings: r2(p.savings), car: p.owns_car,
         job: j === null ? null : [j.title, j.place_id, j.hourly_wage, j.start_hour, j.end_hour, j.workdays.slice(),
           j.slot === undefined ? -1 : j.slot],
-        commute: p.commute === null ? null : p.commute.slice(), next: p.next_tick, rel: rels,
+        shift: shift_offset(sim, p), commute: p.commute === null ? null : p.commute.slice(), next: p.next_tick,
+        rel: rels,
       });
     }
     const hhs = sim.folk.households.map(hh => ({ id: hh.id, kind: hh.kind, home: hh.home_id, rent: hh.weekly_rent,
@@ -1119,7 +1137,8 @@
 
   G.folk_gen = {
     KINDS, DECK_SCALE, CAR_P, WALK_CAP, CAR_CAP, TRAIN_CAP, MB_PUPILS, HIGH_SCHOOL, MILLBROOK_SCHOOL, PENSION,
-    stream, shift_hours, weekly_pay, Geo, ListBoard, board, set_rel, named_names, unique_name, baby_name, ages_for,
+    SHIFT_OFFSETS, SCHOOL_LATE, stream, shift_offset, shift_hours, weekly_pay, Geo, ListBoard, board, set_rel,
+    named_names, unique_name, baby_name, ages_for,
     make_deck, make_household, populate, region_homes, need_of, move_in, student_job, seats, assign_schools,
     job_rows, match_jobs, give_money, make_ties, newcomer, GenFolk, GenSim, build_lots, add_region_homes, generate,
     dump, _overlap,

@@ -25,6 +25,10 @@ DECAY_SCALE = {
     "work": {"social": 0.0, "fun": 1.3, "hunger": 0.6},
     "hospital": {"social": 0.5, "fun": 0.5},
 }
+# Health as the named have it (sim._decay): hunger at 0 costs HUNGER_HEALTH a minute; every need above WELL_ABOVE
+# heals HEAL a minute up to life.max_health. Person.settle applies both in closed form, so reading a townsperson's
+# needs (a page, the hourly stats) never changes what their health comes to.
+HUNGER_HEALTH, HEAL, WELL_ABOVE = 0.03, 0.004, 40.0
 
 
 def folk_id(i: int) -> str:
@@ -113,7 +117,9 @@ class Person:
 
     def settle(self, tick: int | None = None) -> None:
         """Bring the raw needs forward to `tick` (default the clock's): v2's per-minute decay by activity, as a
-        closed form (decay only falls, so clamping at the end equals clamping each minute)."""
+        closed form (decay only falls, so clamping at the end equals clamping each minute), and health with them:
+        HEAL a minute while every need is above WELL_ABOVE, then HUNGER_HEALTH a minute once hunger is at 0. Each
+        is additive over the minutes, so settling in pieces comes to the same as settling once."""
         if tick is None:
             clock = Person.clock
             if clock is None:
@@ -123,13 +129,40 @@ class Person:
         if dt <= 0:
             return
         self._nt = tick
-        if not self.alive or self.age < 5:
-            return  # the dead keep their last needs; under-5s are held at 75 by folk.py
+        if not self.alive:
+            return  # the dead keep their last needs
+        if self.age < 5:
+            self._heal(dt)  # under-5s are held at 75 by folk.py: always well
+            return
         scale = DECAY_SCALE.get(self.activity if self.state == "busy" else "", {})
         needs = self._needs
+        well = dt  # the minutes every need stays above WELL_ABOVE
+        starve = 0.0  # the minutes hunger spends at 0
         for n in NEEDS:
-            v = needs[n] - NEED_DECAY[n] * scale.get(n, 1.0) * dt
+            v0 = needs[n]
+            rate = NEED_DECAY[n] * scale.get(n, 1.0)
+            if v0 <= WELL_ABOVE:
+                well = 0
+            elif rate > 0 and v0 - rate * dt <= WELL_ABOVE:
+                left = (v0 - WELL_ABOVE) / rate
+                if left < well:
+                    well = left
+            if n == "hunger" and rate > 0 and v0 - rate * dt < 0:
+                starve = dt - v0 / rate
+            v = v0 - rate * dt
             needs[n] = 0.0 if v < 0.0 else 100.0 if v > 100.0 else v
+        if well > 0:
+            self._heal(well)
+        if starve > 0:
+            h = self.health - HUNGER_HEALTH * starve
+            self.health = 0.0 if h < 0.0 else h
+
+    def _heal(self, minutes: float) -> None:
+        from . import life  # lazy: L2's module reaches folk
+        top = life.max_health(self)
+        if self.health < top:
+            h = self.health + HEAL * minutes
+            self.health = top if h > top else h
 
     @property
     def needs(self) -> dict:
