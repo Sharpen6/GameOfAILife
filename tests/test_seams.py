@@ -43,6 +43,13 @@ PLAN_TAGS = {
     "emergency_settled": ("home", 0), "repaint": ("home", 0), "damp_chill": ("health", 1),
     "controller_joined": ("controller", 1), "controller_left": ("controller", 1),
     "came_of_age": ("life", 1), "other": ("life", 0),
+    # v3 PLAN 3.1: the 21 new tags
+    "talk": ("social", 0), "flirt": ("social", 0), "rival": ("social", 1), "row": ("social", 1),
+    "moved_in": ("family", 2), "engaged": ("family", 2), "divorce": ("family", 2), "expecting": ("family", 1),
+    "ill": ("health", 1), "recovered": ("health", 0), "doctor": ("health", 0), "chronic": ("health", 1),
+    "raise": ("work", 1), "warning": ("work", 1), "quit": ("work", 1),
+    "expense": ("money", 1), "windfall": ("money", 1), "loan": ("money", 1),
+    "arrived": ("life", 1), "left_town": ("life", 1), "digest": ("life", 1),
 }
 RESERVED = ("job_new", "job_lost", "promotion", "retired", "partner", "breakup", "wedding", "birth", "moved_out")
 

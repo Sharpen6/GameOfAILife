@@ -11,6 +11,7 @@ from __future__ import annotations
 import functools
 from array import array
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from .rng import Rng
 
@@ -71,6 +72,7 @@ class Place:
     floors: int = 0  # building height; 0 for parks
     tier: str | None = None  # homes: "flat", "house" or "big_house"
     units: int = 0  # homes inside: 1 for a house, 6 for an apartment block, 0 for everything else
+    capacity: int = 0  # people inside at once (region world); 0 = not given, and then not in to_json
 
     def is_open(self, hour: float) -> bool:
         if self.hours is None:
@@ -84,6 +86,7 @@ class Place:
             "x": self.x, "y": self.y, "w": self.w, "h": self.h, "entry": list(self.entry), "face": self.face,
             "hours": list(self.hours) if self.hours else None, "district": self.district, "style": self.style,
             "floors": self.floors, "tier": self.tier, "units": self.units,
+            **({"capacity": self.capacity} if self.capacity > 0 else {}),
         }
 
 
@@ -107,6 +110,29 @@ class TownMap:
     _fields: dict = field(init=False, repr=False)  # goal tile index -> (dist, off)
     _roads: dict = field(init=False, repr=False)  # goal tile index -> road distance
     _drives: dict = field(init=False, repr=False)  # (start x, start y, place id) -> (tiles, junctions)
+
+    # --- region ---
+    # Defaults of the region world's attributes (region.md 6.1), so callers need no world check: a RegionMap
+    # (gameofailife/region.py) sets them all. Class attributes, not dataclass fields; read-only.
+    world = "millbrook"
+    millbrook_ids = None  # a RegionMap's frozenset of Millbrook's place ids
+    home_specs = ()  # region homes after HOME_SPECS: (id, place, unit, tier, bedrooms, base_value, rent, start, cond)
+    lot_conditions = MappingProxyType({})  # region lots' starting condition by place id
+    job_slots = ()  # folk job rows (title, place, wage, start, end, days, count)
+    rail = None  # {"lines": [...]} (region.md 8)
+    decor = ()  # [x, y, w, h, style, floors, variant] buildings with no sim role
+    highways = ()
+    interchanges = ()
+    highway_edges = ()
+
+    def in_frozen(self, x: int, y: int) -> bool:
+        """True where the tiles are exactly build_map(seed)'s: everywhere in Millbrook's own world."""
+        return True
+
+    def warm_next(self) -> bool:
+        """Build one more idle-time field; False when there is nothing left to build (always, in Millbrook)."""
+        return False
+    # --- end region ---
 
     def __post_init__(self) -> None:
         self.h = len(self.tiles)
