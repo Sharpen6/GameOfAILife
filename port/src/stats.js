@@ -111,10 +111,12 @@
 
   const _district_of_place = sim => new Map(Array.from(sim.town.places.values(), p => [p.id, p.district]));
 
-  // Residential place id -> its homes (one for a house, six for a block of flats).
+  // Residential place id -> its homes (one for a house, six for a block of flats), for the cast's 37 homes
+  // (housing.cast_homes) as city.homes counts them: in the region world too, where the townsfolk's homes count only
+  // in their districts (_districts).
   function _homes_at(sim) {
     const out = new Map();
-    for (const h of sim.homes.values()) {
+    for (const h of G.housing.cast_homes(sim)) {
       if (!out.has(h.place)) out.set(h.place, []);
       out.get(h.place).push(h);
     }
@@ -130,13 +132,18 @@
       in_debt: count(people, p => p.agent.is_adult && p.cash + p.savings < 0) };
   }
 
+  // city.homes: the cast's 37 homes (housing.cast_homes) and the 22 lots they stand on. The region world keeps
+  // this block to the 37, the market the named live in (house_drought and market_json are v2-only too); the
+  // region's 575 homes and their lots count in their districts (_districts).
   function _homes_block(sim) {
-    const { STAGES, stage_of, listed } = G.housing;
-    const homes = Array.from(sim.homes.values());
+    const { STAGES, stage_of, listed, cast_homes } = G.housing;
+    const homes = cast_homes(sim);
+    const places = new Set(homes.map(h => h.place));
     const by_stage = STAGES.map(() => 0);
     const lived_in = new Set(homes.filter(h => h.household !== null).map(h => h.place));
     let neglected = 0;
     for (const [pid, lot] of sim.lots) {
+      if (!places.has(pid)) continue;
       const st = stage_of(lot.condition);
       by_stage[st] += 1;
       if (st >= 3 && lived_in.has(pid)) neglected += 1;
@@ -341,8 +348,9 @@
     };
   }
 
-  // Every district with at least one home, in town order.
-  // Every district with at least one home, in town order (the region's after Millbrook's in the region);
+  // Every district with at least one home, in town order (the region's after Millbrook's in the region). A district
+  // counts its own homes and lots, whoever lives there (the cast's and, in the region world, the townsfolk's),
+  // unlike city.homes (_homes_block), which keeps to the cast's 37.
   // parts.districts (the townsfolk's city_parts) adds the townsfolk living there.
   function _districts(sim, people, parts = null) {
     const district = _district_of_place(sim);

@@ -427,12 +427,21 @@ const st = sim.stats_json(true);
 process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts }));
 """
 
-STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth")
+STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth", "homes")
 
 
 def city_stats_python(folk: int) -> tuple[Simulation, dict]:
-    """CITY_STATS_JS's run in Python: 200 steps, God's luck 95 on f0-f199, 70 steps."""
-    sim = Simulation(1, world="region", folk=folk)
+    """CITY_STATS_JS's run in Python: 200 steps, God's luck 95 on f0-f199, 70 steps. The named roll the JS port's
+    dice (1, as tests.test_port.DiceSim does), so the city's sums of the named can equal the port's too."""
+    from tests.test_port import MulberryDice
+
+    class RegionDiceSim(Simulation):
+        def _roll_weather(self) -> None:
+            if not isinstance(self.rng, MulberryDice):
+                self.rng = MulberryDice(1)
+            super()._roll_weather()
+
+    sim = RegionDiceSim(1, world="region", folk=folk)
     for _ in range(200):
         sim.step()
     for i in range(200):
@@ -491,6 +500,22 @@ class TestFolkCityStats(unittest.TestCase):
                 with self.subTest(d["id"]):
                     self.assertNotEqual(d["median_worth"], 0, d)
 
+    def test_city_homes_keep_to_the_cast_and_districts_count_their_own(self):
+        # city.homes describes the cast's 37 homes on their 22 lots, as in the millbrook world; each district counts
+        # every home in it (the townsfolk's too), so the districts' homes add up to all of the region's.
+        from gameofailife import housing
+        sim, homes = self.sim, self.st["city"]["homes"]
+        cast = housing.cast_homes(sim)
+        self.assertEqual(homes["total"], len(cast))
+        self.assertEqual(homes["total"], 37)
+        self.assertEqual(homes["owned"] + homes["rented"], sum(1 for h in cast if h.household is not None))
+        self.assertEqual(sum(homes["lots_by_stage"]), len({h.place for h in cast}))
+        self.assertEqual(sum(homes["lots_by_stage"]), 22)
+        self.assertGreater(len(sim.homes), 600)
+        self.assertEqual(sum(d["homes"] for d in self.st["districts"]), len(sim.homes))
+        self.assertEqual(sum(d["vacant"] for d in self.st["districts"]),
+                         sum(1 for h in sim.homes.values() if h.household is None))
+
     def test_retired_and_out_of_work_count_townsfolk(self):
         city = self.st["city"]
         retired = sum(1 for p in self.folk if p.age >= 65 and p.job is None)
@@ -509,8 +534,8 @@ class TestFolkCityStats(unittest.TestCase):
         for k in STATS_FIELDS:
             with self.subTest(k):
                 self.assertEqual(js["city"][k], self.st["city"][k], k)
-        self.assertEqual([(d["id"], d["people"], d["median_worth"]) for d in js["districts"]],
-                         [(d["id"], d["people"], d["median_worth"]) for d in self.st["districts"]])
+        row = lambda d: (d["id"], d["people"], d["median_worth"], d["homes"], d["vacant"], d["shabby_plus"])  # noqa: E731
+        self.assertEqual([row(d) for d in js["districts"]], [row(d) for d in self.st["districts"]])
 
 
 # --- client/dev/fixture_folk.js ---------------------------------------------------------------------------------

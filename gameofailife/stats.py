@@ -139,9 +139,12 @@ def _district_of_place(sim: Simulation) -> dict[str, str]:
 
 
 def _homes_at(sim: Simulation) -> dict[str, list]:
-    """Residential place id -> its homes (one for a house, six for a block of flats)."""
+    """Residential place id -> its homes (one for a house, six for a block of flats), for the cast's 37 homes
+    (housing.cast_homes) as city.homes counts them: in the region world too, where the townsfolk's homes count only
+    in their districts (_districts)."""
+    from . import housing
     out: dict[str, list] = {}
-    for h in sim.homes.values():
+    for h in housing.cast_homes(sim):
         out.setdefault(h.place, []).append(h)
     return out
 
@@ -156,12 +159,18 @@ def _wealth_block(people: list[_Person]) -> dict:
 
 
 def _homes_block(sim: Simulation) -> dict:
+    """city.homes: the cast's 37 homes (housing.cast_homes) and the 22 lots they stand on. The region world keeps
+    this block to the 37, the market the named live in (house_drought and market_json are v2-only too); the
+    region's 575 homes and their lots count in their districts (_districts)."""
     from . import housing
-    homes = list(sim.homes.values())
+    homes = housing.cast_homes(sim)
+    places = {h.place for h in homes}
     by_stage = [0] * len(housing.STAGES)
     lived_in = {h.place for h in homes if h.household is not None}
     neglected = 0
     for pid, lot in sim.lots.items():
+        if pid not in places:
+            continue
         st = housing.stage_of(lot.condition)
         by_stage[st] += 1
         if st >= 3 and pid in lived_in:
@@ -363,7 +372,9 @@ def _llm_block(sim: Simulation) -> dict:
 
 
 def _districts(sim: Simulation, people: list[_Person], parts: dict | None = None) -> list[dict]:
-    """Every district with at least one home, in town order (the region's after Millbrook's in the region).
+    """Every district with at least one home, in town order (the region's after Millbrook's in the region). A
+    district counts its own homes and lots, whoever lives there (the cast's and, in the region world, the
+    townsfolk's), unlike city.homes (_homes_block), which keeps to the cast's 37.
     `parts["districts"]` ({district id: {"people": int, "mood_sum": float, "adult_worths": [ints]}}, the
     townsfolk's `city_parts`) adds the townsfolk living there."""
     from . import housing
