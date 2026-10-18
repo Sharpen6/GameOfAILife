@@ -5,13 +5,19 @@
 "use strict";
 (function () {
   const CV = window.CityView = window.CityView || {};
-  const STEPS = [0.25, 0.5, 1, 1.5, 2, 3];
-  CV.ZOOM_STEPS = STEPS;
+  // view.md 3.7: 1/16 to 3. Older (small) towns keep v2's steps from 1/4, so they work unchanged.
+  const ALL_STEPS = [0.0625, 0.125, 0.25, 0.5, 1, 1.5, 2, 3];
+  CV.ZOOM_STEPS = ALL_STEPS;
+  // The region's default view (Millbrook and Riverton Central) and Millbrook's (the M key), in tiles.
+  CV.DEFAULT_VIEW = { zoom: 0.25, x: 85, y: 48 };
+  CV.MILLBROOK_VIEW = { zoom: 0.5, x: 40, y: 25 };
   const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
 
   CV.makeCamera = function (cv, scene, hooks) {
     hooks = hooks || {};
     const cam = scene.cam;
+    const big = !!scene.big, STEPS = big ? ALL_STEPS : ALL_STEPS.filter(s => s >= 0.25), EDGE = big ? 2 : 0;
+    cam.steps = STEPS;
     cam.follow = null; cam.vx = 0; cam.vy = 0;
     const keys = new Set(), ptrs = new Map();
     const ac = new AbortController(), on = (el, type, fn, o) => el.addEventListener(type, fn, Object.assign({ signal: ac.signal }, o || {}));
@@ -30,7 +36,7 @@
         return;
       }
       const [tx, ty] = p.toTile(cam.x, cam.y);
-      const cx = Math.max(0, Math.min(p.w, tx)), cy = Math.max(0, Math.min(p.h, ty));
+      const cx = Math.max(-EDGE, Math.min(p.w + EDGE, tx)), cy = Math.max(-EDGE, Math.min(p.h + EDGE, ty));
       if (cx !== tx || cy !== ty) { [cam.x, cam.y] = p.toWorld(cx, cy); cam.vx = cam.vy = 0; }
     }
     cam.clamp = clamp;
@@ -149,6 +155,7 @@
       else if (k === "+" || k === "=") { step(1); ev.preventDefault(); }
       else if (k === "-" || k === "_") { step(-1); ev.preventDefault(); }
       else if (k === "0") { cam.fit(); ev.preventDefault(); }
+      else if (k === "m" && big) { cam.millbrook(); ev.preventDefault(); }
       else if (k === "f") { if (hooks.followKey) hooks.followKey(); }
       else if (k === "escape") { if (hooks.escape) hooks.escape(); }
     };
@@ -168,12 +175,22 @@
       cam.flyTo((B.x0 + B.x1) / 2, (B.y0 + B.y1) / 2, z, 450);
     };
     cam.centerOn = (wx, wy) => { cam.x = wx; cam.y = wy; clamp(); changed(); };
+    // The region's default view (view.md 3.7), null for older towns; home() jumps there.
+    cam.defaultView = () => big ? Object.assign({}, CV.DEFAULT_VIEW) : null;
+    cam.home = () => { const d = cam.defaultView(); if (!d) return false; [cam.x, cam.y] = scene.proj.toWorld(d.x, d.y); cam.zoom = Math.max(minZoom(), d.zoom); fly = null; zoomAnim = null; clamp(); changed(); return true; };
+    cam.millbrook = () => { const m = CV.MILLBROOK_VIEW, [x, y] = scene.proj.toWorld(m.x, m.y); cancelFollow(); cam.flyTo(x, y, m.zoom); };
+    cam.minZoom = minZoom;
     // Ease the centre and zoom over ms with cubic in-out; zoom out a step mid-flight on long trips.
     cam.flyTo = function (wx, wy, zoom, ms) {
       zoom = Math.max(minZoom(), Math.min(maxZoom(), zoom || cam.zoom));
       const [w, h] = size();
-      const far = Math.hypot((wx - cam.x) * cam.zoom, (wy - cam.y) * cam.zoom) > 2 * Math.max(w, h);
-      fly = { x0: cam.x, y0: cam.y, z0: cam.zoom, x1: wx, y1: wy, z1: zoom, t: 0, ms: ms || 600, dip: far ? Math.log(2) : 0 };
+      const screens = Math.hypot((wx - cam.x) * cam.zoom, (wy - cam.y) * cam.zoom) / Math.max(w, h);
+      let dip = screens > 2 ? Math.log(2) : 0;
+      if (big && screens > 3) { // a long fly is a 900 ms arc: out and back in, never below the minimum zoom
+        ms = 900;
+        dip = Math.min(Math.log(screens / 1.5), Math.max(0, (Math.log(cam.zoom) + Math.log(zoom)) / 2 - Math.log(minZoom())));
+      }
+      fly = { x0: cam.x, y0: cam.y, z0: cam.zoom, x1: wx, y1: wy, z1: zoom, t: 0, ms: ms || 600, dip };
       zoomAnim = null; cam.vx = cam.vy = 0;
     };
     // The projection changed: f maps an old world point to the new world. The centre and a flight's start and end

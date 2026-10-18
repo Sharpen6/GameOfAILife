@@ -34,6 +34,8 @@
       // Painter key of a ground point: larger is nearer the camera.
       depth(x, y) { const r = R(x, y); return r[0] + r[1]; },
       bounds() { return { x0: -rh * HW, y0: 0, x1: rw * HW, y1: (rw + rh) * HH }; },
+      // The painter depth of a world y (view.md 3.1): an upright item's ground point sits at depth x HH.
+      depthOfWorldY(wy) { return wy / HH; },
       // Footprint of a tile rectangle in rotated space: [a0, b0, a1, b1].
       rect(x0, y0, x1, y1) {
         const p = R(x0, y0), q = R(x1, y1);
@@ -75,6 +77,7 @@
       toTile(wx, wy) { return [wx / T, wy / T]; },
       depth(x, y) { return y + x * 1e-4; },
       bounds() { return { x0: 0, y0: 0, x1: w * T, y1: h * T }; },
+      depthOfWorldY(wy) { return wy / T; },
       rect(x0, y0, x1, y1) { return [x0, y0, x1, y1]; },
       slices(x0, y0, x1, y1) { return [{ wx0: x0 * T, wx1: x1 * T, depth: y1 }]; },
       facing(dx, dy) {
