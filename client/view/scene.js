@@ -1225,6 +1225,13 @@
     }
     function glowOf(rec, share) {
       const b = rec.b, pct = share == null ? b.litShare : share;
+      // a region building shares V2's glow of its sprite (art.glow, one canvas per sprite key and share)
+      if (BIG && rec.big && art.glow) {
+        const e = rec.att;
+        if (!e) return null;
+        const gl = art.glow(e.s, pct);
+        return gl && (e.inPlace ? gl : { c: gl.c, wx: gl.wx + rec.dx, wy: gl.wy + rec.dy });
+      }
       b.glows = b.glows || new Map();
       if (b.glows.has(pct)) return b.glows.get(pct);
       const win = b.windows.filter((q, k) => hash(b.id + ":" + k) % 100 < pct);
