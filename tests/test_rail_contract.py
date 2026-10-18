@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "port" / "tools" / "parity_rail.cjs"
 NODE = os.environ.get("NODE") or shutil.which("node")
 needs_node = unittest.skipUnless(NODE, "node is not installed")
-AT = [0, 0.5, 1, 2.25, 3.7, 7, 12.5, 20, 33.3, 61, 999]
+AT = [-3, -0.5, 0, 0.5, 1, 2.25, 3.7, 7, 12.5, 20, 33.3, 61, 999]
 
 
 def node(*args) -> object:
@@ -58,6 +58,23 @@ def py_routes(town, net, n):
         r = net.route(a, b, mode, i % 2 == 0)
         out.append([a, b, mode, net.minutes(a, b, mode), net.minutes(b, a, mode), r.pts, r.t8, r.tiles, r.minutes,
                     [r.at(m) for m in AT]])
+    return out
+
+
+def py_still(town, net, n):
+    """One-point routes (an end to itself), as a trip's 0-minute walk from a station exit makes them."""
+    ends = []
+    for a, _ in pairs(town, n):
+        ra = net._end(a)[0]
+        ends += [a, (ra % net.w, ra // net.w)]
+    for ln in rail.lines(town).values():
+        for s in ln.stations:
+            ends.extend(ln.exits[s])
+    out = []
+    for e in ends:
+        for mode in ("walk", "car"):
+            r = net.route(e, e, mode, False)
+            out.append([e, mode, r.pts, r.t8, r.tiles, r.minutes, [r.at(m) for m in AT]])
     return out
 
 
@@ -119,6 +136,16 @@ class NodeParityTest(unittest.TestCase):
         self.assertEqual(len(js), 300)
         for a, b in zip(js, py):
             self.assertEqual(a, b, a[:3])
+
+    def test_one_point_routes(self):
+        js = node("still", 20)
+        py = plain(py_still(self.town, self.net, 20))
+        self.assertGreater(len(js), 80)
+        self.assertEqual(js, py)
+        for e, mode, pts, t8, tiles, minutes, at in py:
+            if isinstance(e, list):  # a street tile to itself is one point; a place goes out to its street and back
+                self.assertEqual((len(pts), tiles, minutes), (1, 0, 0), e)
+                self.assertEqual(at, [[*pts[0], None]] * len(AT), e)
 
     def test_starts_among_5000_pairs(self):
         js = node("starts", 5000)
