@@ -241,10 +241,10 @@ class Invariants(unittest.TestCase):
         d, mb = self.d, T.build_map(1)
         place_ids = [p["id"] for p in d["places"]]
         home_ids = [h[0] for h in d["homes"]]
-        for ids in (place_ids, home_ids):
+        for ids in (place_ids, home_ids, [x["id"] for x in d["districts"]]):
             self.assertEqual(len(ids), len(set(ids)))
             for i in ids:
-                self.assertRegex(i, ID)
+                self.assertTrue(ID.fullmatch(i), i)
         self.assertFalse(set(place_ids) & set(mb.places))
         self.assertFalse(set(home_ids) & {h[0] for h in HOME_SPECS})
         self.assertFalse(set(home_ids) & set(mb.places))
@@ -444,6 +444,15 @@ class Targets(unittest.TestCase):
         self.assertEqual((m.in_frozen(68, 49), m.in_frozen(69, 0), m.in_frozen(0, 50)), (True, False, False))
         self.assertEqual((m.district_at(10, 10), m.district_at(74, 30), m.district_at(130, 60), m.district_at(3, 3)),
                          ("maple_grove", "the_works", "downtown_riverton", ""))
+        # a region place's footprint and entry always report its own district, even where another district's rect
+        # holds them (quayside_station sits in downtown_riverton's rect); the rects decide everywhere else
+        q = m.places["quayside_station"]
+        self.assertEqual((q.district, m.district_at(*q.entry), m.district_at(q.x, q.y)), ("quayside",) * 3)
+        self.assertEqual(m.district_at(q.x - 1, q.y), "downtown_riverton")
+        for p in m.places.values():
+            if p.id not in m.millbrook_ids:
+                tiles = [(x, y) for y in range(p.y, p.y + p.h) for x in range(p.x, p.x + p.w)] + [p.entry]
+                self.assertEqual({m.district_at(x, y) for x, y in tiles}, {p.district}, p.id)
 
 
 @unittest.skipUnless(NODE, "node is not installed")
@@ -467,6 +476,9 @@ class NodeParity(unittest.TestCase):
             self.assertEqual(js["rents"], rents)
             self.assertEqual(js["parking"], [region.car_extra(m, pid) for pid in m.places])
             self.assertEqual(js["districts"], [m.district_at(x, y) for y in range(0, m.h, 7) for x in range(0, m.w, 5)])
+            self.assertEqual(js["place_districts"], [[m.district_at(*p.entry), m.district_at(p.x, p.y),
+                                                      m.district_at(p.x + p.w - 1, p.y + p.h - 1)]
+                                                     for p in m.places.values()])
             self.assertEqual(js["frozen"], [m.in_frozen(x, y) for x, y in ((0, 0), (68, 49), (69, 0), (0, 50), (200, 100))])
             self.assertEqual(js["walk"], [int(m.walkable(i % m.w, i // m.w)) for i in range(0, m.w * m.h, 97)])
             self.assertEqual(js["street"], [m._road[i] for i in range(0, m.w * m.h, 97)])

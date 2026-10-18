@@ -78,6 +78,7 @@ class RegionMap(T.TownMap):
         self._roads = {}
         self._drives = {}
         self.memo = {}
+        self._tile_district = {}  # tile index -> district of the region place there (build_region fills it)
         w, h, road = self.w, self.h, self._road
         self.junctions = {(i % w, i // w) for i in range(w * h) if road[i] and
                           (i % w + 1 < w and road[i + 1]) + (i % w > 0 and road[i - 1]) +
@@ -94,8 +95,13 @@ class RegionMap(T.TownMap):
         return x < FROZEN[0] and y < FROZEN[1]
 
     def district_at(self, x: int, y: int) -> str:
-        """Millbrook's district for a tile of its 80 x 50 (v2's blocks), else the region district whose rect holds
-        it, else "" (a street, the river, a highway)."""
+        """The district of the region place whose footprint or entry is the tile (so it always matches the place's
+        own district, which car_extra and the prices use), else Millbrook's district for a tile of its 80 x 50
+        (v2's blocks), else the region district whose rect holds it, else "" (a street, the river, a highway)."""
+        if 0 <= x < self.w and 0 <= y < self.h:
+            own = self._tile_district.get(y * self.w + x)
+            if own is not None:
+                return own
         mx, my, mw, mh = MILLBROOK
         if mx <= x < mx + mw and my <= y < my + mh:
             return T.district_at(x, y)
@@ -135,6 +141,22 @@ class RegionMap(T.TownMap):
         }
 
 
+def _tile_districts(m: RegionMap) -> dict:
+    """Tile index -> district for the region places' footprints, then their entry tiles (first place wins), so
+    district_at agrees with each place's own district where the rects do not (quayside_station's footprint and
+    entry lie in downtown_riverton's rect). Millbrook's places keep v2's blocks."""
+    out = {}
+    mine = [p for p in m.places.values() if p.id not in m.millbrook_ids]
+    for p in mine:
+        for y in range(p.y, p.y + p.h):
+            for x in range(p.x, p.x + p.w):
+                out.setdefault(y * m.w + x, p.district)
+    for p in mine:
+        ex, ey = p.entry
+        out.setdefault(ey * m.w + ex, p.district)
+    return out
+
+
 @functools.lru_cache(maxsize=4)
 def build_region(seed: int) -> RegionMap:
     """The region for a seed (only Millbrook's trees depend on it). Memoized: callers share the returned map and
@@ -152,6 +174,7 @@ def build_region(seed: int) -> RegionMap:
                                   p["district"], p["style"], p["floors"], p["tier"], p["units"], p["capacity"])
     m = RegionMap(tiles, places)
     m.millbrook_ids = frozenset(mb.places)
+    m._tile_district = _tile_districts(m)
     m.home_specs = priced_specs(d, places)
     m.lot_conditions = dict(d["lots"])
     m.job_slots = [(t, pid, w, s, e, tuple(days), n) for t, pid, w, s, e, days, n in d["jobs"]]

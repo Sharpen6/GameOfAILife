@@ -24,8 +24,9 @@ Branch `v3-r1a`. Tags: `v3-skel-region` and `v3-region-frozen` (same sha, the fr
 ## Numbers (seed 1)
 575 homes (flat 388, house 165, big_house 22; let 501, owned 71, for_sale 3: 572 start-occupied); 334 region places
 (home 177, shop 58, cafe 43, office 14, station 9, works 9, park 6, school 5, market 4, townhall 4, venue 3, bank 1,
-hospital 1); slots 1,241 region + 142 Millbrook; 1,020 school seats; 105 cafes/shops/markets; 1,019 buildings, 30 of
-10+ floors; decor 656; 284 junctions; within 15 road-walk minutes of a station 136 homes and 308 slots (RoadNet).
+hospital 1); slots 1,241 region + 142 Millbrook; 1,020 school seats; 105 cafes/shops/markets; 1,019 buildings
+(Millbrook's 35 + the region's 328 non-park places + 656 decor), 30 of 10+ floors; 284 junctions; within 15 road-walk
+minutes of a station 136 homes and 308 slots (RoadNet).
 
 ## Notes for consumers
 - JS: `millbrook_ids` is a `Set`, `lot_conditions` a plain object, rows are arrays (`home_specs`, `job_slots`).
@@ -33,6 +34,9 @@ hospital 1); slots 1,241 region + 142 Millbrook; 1,020 school seats; 105 cafes/s
 - `warm()` builds only Millbrook's 39 places' walk + road fields and the bus stops' walk fields; `warm_next()` is
   False (PLAN 1).
 - north_park's rect (95, 26, 12, 10) also holds Northgate station and the R tracks; its own tiles are the P/T ones.
+- `district_at(x, y)` gives a region place's own `district` on its footprint and entry tile, then Millbrook's v2
+  blocks inside its 80 x 50, then the region rects. It differs from the rects only at quayside_station (district
+  quayside, inside downtown_riverton's rect), so district_at, car_extra and the price table agree on every place.
 
 ## For the integrator
 - `python3 -m gameofailife.regiongen --check` (exit 1 when stale), `python3 -m unittest tests.test_regiongen`.
@@ -92,8 +96,9 @@ A line in `rail.lines`: `{"id", "name", "cars", "tracks", "track_tiles", "statio
 **The region.** Millbrook is now the leafy north-west corner of a 256 x 192 region, 3.2 x 3.8 times larger: Northgate,
 The Heights and North Woods across the river; Riverton Downtown's 8-30-floor offices round Central Station, Midtown's
 towers and the Ironworks' factories; Quayside, Willow Hills and Southfield's homes, schools, stadium and mall; Route
-9's highways and Greenacre's farms. 334 new places (575 homes, 1,241 job slots, 9 stations on two railway lines) and
-656 decor buildings make 1,019 buildings, 30 of them 10 floors or more. Millbrook's own tiles (x < 69, y < 50) are
+9's highways and Greenacre's farms. 334 new places (328 buildings and 6 parks: 575 homes, 1,241 job slots, 9 stations
+on two railway lines) and 656 decor buildings; with Millbrook's 35 the map has 1,019 buildings, 30 of them 10 floors
+or more. Millbrook's own tiles (x < 69, y < 50) are
 exactly v2's. The map is `gameofailife/data/region.json`, written at dev time by `python3 -m gameofailife.regiongen
 --write` (`--check` says whether it is stale); `gameofailife/region.py` and `port/src/region.js` load it, apply the
 district price table and lay Millbrook over its corner. `--world millbrook` keeps the v2 map.
