@@ -209,13 +209,13 @@ async function steady(browser, label, query) {
 async function runSteady(browser) { await steady(browser, "iso"); }
 
 // 4: determinism: five near views over two fresh pages, and every LOD drawn twice on one page (at a fixed clock,
-// since water, smoke and beacons move); spriteBox = art.building's bounds
+// since water, smoke and beacons move, and without the fake host, whose movers move); spriteBox = art.building's bounds
 async function runSame(browser) {
   const views = [[1, 40, 25], [0.5, 150, 100], [2, 30, 20], [0.5, 85, 48], [1, 128, 96]];
   const lows = [[0.25, 85, 48], [0.125, 128, 96], [0.0625, 128, 96], [0.4, 150, 100], [3, 60, 40]];
   const hashes = [];
   for (let k = 0; k < 2; k++) {
-    const { ctx, page } = await open(browser, SIZES.desk, "");
+    const { ctx, page } = await open(browser, SIZES.desk, "stub=0"); // no movers: a quiet morning
     await page.evaluate(() => window.__setTown());
     const at = (vs) => page.evaluate(vs => vs.map(([z, x, y]) => { window.__cam({ zoom: z, x, y }); window.__settle(400); window.__view.frame(1e6); return window.__hash(); }), vs);
     hashes.push(await at(views));

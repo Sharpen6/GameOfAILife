@@ -109,7 +109,7 @@
     s.onload = () => { window.__stub = true; start(); };
     s.onerror = () => { window.__stub = false; start(); };
     document.body.appendChild(s);
-  } else start();
+  } else { window.__stub = false; start(); }
 })();
 </script>
 </body>

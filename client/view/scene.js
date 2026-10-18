@@ -761,17 +761,22 @@
       return null;
     }
     // Build queued sprites, nearest first, within ms (and at least one when nothing else was built this frame).
-    let avgSprite = 2;
-    function buildQueued(budget, ms) {
+    // A sprite's cost is estimated from its area (ms per px, learned): while the camera moves, one that would
+    // overrun what is left of the budget waits (its box stands in) and smaller ones go first.
+    let avgSprite = 2, msPerPx = 2e-5;
+    function buildQueued(budget, ms, still) {
       const jobs = [...spriteQueue.entries()].filter(([, j]) => j.f >= frameNo - 1).sort((a, b) => a[1].d - b[1].d);
       let spent = 0;
       for (const [k, j] of jobs) {
         if (sprites.has(k)) { spriteQueue.delete(k); continue; }
         if (spent >= ms || (budget.builds > 0 && budget.left() < Math.min(4, avgSprite))) break;
+        const area = (j.rec.wx1 - j.rec.wx0) * (j.rec.wy1 - j.rec.wy0), est = area * msPerPx;
+        if (!still && !budget.unlimited && est > Math.max(budget.left(), 4)) continue;
         const a = performance.now();
         budget.run(() => buildSprite(j.rec, k));
         const dt = performance.now() - a;
         spent += dt; avgSprite = avgSprite * 0.8 + dt * 0.2;
+        if (area > 0) msPerPx = msPerPx * 0.8 + (dt / area) * 0.2;
         spriteQueue.delete(k);
       }
       for (const [k, j] of spriteQueue) if (j.f < frameNo - 1) spriteQueue.delete(k);
@@ -1208,19 +1213,23 @@
       if (m) g.drawImage(m, sx / 2, sy / 2, sw / 2, sh / 2, dx0, dy0, dx1 - dx0, dy1 - dy0);
       else g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
     }
-    let mips = new WeakMap(), mipFrame = -1, mipN = 0;
+    let mips = new WeakMap(), mipFrame = -1, mipN = 0, mipMs = 0;
     function mipOf(img) {
       let m = mips.get(img);
       if (m) return m;
-      if (mipFrame !== frameNo) { mipFrame = frameNo; mipN = 0; }
-      if (!img.width || (mipN > 0 && budget.left() <= 0)) return null;
+      // (copies have their own 3 ms a frame while the view moves, the frame's budget when it rests; a missing one
+      // draws the full sprite scaled)
+      if (mipFrame !== frameNo) { mipFrame = frameNo; mipN = 0; mipMs = 0; }
+      if (!img.width || (mipN > 0 && mipMs >= 3 && budget.left() <= 0)) return null;
       mipN++;
+      const a = performance.now();
       budget.run(() => {
         m = CV.canvas(Math.max(1, Math.ceil(img.width / 2)), Math.max(1, Math.ceil(img.height / 2)));
         const q = m.getContext("2d"); q.imageSmoothingEnabled = true;
         q.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width / 2, img.height / 2);
         flush(m);
       });
+      mipMs += performance.now() - a;
       mips.set(img, m);
       return m;
     }
@@ -1308,7 +1317,11 @@
       }
       scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
       if (BIG && chunks && frameNo % 30 === 0) { chunks.begin(); chunks.trim(lowCap() - nearPx()); }
-      if (BIG) { const a = performance.now(); buildQueued(budget, 4); scene.stats.spriteMs = performance.now() - a; const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy]; if (st && !spriteQueue.size && !scene.stats.boxes) prefetch(); }
+      if (BIG) {
+        const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy];
+        const a = performance.now(); buildQueued(budget, 4, st); scene.stats.spriteMs = performance.now() - a;
+        if (st && !spriteQueue.size && !scene.stats.boxes) prefetch();
+      }
       smoke(v, now);
       // rain: an overcast wash, so a still frame reads as wet weather too
       const raining = scene.weather === "rain" || scene.weather === "storm";
@@ -1385,9 +1398,9 @@
           } else {
             const win = level >= 0.25 ? 1 : level >= 0.125 ? 2 : 0;
             let boxedN = 0;
-            for (let a = 0; a < list.length; a += 24) steps.push(() => {
+            for (let a = 0; a < list.length; a += 8) steps.push(() => {
               q.imageSmoothingEnabled = true;
-              for (const o of list.slice(a, a + 24)) {
+              for (const o of list.slice(a, a + 8)) {
                 if (!o.big) { // a tree: a blob
                   const r = Math.max(1, 9 * level), cxw = o.wx + o.sw / 2, cyw = o.wy + o.sh - 10;
                   CV.lowTree(q, (cxw - wx0) * level, (cyw - wy0) * level, r, scene.season);
@@ -1474,7 +1487,7 @@
       lastLowView = [v.S, v.ox, v.oy];
       if (!far && still && budget.left() > 0) {
         for (const o of inRect(v.x0, v.y0, v.x1, v.y1)) if (o.big) spriteOf(o);
-        buildQueued(budget, 4);
+        buildQueued(budget, 4, true);
       }
       if (still && !chunks.pending) prefetch();
       scene.stats.items = 0; scene.stats.chunks = n; scene.stats.boxes = 0;
