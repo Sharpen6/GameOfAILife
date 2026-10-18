@@ -11,6 +11,8 @@
 // behind another), and walkers bound for one spot of pavement on the same tick are spread apart along it;
 // idle people on one tile stand in a small ring.
 // Also the housing look adapter (state.lots / state.homes -> per-place looks) and occupancy counts.
+// Exports CV.easeL(x0, y0, x1, y1, t, xFirst) (the L ease crowd.js shares), CV.lClear and CV.regionOf (the
+// region's tile predicates); M.tickMs is the measured real time between ticks.
 // Classic script on window.CityView.
 "use strict";
 (function () {
@@ -31,7 +33,6 @@
   // A walker's straight step across a blocked corner skips this share of the move either side of the corner
   // point itself (a pixel or two), which lies on all four tiles at once.
   const CORNER = 0.02;
-  const WALKABLE = ".#Pe";
 
   // Does the L from tile (x0, y0) to tile (x1, y1), x leg first or y leg first, pass only over tiles that
   // ok(x, y) allows? The two end tiles are left out: a car leaves from and arrives at a driveway.
@@ -85,6 +86,17 @@
     }
     return via;
   }
+  // The point at share t (0..1) of an L-shaped move from tile (x0, y0) to (x1, y1), the x leg first or the y
+  // leg first, with its step direction: the ease the named, the buses and the townsfolk share.
+  function easeL(x0, y0, x1, y1, t, xFirst) {
+    const dx = x1 - x0, dy = y1 - y0, total = Math.abs(dx) + Math.abs(dy);
+    if (!total) return { x: x1, y: y1, sx: 0, sy: 0 };
+    const s = Math.max(0, Math.min(1, t)) * total;
+    if (xFirst) return s <= Math.abs(dx) ? { x: x0 + Math.sign(dx) * s, y: y0, sx: Math.sign(dx), sy: 0 } : { x: x1, y: y0 + Math.sign(dy) * (s - Math.abs(dx)), sx: 0, sy: Math.sign(dy) };
+    return s <= Math.abs(dy) ? { x: x0, y: y0 + Math.sign(dy) * s, sx: 0, sy: Math.sign(dy) } : { x: x0 + Math.sign(dx) * (s - Math.abs(dy)), y: y1, sx: Math.sign(dx), sy: 0 };
+  }
+  CV.easeL = easeL;
+  CV.lClear = lClear;
   // A point at share t of the way along the polyline pts: where, the step direction, which segment (i,
   // from pts[i]) and the polyline's length.
   function along(pts, t) {
@@ -105,6 +117,18 @@
     return [x + 0.5 + o(ys)[0], y + 0.5 + o(xs)[1]];
   }
   CV.carColor = id => CAR_COLORS[hash(id + ":car") % CAR_COLORS.length];
+
+  // Tile predicates (view.md 3.3): R's (region.js, scene.R) when the scene has one, else made here from the
+  // tile codes: isStreet "# b x", isWalk ". # P e b x F", isRoadLike adds "H h", isRail "= r x".
+  CV.regionOf = function (scene) {
+    if (scene.R && scene.R.isWalk) return scene.R;
+    if (scene._R) return scene._R;
+    const t = scene.town;
+    if (typeof CV.makeRegion === "function") { try { const R = CV.makeRegion(t); if (R && R.isWalk) return (scene._R = R); } catch (e) { /* fall back */ } }
+    const W = t.w, H = t.h, rows = t.tiles;
+    const has = s => (x, y) => x >= 0 && y >= 0 && x < W && y < H && s.includes(rows[y][x]);
+    return (scene._R = { w: W, h: H, isStreet: has("#bx"), isWalk: has(".#PebxF"), isRoadLike: has("#bxHh"), isRail: has("=rx") });
+  };
 
   // state.lots and state.homes -> {placeId: {stage, works, moving, listing, vacant, anyListed, units}}.
   CV.looksFrom = function (town, lots, homes) {
@@ -140,10 +164,12 @@
     const tracks = new Map();
     const M = { placeOf, tickMs: 417, lots: null, homes: null, state: null };
     let lastTick = null, tickAt = 0, recs = new Map(), rankKey = "", alongOf = new Map();
-    const tile = (x, y) => (x < 0 || y < 0 || x >= town.w || y >= town.h) ? null : town.tiles[y][x];
-    // where a vehicle may cut a corner (roads, which run off the map) and where a person may (open ground)
-    const roadOk = (x, y) => { const c = tile(x, y); return c === null || c === "#"; };
-    const walkOk = (x, y) => { const c = tile(x, y); return c === null || WALKABLE.includes(c); };
+    const R = CV.regionOf(scene);
+    const off = (x, y) => x < 0 || y < 0 || x >= town.w || y >= town.h;
+    // where a vehicle may cut a corner (streets, bridges and level crossings, which run off the map) and where
+    // a person may (open ground, pavements, paths, bridges, crossings, farmland)
+    const roadOk = (x, y) => off(x, y) || R.isStreet(x, y);
+    const walkOk = (x, y) => off(x, y) || R.isWalk(x, y);
 
     // The share (0..1) of its current move a track has made by now.
     const share = (tr, now) => Math.min(1, Math.max(0, (now - tr.t0) / tr.dur));
@@ -160,16 +186,8 @@
         const u = !tr.via.length && Math.abs(dx) === 1 && Math.abs(dy) === 1 && Math.abs(t - 0.5) < CORNER ? (t < 0.5 ? 0.5 - CORNER : 0.5 + CORNER) : t;
         return along([tr.prev, ...tr.via, tr.cur], u);
       }
-      const s = t * total;
-      let x, y, sx = 0, sy = 0;
-      if (tr.first === "x") {
-        if (s <= Math.abs(dx)) { x = px + Math.sign(dx) * s; y = py; sx = Math.sign(dx); }
-        else { x = cx; y = py + Math.sign(dy) * (s - Math.abs(dx)); sy = Math.sign(dy); }
-      } else {
-        if (s <= Math.abs(dy)) { x = px; y = py + Math.sign(dy) * s; sy = Math.sign(dy); }
-        else { x = px + Math.sign(dx) * (s - Math.abs(dy)); y = cy; sx = Math.sign(dx); }
-      }
-      return { x, y, sx, sy, t, moving: t < 1 };
+      const p = easeL(px, py, cx, cy, t, tr.first === "x");
+      return { x: p.x, y: p.y, sx: p.sx, sy: p.sy, t, moving: t < 1 };
     }
     // A new tile for a track. ok(x, y): the tiles this mover may use on the way. A diagonal move takes the
     // L whose inner tiles all pass ok (a car leaving its driveway turns onto the road first instead of
@@ -217,7 +235,7 @@
     // behind another and two households apart; at a junction they keep to a kerb corner. adj is the walker's
     // spread from others bound for the same spot (spread), eased in over the move: along the pavement, or
     // at a corner along ax, the way the walker came in.
-    const isRoad = (x, y) => scene.isRoad(x, y);
+    const isRoad = (x, y) => R.isStreet(x, y);
     // A road tile that is not a junction, where walkers keep to a pavement along it: "ew", "ns" or null.
     function pavement(x, y) {
       if (!isRoad(x, y)) return null;

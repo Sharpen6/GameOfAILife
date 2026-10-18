@@ -1638,7 +1638,32 @@ a negative purse.
 
 ## View data
 
-V1b writes this section.
+How the God view (`client/view/`, `client/dashboard.js`) reads the region's moving data. Nothing here adds a field:
+it says what a host may rely on and what it may leave out. The dev host `client/dev/region_stub.js`
+(`RegionStub(window.REGION)`) sends all of it from `client/dev/region_data.js` without a server.
+
+| Field | What the view does with it |
+|-------|----------------------------|
+| `state.crowd` | Read on every frame with a new `tick` (a repeated tick is ignored). A person present in the last frame glides from where they are shown to the new tile over 1.1 ticks (L-shaped, along the streets; cars keep a lane, walkers a kerb), so a late frame never leaves anyone standing; a move of more than 12 tiles per tick the frame covers (at most 8 ticks), or into or out of a vehicle, is a jump. A newcomer appears in place; a person missing from a frame fades out over 300 ms. People standing on one tile stand in a ring. Mode picks the sprite: car, taxi and ambulance are cars; bike is drawn as a walker with a faster step; walk, run, waiting and other a person (`child` smaller). Near (zoom 0.5 and up) at most 800 sprites a frame, the rest marks; mid zoom marks, far zoom 1 px dots (vehicles in their colour). |
+| `state.folk_n` | Sizes the view's per-person arrays (with the highest `i` in `crowd`). |
+| `state.occ` | Absent means unchanged; when present, one integer per place in `town.places` order, kept as the scene's occupancy. |
+| `state.trains` | One row per train, by `id`. The train glides along its track (`town.rail.lines[].tracks`, the polyline through the tile corners + 0.5) from the last `i` to the new one over 1.1 ticks; a change of `track`, a drop of `i` or a jump of more than 12 tiles per tick the frame covers (at most 8 ticks) is a snap. Car `k` (`0` the head) sits at `i - k`, `town.rail.lines[].cars` cars in the line's colour (R red, S blue); doors are open while `at_station`; `riders` is in the tooltip. |
+| `state.talks` | The rows come named first, newest first, and the earlier row wins a place or pair. Each row not seen before (by `a`, `b` and `tick`) shows a ping for 3 s: over the place's sign for `place_index >= 0`, between the two people for `-1` (a townsperson where `crowd` shows them, a named character where the view draws them). Tone `-1` is a jagged bubble, `0` a speech bubble, `1` a speech bubble with a gold rim. |
+| events | The view takes the frame's events as `setState(state, speed, events)` or `events(list)`; it reads `seq` (each once), `tag`, `place`, `agents`, `agent` and `at`. `talk`, `flirt`: a bubble 3 s; `new_friend`, `partner`, `engaged`: a heart; `falling_out`, `breakup`, `rival`, `row`: a jagged bubble; `wedding`: rings 10 s; `party`, `birth`: a glow 10 s; other tags draw nothing. A ping sits at `place`, else at the first person in `agents` (or `agent`) the view can place, else at `at`. |
+
+At most 20 pings show at once, newest first, one per place and one per pair, none at far zoom and only those on
+screen. A pick or hover on a townsperson gives `{"kind": "agent", "id": "f417", "folk": true}`, on a train
+`{"kind": "train", "id", "line", "riders"}`. `focus` also takes `{district}` (the centre of its largest rect),
+`{station}` and `{line}`; `select`, `focus({agent})` and `highlight` take folk ids.
+
+The dashboard takes folk ids anywhere an event names people (`agent`, `agents`): News lists the event (with no
+person chip for a townsperson), a click on it shows the place on the map and opens no page, and no `get_agent` is
+sent for a folk id from a map pick or a News row. A major event raises a toast and a map ping only when it names
+nobody, names one of the named characters, or is about the person selected; a major about townsfolk alone stays in
+News. The tooltip of a townsperson reads "A townsperson", of a train "Train R1 · 12 riders".
+
+The minimap (240 x 120, 168 x 84 on phones) draws `town.tiles` by kind with district borders once, and at 5 Hz the
+named characters (2 px), the townsfolk of `crowd` (1 px), the trains (3 px) and the view box.
 
 ## Hidden information
 

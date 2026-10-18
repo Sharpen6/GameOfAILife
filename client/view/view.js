@@ -13,6 +13,23 @@
 //   setInset({top, right, bottom})     CSS px of page UI over the canvas
 //   setMode({projection})              "iso" | "flat", kept in localStorage["goal.view"]
 //   camera(), start(), stop()          camera() and onCamera: exactly {x, y, zoom, follow, projection}
+// v3 (view.md 4.5): setTown and setState also read decor, rail, crowd, occ (absent: unchanged), trains, folk_n
+// and talks; folk ids ("f417") work in select, focus({agent}) and highlight; and:
+//   events(list)                       a frame's events: social tags with place and agents become pings
+//                                      (setState(state, speed, events) does the same)
+//   focus({district | station | line}) a district's centre (its largest rect's), a station, a whole line
+//   districts(), stations(), lod()     [{id, name, center}], [{id, name, line, x, y}], "near" | "mid" | "far"
+//   setLayers({transit, labels, pings, runs})  kept in localStorage["goal.view"]; layers() reads them
+//   track(id, {x, y, inside} | null)   where someone the map does not show is: follow and focus go there; while
+//                                      they are selected and inside, their building is outlined
+//   goTo(on), millbrook()              the Go to list (Millbrook, districts with the people there now, stations);
+//                                      Millbrook at zoom 0.5. Keys on a region town: M Millbrook, G Go to, T Transit;
+//                                      the View menu adds Transit and Go to there. The Transit layer draws the
+//                                      tracks in line colour, dashed bus loops and station rings over the map.
+//   debug()                            {lod, level, chunks, cacheMP, spriteMP, items, runs, splitRuns,
+//                                      statics_builds, crowd, crowdDrawn, trainCars, pings, drawMs, buildMs, queue,
+//                                      minimapMs}; minimap() the minimap (districtAt, toMini, stats)
+// Hits add {kind: "agent", id: "f417", folk: true} and {kind: "train", id, line, riders}.
 // A place in focus, ping, highlight or an overlay may also be a home id (resolved through town.homes). The
 // view pings only when told to, and it never sends messages. Classic script on window.CityView.
 "use strict";
@@ -31,12 +48,15 @@
     canvas.classList.add("cv-canvas");
     const prefs = Object.assign({ projection: "iso" }, opt.persist === false ? {} : loadPrefs());
     prefs.rot = 0; // rotation is a tested parameter of the projection with no UI in v1: never restored
-    let scene = null, movers = null, cam = null, mini = null, town = null;
+    let scene = null, movers = null, cam = null, mini = null, town = null, crowd = null, trains = null, pings = null;
+    let layers = Object.assign({ transit: false, labels: true, pings: true, runs: true }, prefs.layers || {});
     let running = false, raf = 0, lastT = 0, lastCamSent = 0, camDirty = true, lastSave = 0, loopErrAt = 0;
     let selected = null, pendingState = null, pendingSpeed = 1, inset = { top: 0, right: 0, bottom: 0 };
     let lastLots = null, lastHomes = null, seedHousing = false; // the last lots and homes any frame carried
     let lastClick = null, highlightRaw = null, overlayRaw = null, gaps = [], dprCap = 2, slowChecked = 0;
     let camLate = false, saveLate = false; // a camera report or a save held back by its rate limit, sent later
+    let transitStations = null;             // the Transit layer's station rings (the town's, once)
+    const tracked = new Map();              // id -> {x, y, inside}: where the host says someone is (track())
     const dynamic = opt.dynamicResolution !== false;
 
     // --- the .cv-* controls -----------------------------------------------------------------------------
@@ -51,8 +71,15 @@
     const mIso = el("button", "cv-menu-item", "Isometric"), mFlat = el("button", "cv-menu-item", "Top-down"), mMini = el("button", "cv-menu-item", "Minimap");
     const mHomes = el("button", "cv-menu-item", "Homes");
     mHomes.title = "Colour the homes on the minimap by condition (on by itself when zoomed out)";
-    for (const b of [mIso, mFlat, mMini, mHomes]) { b.type = "button"; menu.appendChild(b); }
+    // region towns only (a railway): the Transit layer (T) and Go to (G), after v2's four items
+    const mTransit = el("button", "cv-menu-item", "Transit"), mGoto = el("button", "cv-menu-item", "Go to…");
+    mTransit.title = "Rail lines, bus loops and stations over the map (T)"; mGoto.title = "Fly to Millbrook, a district or a station (G)";
+    for (const b of [mIso, mFlat, mMini, mHomes, mTransit, mGoto]) { b.type = "button"; menu.appendChild(b); }
     ctl.appendChild(menu);
+    const goto = el("div", "cv-menu cv-goto");
+    goto.setAttribute("role", "menu"); goto.setAttribute("aria-label", "Go to");
+    goto.style.maxHeight = "min(60vh, 420px)"; goto.style.overflowY = "auto";
+    ctl.appendChild(goto);
     const chip = el("div", "cv-follow");
     const chipName = el("button", "cv-follow-name"), chipX = el("button", "cv-follow-x", "✕");
     chipName.type = chipX.type = "button"; chipX.title = "Stop following"; chipX.setAttribute("aria-label", "Stop following");
@@ -62,7 +89,61 @@
     bOut.addEventListener("click", () => cam && cam.zoomOut());
     bFit.addEventListener("click", () => cam && cam.fit());
     bView.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.toggle("cv-open"); syncMenu(); placeMenu(); });
-    document.addEventListener("click", ev => { if (!ctl.contains(ev.target)) menu.classList.remove("cv-open"); });
+    document.addEventListener("click", ev => { if (!ctl.contains(ev.target)) { menu.classList.remove("cv-open"); goto.classList.remove("cv-open"); } });
+    mTransit.addEventListener("click", () => { view.setLayers({ transit: !layers.transit }); syncMenu(); });
+    mGoto.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.remove("cv-open"); openGoto(true); });
+    goto.addEventListener("click", ev => {
+      const b = ev.target.closest("[data-go]");
+      if (!b) return;
+      ev.stopPropagation();
+      const [kind, id] = b.dataset.go.split(":");
+      if (kind === "millbrook") goMillbrook();
+      else view.focus(kind === "district" ? { district: id } : { station: id });
+      goto.classList.remove("cv-open");
+    });
+    const isRegion = () => !!(town && town.rail && Array.isArray(town.rail.lines) && town.rail.lines.length);
+    function goMillbrook() {
+      if (!cam || !town) return;
+      const r = Array.isArray(town.millbrook) ? town.millbrook : [0, 0, Math.min(80, town.w || 80), Math.min(50, town.h || 50)];
+      const w = scene.proj.toWorld(r[0] + r[2] / 2, r[1] + r[3] / 2);
+      if (cam.follow) { cam.follow = null; syncChip(); }
+      cam.flyTo(w[0], w[1], 0.5, 700);
+    }
+    // people in a district now: those the crowd shows in its rects, and occ of its places
+    function peopleIn(d) {
+      const rects = (town.districts.find(q => q.id === d.id) || {}).rects || [];
+      const inR = (x, y) => rects.some(r => x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]);
+      let n = 0;
+      if (crowd && crowd.each) crowd.each((x, y) => { if (inR(x, y)) n++; });
+      const occ = scene && Array.isArray(scene.occ) ? scene.occ : null;
+      if (occ) (town.places || []).forEach((p, k) => { if (p.district === d.id || (!p.district && inR(p.x, p.y))) n += occ[k] | 0; });
+      return n;
+    }
+    function openGoto(on) {
+      if (!on || !isRegion()) { goto.classList.remove("cv-open"); return; }
+      const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+      const item = (go, text, sub) => `<button type="button" class="cv-menu-item" role="menuitem" data-go="${esc(go)}">${esc(text)}${sub ? ` <span style="opacity:0.6;font-weight:400">${esc(sub)}</span>` : ""}</button>`;
+      const head = text => `<div style="padding:6px 10px 2px;font-size:11px;opacity:0.6;text-transform:uppercase;letter-spacing:0.05em">${esc(text)}</div>`;
+      const seen = new Set();
+      goto.innerHTML = item("millbrook:", "Millbrook", "M") + head("Districts")
+        + districtList().map(d => item(`district:${d.id}`, d.name, `${peopleIn(d)} now`)).join("") + head("Stations")
+        + stationList().filter(s => !seen.has(s.id) && seen.add(s.id)).map(s => item(`station:${s.id}`, s.name, s.line)).join("");
+      goto.classList.add("cv-open");
+      goto.classList.remove("cv-side");
+      const f = freeArea();
+      if (goto.getBoundingClientRect().bottom > f.y1 + (canvas.getBoundingClientRect().top || 0) - 4) goto.classList.add("cv-side");
+    }
+    // M Millbrook, G Go to, T Transit (region towns; keys typed into a field or already handled are left alone)
+    const typing = () => { const a = document.activeElement; return a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable); };
+    const onKey = ev => {
+      if (ev.defaultPrevented || typing() || ev.metaKey || ev.ctrlKey || ev.altKey || !isRegion()) return;
+      const k = ev.key.toLowerCase();
+      if (k === "m") { goMillbrook(); ev.preventDefault(); }
+      else if (k === "g") { openGoto(!goto.classList.contains("cv-open")); ev.preventDefault(); }
+      else if (k === "t") { view.setLayers({ transit: !layers.transit }); syncMenu(); ev.preventDefault(); }
+      else if (k === "escape") goto.classList.remove("cv-open");
+    };
+    window.addEventListener("keydown", onKey);
     mIso.addEventListener("click", () => { view.setMode({ projection: "iso" }); menu.classList.remove("cv-open"); });
     mFlat.addEventListener("click", () => { view.setMode({ projection: "flat" }); menu.classList.remove("cv-open"); });
     mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); });
@@ -79,8 +160,11 @@
       mIso.classList.toggle("cv-on", proj === "iso"); mFlat.classList.toggle("cv-on", proj === "flat");
       mMini.classList.toggle("cv-on", !!(mini && mini.isOpen()));
       mHomes.disabled = !mini; mHomes.classList.toggle("cv-on", !!(mini && mini.homesOn()));
+      const reg = isRegion();
+      mTransit.hidden = mGoto.hidden = !reg;
+      mTransit.classList.toggle("cv-on", !!layers.transit);
     }
-    function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : id; }
+    function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : isFolk(id) ? "townsperson" : id; }
     function syncChip() {
       const on = !!(cam && selected);
       if (chip.classList.contains("cv-show") !== on) reservedAt = 0;
@@ -221,6 +305,11 @@
     function targetOf(t) {
       if (!scene || !t) return null;
       const proj = scene.proj;
+      if (t.agent != null && isFolk(t.agent) && !movers.agent(t.agent)) {
+        const q = crowd ? crowd.pos(t.agent) : null, tr = tracked.get(t.agent);
+        if (!q && tr) return { w: proj.toWorld(tr.x + 0.5, tr.y + 0.5), zoom: 2, tile: [tr.x + 0.5, tr.y + 0.5] };
+        return q ? { w: proj.toWorld(q[0], q[1]), zoom: 2, tile: q } : null;
+      }
       if (t.agent != null) {
         const r = movers.byId(t.agent);
         if (r && r.foot) {
@@ -240,18 +329,36 @@
       }
       if (t.tile) { const [x, y] = t.tile; return { w: proj.toWorld(x + 0.5, y + 0.5), zoom: 2, tile: [x + 0.5, y + 0.5] }; }
       if (t.district != null) {
-        const d = (town.districts || []).find(q => q.id === t.district);
-        if (!d || !d.rects || !d.rects.length) return null;
+        const d = districtList().find(q => q.id === t.district);
+        if (!d) return null;
+        const big = (town.w || 0) > 120; // a region district is a whole quarter: a wider view of it
+        return { w: proj.toWorld(d.center[0], d.center[1]), zoom: big ? 0.5 : 1, tile: d.center.slice() };
+      }
+      if (t.station != null) {
+        const s = stationList().find(q => q.id === t.station);
+        return s ? { w: proj.toWorld(s.x, s.y), zoom: 1, tile: [s.x, s.y] } : null;
+      }
+      if (t.line != null) {
+        const l = ((town.rail && town.rail.lines) || []).find(q => q.id === t.line);
+        if (!l) return null;
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-        for (const r of d.rects) { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); }
-        return { w: proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2), zoom: 1, tile: [(x0 + x1) / 2, (y0 + y1) / 2] };
+        for (const c of Object.values(l.tracks || {}).flat()) { x0 = Math.min(x0, c[0]); y0 = Math.min(y0, c[1]); x1 = Math.max(x1, c[0] + 1); y1 = Math.max(y1, c[1] + 1); }
+        if (!isFinite(x0)) return null;
+        // the zoom that fits the line's box in the canvas
+        const cs = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => proj.toWorld(x, y));
+        const ww = Math.max(...cs.map(c => c[0])) - Math.min(...cs.map(c => c[0])), wh = Math.max(...cs.map(c => c[1])) - Math.min(...cs.map(c => c[1]));
+        const cw = canvas.clientWidth || 800, ch = (canvas.clientHeight || 600) - inset.top - inset.bottom;
+        const fz = Math.max(0.0625, Math.min(1, 0.85 * Math.min(cw / Math.max(1, ww), Math.max(100, ch) / Math.max(1, wh))));
+        return { w: proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2), zoom: fz, exact: true, tile: [(x0 + x1) / 2, (y0 + y1) / 2] };
       }
       return null;
     }
     function followPos() {
       if (!cam || !cam.follow) return null;
+      const tr = tracked.get(cam.follow), trW = tr ? scene.proj.toWorld(tr.x + 0.5, tr.y + 0.5) : null;
+      if (crowd && isFolk(cam.follow) && !movers.agent(cam.follow)) { const t = crowd.pos(cam.follow); return t ? scene.proj.toWorld(t[0], t[1]) : trW; }
       const r = movers.byId(cam.follow);
-      return r && r.foot ? r.foot : null;
+      return r && r.foot ? r.foot : trW;
     }
     function emitCamera(force) {
       if (!hooks.onCamera) return;
@@ -268,7 +375,7 @@
       if (!force && now - lastSave < 600) { saveLate = true; return; }
       saveLate = false; lastSave = now;
       const t = scene.proj.toTile(cam.x, cam.y);
-      savePrefs({ projection: scene.proj.kind, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined, homes: mini ? mini.homesPref() : undefined });
+      savePrefs({ projection: scene.proj.kind, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined, homes: mini ? mini.homesPref() : undefined, layers: prefs.layers });
     }
     // Picking (PLAN decision 80): the first upright candidate is the frontmost thing drawn under the point;
     // with none, the ground answers (a stop, a park or a home's lot, else the tile).
@@ -308,8 +415,16 @@
     // Highlights and overlays may name home ids; the scene draws by place id.
     function applyHighlight() {
       if (!scene) return;
-      const h = highlightRaw;
-      scene.highlight = h ? { agents: (h.agents || []).slice(), places: [...new Set((h.places || []).map(placeIdOf).filter(Boolean))] } : null;
+      const h = highlightRaw, inside = trackedPlace();
+      scene.highlight = h || inside ? { agents: ((h && h.agents) || []).slice(), places: [...new Set(((h && h.places) || []).map(placeIdOf).concat(inside ? [inside] : []).filter(Boolean))] } : null;
+    }
+    // the place the selected (followed) person is inside, when the host tracks them there
+    function trackedPlace() {
+      const tr = selected != null ? tracked.get(selected) : null;
+      if (!tr || !tr.inside || !town) return null;
+      if (crowd && isFolk(selected) && crowd.pos(selected)) return null;
+      const p = (town.places || []).find(q => tr.x >= q.x && tr.x < q.x + q.w && tr.y >= q.y && tr.y < q.y + q.h);
+      return p ? p.id : null;
     }
     function applyOverlay() {
       if (!scene) return;
@@ -323,11 +438,50 @@
       scene.overlay = { name: o.name, colors };
     }
 
+    const isFolk = id => typeof id === "string" && /^f\d+$/.test(id);
+    // districts with their centre: the centre of the largest rect (view.md 4.1), or R's when it has one
+    function districtList() {
+      if (!town) return [];
+      const R = scene && scene.R;
+      if (R && Array.isArray(R.districts) && R.districts.length) return R.districts.map(d => ({ id: d.id, name: d.name, center: d.center || [0, 0] }));
+      return (town.districts || []).filter(d => d.rects && d.rects.length).map(d => {
+        const r = d.rects.reduce((a, b) => (b[2] * b[3] > a[2] * a[3] ? b : a));
+        return { id: d.id, name: d.name, center: [r[0] + r[2] / 2, r[1] + r[3] / 2] };
+      });
+    }
+    // stations: each line's stops (the station building's middle, else its platforms')
+    function stationList() {
+      if (!town) return [];
+      const out = [];
+      for (const l of (town.rail && town.rail.lines) || []) for (const st of l.stations || []) {
+        const p = (town.places || []).find(q => q.id === st.id);
+        let x, y;
+        if (p) { x = p.x + p.w / 2; y = p.y + p.h / 2; }
+        else if (st.platforms && st.platforms.length) { const q = st.platforms[0]; x = q[0] + q[2] / 2; y = q[1] + q[3] / 2; }
+        else continue;
+        out.push({ id: st.id, name: st.name || (p && p.name) || st.id, line: l.id, x, y });
+      }
+      return out;
+    }
+    function lodOf() {
+      if (!scene) return "near";
+      const l = typeof scene.lod === "function" ? scene.lod() : scene.lod;
+      if (l) return l;
+      const z = cam ? cam.zoom : 1;
+      return z >= 0.5 ? "near" : z >= 0.18 ? "mid" : "far";
+    }
+    // the layers the scene reads (labels, runs, transit) and the pings, which the facade draws
+    function applyLayers() {
+      if (!scene) return;
+      scene.layers = Object.assign({}, scene.layers || {}, layers);
+      if (typeof scene.setLayers === "function") scene.setLayers(Object.assign({}, layers));
+    }
     function build(t) {
       if (cam) cam.destroy();
       if (mini) mini.destroy();
       mini = null;
       town = CV.normalizeTown(t);
+      transitStations = null;
       scene = CV.makeScene(canvas, town, { projection: prefs.projection === "flat" ? "flat" : "iso", rot: prefs.rot | 0 });
       scene.dpr = canvas.width / (canvas.clientWidth || canvas.width);
       scene.chunkBudget = chunkBudget();
@@ -335,6 +489,11 @@
       if (opt.eager) scene.prewarm();
       if (opt.quality) scene.quality = opt.quality;
       movers = CV.makeMovers(scene);
+      crowd = CV.makeCrowd ? CV.makeCrowd(scene, movers) : null;
+      trains = CV.makeTrains ? CV.makeTrains(scene, movers) : null;
+      pings = CV.makePings ? CV.makePings(scene, movers, crowd) : null;
+      scene.crowd = crowd; scene.trains = trains;
+      applyLayers();
       seedHousing = true;
       cam = CV.makeCamera(canvas, scene, {
         click: onClick,
@@ -374,12 +533,23 @@
       const dt = lastT ? Math.max(0, Math.min(0.1, (now - lastT) / 1000)) : 0;
       if (lastT && dynamic && now > lastT) adapt(now - lastT, now);
       lastT = now;
+      if (crowd && crowd.setNow) crowd.setNow(now);
+      if (trains && trains.setNow) trains.setNow(now);
       movers.update(now);
       cam.update(dt, followPos());
       if (!cam.follow && chip.classList.contains("cv-show") && !chip.classList.contains("cv-paused")) syncChip();
       scene.selected = selected;
       if (now - reservedAt > 250) refreshReserved();
       scene.draw(now);
+      if (trains && layers.transit && trains.drawTransit) {
+        if (!transitStations) transitStations = stationList();
+        trains.drawTransit(canvas.getContext("2d"), transitStations);
+      }
+      if (pings && layers.pings !== false) {
+        const t1 = performance.now();
+        pings.draw(canvas.getContext("2d"), now);
+        if (scene.stats) scene.stats.pingMs = performance.now() - t1;
+      }
       if (mini) mini.draw(now);
       if (camDirty) { camDirty = false; persist(false); emitCamera(false); }
       else { if (saveLate) persist(false); if (camLate) emitCamera(false); } // the last move is never dropped
@@ -415,7 +585,7 @@
     // --- the facade -----------------------------------------------------------------------------------
     const view = {
       setTown(t) { build(t); if (!running) frame(performance.now()); },
-      setState(st, speed) {
+      setState(st, speed, events) {
         if (!st) return;
         if (st.lots) lastLots = st.lots;
         if (st.homes) lastHomes = st.homes;
@@ -430,7 +600,13 @@
         if (st.season) scene.setSeason(st.season);
         scene.weather = st.weather || "clear";
         if (st.lights) scene.setLights(st.lights);
-        const changed = movers.setState(st, speed, performance.now());
+        const t = performance.now();
+        const changed = movers.setState(st, speed, t);
+        if (crowd) crowd.setState(st, t);
+        if (trains) trains.setState(st, t);
+        if (Array.isArray(st.occ)) scene.occ = st.occ; // absent: unchanged
+        if (st.folk_n != null) scene.folkN = st.folk_n;
+        if (pings) { if (st.talks) pings.talks(st.talks, t); if (events) pings.events(events, t); }
         if (changed && mini) mini.rebuild();
         if (selected && !movers.agent(selected)) { /* the selected agent left the state; keep the id */ }
       },
@@ -438,13 +614,14 @@
         selected = id == null ? null : id;
         if (scene) scene.selected = selected;
         if (cam) cam.follow = selected && (!o || o.follow !== false) ? selected : null;
+        applyHighlight();
         syncChip(); emitCamera(true);
       },
       focus(target, o) {
         o = o || {};
         const t = targetOf(target);
         if (!t || !cam) return false;
-        const z = o.zoom || Math.max(cam.zoom, t.zoom);
+        const z = o.zoom || (t.exact ? t.zoom : Math.max(cam.zoom, t.zoom));
         let [wx, wy] = t.w;
         if (o.inset) {
           const a = o.inset, b = inset;
@@ -502,6 +679,10 @@
       // CSS px (canvas-relative) of a target: a person's sprite middle, a place's label point, a tile's centre
       screenOf(t) {
         if (!scene || !t) return null;
+        if (t.agent != null && crowd && isFolk(t.agent) && !movers.agent(t.agent)) {
+          const q = crowd.pos(t.agent), w = q && scene.proj.toWorld(q[0], q[1]);
+          return w ? scene.worldToCss(w[0], w[1] - 13) : null;
+        }
         if (t.agent != null) {
           const r = movers.byId(t.agent);
           if (r && r.item) { const it = r.item, h = it.hit || [0, 0, it.sw, it.sh]; return scene.worldToCss(it.wx + (h[0] + h[2]) / 2, it.wy + (h[1] + h[3]) / 2); }
@@ -517,6 +698,39 @@
       frame(now) { frame(now == null ? performance.now() : now); return scene ? scene.stats.draw : 0; },
       scene() { return scene; },
       cam() { return cam; },
+      events(list) { if (pings && Array.isArray(list)) pings.events(list, performance.now()); },
+      districts() { return districtList().map(d => ({ id: d.id, name: d.name, center: d.center.slice() })); },
+      stations() { return stationList().map(s => Object.assign({}, s)); },
+      lod() { return lodOf(); },
+      setLayers(l) {
+        for (const k of ["transit", "labels", "pings", "runs"]) if (l && l[k] != null) layers[k] = !!l[k];
+        prefs.layers = Object.assign({}, layers);
+        applyLayers();
+        if (opt.persist !== false) savePrefs(Object.assign(loadPrefs(), { layers: prefs.layers }));
+      },
+      layers() { return Object.assign({}, layers); },
+      // where someone the map does not show is (a townsperson indoors): follow and focus go there, and while they
+      // are selected and inside, their building is outlined. null forgets them.
+      track(id, p) {
+        if (id == null) return;
+        if (p && p.x != null && p.y != null) tracked.set(String(id), { x: +p.x, y: +p.y, inside: !!p.inside });
+        else tracked.delete(String(id));
+        applyHighlight();
+      },
+      goTo(on) { openGoto(on !== false); return goto.classList.contains("cv-open"); },
+      millbrook() { goMillbrook(); },
+      debug() {
+        const d = scene && typeof scene.debug === "function" ? scene.debug() : {};
+        const s = (scene && scene.stats) || {};
+        const c = crowd ? crowd.stats() : { crowd: 0, crowdDrawn: 0 }, tr = trains ? trains.stats() : { trainCars: 0 }, pg = pings ? pings.stats() : { pings: 0 };
+        return Object.assign({ lod: lodOf(), level: null, chunks: s.chunks || 0, cacheMP: s.cacheMP || 0, spriteMP: 0, items: s.items || 0, runs: 0, splitRuns: 0,
+          statics_builds: 0, drawMs: s.draw || 0, buildMs: 0, queue: 0 }, d, { lod: d.lod || lodOf(), crowd: c.crowd, crowdDrawn: c.crowdDrawn, crowdInView: c.crowdInView, crowdSprites: c.crowdSprites,
+          trainCars: tr.trainCars, trains: tr.trains, pings: pg.pings, minimapMs: mini && mini.stats ? +mini.stats().buildMs.toFixed(2) : null });
+      },
+      minimap() { return mini; },
+      crowd() { return crowd; },
+      trains() { return trains; },
+      pings() { return pings; },
       setCamera(c) {
         if (!cam) return;
         if (c.zoom) cam.zoom = c.zoom;
@@ -527,7 +741,7 @@
       },
       worldOfTile(x, y, z) { return scene ? scene.proj.toWorld(x, y, z) : null; },
       cssOfTile(x, y, z) { if (!scene) return null; const w = scene.proj.toWorld(x, y, z); return scene.worldToCss(w[0], w[1]); },
-      destroy() { view.stop(); if (ro) ro.disconnect(); if (cam) cam.destroy(); if (mini) mini.destroy(); ctl.remove(); chip.remove(); },
+      destroy() { view.stop(); window.removeEventListener("keydown", onKey); if (ro) ro.disconnect(); if (cam) cam.destroy(); if (mini) mini.destroy(); ctl.remove(); chip.remove(); },
     };
     return view;
   };
