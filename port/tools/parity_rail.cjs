@@ -29,7 +29,7 @@ function pairs(town, n) {
   return out;
 }
 
-const AT = [0, 0.5, 1, 2.25, 3.7, 7, 12.5, 20, 33.3, 61, 999];
+const AT = [-3, -0.5, 0, 0.5, 1, 2.25, 3.7, 7, 12.5, 20, 33.3, 61, 999];
 const legJson = leg => {
   const d = leg[3];
   return [leg[0], leg[1], leg[2], d instanceof G.roads.Route ? { mode: d.mode, pts: d.pts, minutes: d.minutes } : d];
@@ -52,6 +52,21 @@ function main() {
       return [a, b, mode, net.minutes(a, b, mode), net.minutes(b, a, mode), r.pts, r.t8, r.tiles, r.minutes,
         AT.map(m => r.at(m))];
     });
+  } else if (cmd === "still") {
+    // One-point routes (an end to itself), as a trip's 0-minute walk from a station exit makes them.
+    out = [];
+    const ends = [];
+    for (const [a] of pairs(town, Number(arg))) {
+      const [ra] = net._end(a);
+      ends.push(a, [ra % net.w, Math.floor(ra / net.w)]);
+    }
+    for (const ln of G.rail.lines(town).values()) for (const s of ln.stations) for (const e of ln.exits[s]) ends.push(e);
+    for (const e of ends) {
+      for (const mode of ["walk", "car"]) {
+        const r = net.route(e, e, mode, false);
+        out.push([e, mode, r.pts, r.t8, r.tiles, r.minutes, AT.map(m => r.at(m))]);
+      }
+    }
   } else if (cmd === "starts") {
     out = pairs(town, Number(arg)).map(([a, b]) => {
       const [ra] = net._end(a), [rb] = net._end(b);

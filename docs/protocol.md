@@ -1314,7 +1314,7 @@ Riverton Central takes 2 minutes (free; the fare is paid once).
 Sent in every state frame: one row per train, line `R` first, about 1.2 KB.
 
 ```json
-{"id": "R3", "line": "R", "track": "out", "i": 91, "x": 127, "y": 68, "dir": "e", "at_station": "central_station", "riders": 4}
+{"id": "R3", "line": "R", "track": "out", "i": 91, "x": 126, "y": 68, "dir": "e", "at_station": "central_station", "riders": 4}
 ```
 
 | Field | Meaning |

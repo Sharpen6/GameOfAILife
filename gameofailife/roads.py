@@ -62,12 +62,12 @@ class Route:
     def at(self, m: float) -> tuple[int, int, str | None]:
         """(x, y, heading) m minutes after leaving: heading "e", "w", "s" or "n", None once arrived."""
         t = m * 8
+        if t < 0:
+            t = 0
         t8 = self.t8
         if t >= t8[-1]:
             x, y = self.pts[-1]
             return x, y, None
-        if t < 0:
-            t = 0
         i = bisect_right(t8, t) - 1
         (x0, y0), (x1, y1) = self.pts[i], self.pts[i + 1]
         span = t8[i + 1] - t8[i]
