@@ -57,10 +57,90 @@
     return b;
   };
 
+  // --- the v3 sprite API (view.md 4.5) ----------------------------------------------------------------
+  // A place with a variant shares its sprite with every place of the same key: it is drawn once at the canonical
+  // origin with id = sid = style + "#" + variant, and sid replaces p.id in every hash. Millbrook's places keep
+  // variant null, their id in the key and in-place drawing, so v2's pixels do not change for them.
+  const MILLBROOK = [0, 0, 80, 50];
+  CV.MILLBROOK = MILLBROOK;
+  CV.variantOf = function (p) {
+    if (p.variant != null) return (p.variant | 0) % 8;
+    const id = String(p.id == null ? "" : p.id), pre = p.style + "#";
+    if (id.startsWith(pre) && /^\d+$/.test(id.slice(pre.length))) return (+id.slice(pre.length)) % 8; // a canonical copy
+    if (p.x + p.w <= MILLBROOK[2] && p.y + p.h <= MILLBROOK[3] && p.x >= MILLBROOK[0] && p.y >= MILLBROOK[1]) return null;
+    return hash(id) % 8;
+  };
+  CV.sidOf = p => { const v = CV.variantOf(p); return v == null ? String(p.id) : p.style + "#" + v; };
+  // The canonical copy of a keyed place (x = y = 0, entry relative, id = sid); a Millbrook place is its own.
+  CV.canonPlace = function (p) {
+    const v = CV.variantOf(p);
+    if (v == null) return p;
+    return Object.assign({}, p, { id: p.style + "#" + v, variant: v, x: 0, y: 0, entry: p.entry ? [p.entry[0] - p.x, p.entry[1] - p.y] : null });
+  };
+  // Shop and restaurant fascia boards, by variant.
+  CV.SHOP_SIGNS = ["BOOKS", "SHOES", "PHARMACY", "HARDWARE", "FLOWERS", "TOYS", "BIKES", "RECORDS"];
+  CV.FOOD_SIGNS = ["PIZZA", "SUSHI", "GRILL", "TACOS", "CURRY", "BISTRO", "BURGERS", "NOODLES"];
+  CV.signTextOf = function (p) {
+    const s = p.style;
+    if (s === "apartments" || s === "residential_tower") return String(p.name || "").split(" ")[0].toUpperCase();
+    if (s === "tower") return /brightline/i.test(p.name || "") ? "BRIGHTLINE" : "";
+    if (s === "shop" || s === "restaurant") { const v = CV.variantOf(p); return (s === "shop" ? CV.SHOP_SIGNS : CV.FOOD_SIGNS)[(v == null ? hash(String(p.id)) : v) % 8]; }
+    return "";
+  };
+  const lookSig = look => look ? [look.stage | 0, look.works ? 1 : 0, (look.units || []).map(u => (u.vacant ? "v" : "o") + (u.listing ? "l" : "")).join("")].join(":") : "-";
+  CV.lookSig = lookSig;
+  // style|w|h|floors|face|variant|lookSig|season|signText; a Millbrook place puts its id in the variant slot.
+  CV.spriteKey = function (p, look, season) {
+    const v = CV.variantOf(p);
+    return [p.style, p.w, p.h, p.floors == null ? "" : p.floors, p.face == null ? "" : p.face, v == null ? String(p.id) : v, lookSig(look), season || "", CV.signTextOf(p)].join("|");
+  };
+  // Heights in world px (z): wall top, parapet, the sprite's headroom, the roof top and the label point.
+  const V2_EXTRA = s => s === "factory" ? 96 : s === "city_hall" ? 70 : s === "tower" ? 62 : s === "apartments" ? 34 : s === "school" ? 26 : s === "diner" ? 30 : 16;
+  function heights(p) {
+    const st = STYLE[p.style] || STYLE.house;
+    const floors = Math.max(1, p.floors || CV.FLOORS[p.style] || 1);
+    const flatTop = st.roof === "flat" || st.roof === "glass" || st.roof === "saw";
+    const H = floors * st.floorPx + (p.style === "house" ? 0 : 4) + (st.fascia || 0);
+    const Hw = H + (flatTop ? 4 : 0);
+    const extra = (st.roofPx || 0) + (typeof st.extra === "function" ? st.extra(floors) : st.extra != null ? st.extra : V2_EXTRA(p.style));
+    const height = Hw + (st.roofPx || 0);
+    const labelZ = height + (st.labelDz != null ? st.labelDz : p.style === "city_hall" ? 50 : p.style === "factory" ? 20 : 10);
+    return { st, floors, flatTop, H, Hw, topZ: Hw + extra, height, labelZ };
+  }
+  CV._heights = heights;
+  // The sprite's canvas rect in world px for a place drawn in place, through one projection.
+  function boxOf(proj, p) {
+    const hh = heights(p);
+    const fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
+    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) for (const z of [0, hh.topZ]) {
+      const q = proj.toWorld(a, b, z);
+      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+    }
+    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += 4;
+    const ox = Math.floor(bx0), oy = Math.floor(by0);
+    return { ox, oy, w: Math.max(1, Math.ceil(Math.ceil(bx1) - ox)), h: Math.max(1, Math.ceil(Math.ceil(by1) - oy)), height: hh.height, labelZ: hh.labelZ };
+  }
+  CV._boxOf = boxOf;
+  let lastProj = null;
+  // Pure geometry; art.building takes its bounds from it. proj: the projection (default: the last art's, else iso).
+  CV.spriteBox = (p, look, proj) => boxOf(proj || lastProj || (lastProj = CV.makeProj("iso", 256, 192, 0)), p);
+  CV.heightOf = p => heights(p).height;
+  const ROOF_KIND = { gable: "gable", hip: "hip", flat: "flat", glass: "flat", saw: "saw" };
+  CV.paletteOf = function (p) {
+    const st = STYLE[p.style] || STYLE.house, h0 = hash(CV.sidOf(p)), isHome = p.kind === "home";
+    const wall = st.wall ? (Array.isArray(st.wall) ? st.wall[h0 % st.wall.length] : st.wall) : p.style === "big_house" ? VILLA_PAINT[h0 % VILLA_PAINT.length] : HOUSE_PAINT[h0 % HOUSE_PAINT.length];
+    const roof = st.roofC || (p.style === "big_house" ? VILLA_ROOF[(h0 >>> 4) % VILLA_ROOF.length] : HOUSE_ROOF[(h0 >>> 4) % HOUSE_ROOF.length]);
+    const trim = isHome ? ["#ffffff", "#f6efe0", "#ffffff", "#efe9dc"][(h0 >>> 8) % 4] : "#ffffff";
+    return { wall, roof, roof_kind: STYLE[p.style] ? ROOF_KIND[st.roof] || "flat" : "gable", glass: st.glass || "#8cbfe4", trim };
+  };
+
   CV._artParts.push(function (art) {
     const { P, faceFn, quad, top, boxAt, proj } = art;
     const FACES = proj.faces, LIT = FACES[0];
     const zk = proj.zk || 1;
+    lastProj = proj;
+    art.spriteBox = (p, look) => boxOf(proj, p);
 
     // --- windows, doors, signs, awnings ---------------------------------------------------------------
     // One window: frame, glass with a sky reflection, optional curtain, shutters, flower box, mullions,
@@ -567,7 +647,7 @@
     // door's where it can (PLAN decision 83): with the boarded door it reads even when the door faces away.
     const cueFace = ctx => FACES.find(f => f !== ctx.p.face) || FACES[0];
     const windowState = (ctx, i, face, n) => {
-      const st = ctx.isHome ? ctx.stage : 0, s = hash(ctx.p.id + ":" + face + ":" + i);
+      const st = ctx.isHome ? ctx.stage : 0, s = hash(ctx.sid + ":" + face + ":" + i);
       return {
         state: st,
         boarded: ctx.isHome && ((st === 4 ? s % 4 !== 3 : st === 3 && s % 5 === 0) || (st >= 3 && i === 0 && face === cueFace(ctx))),
@@ -756,11 +836,11 @@
             if (i === crackAt && !ws.boarded) ws.cracked = true;
             const z0 = fl * fh + 7, z1 = z0 + 11;
             poly(g, quad(F, uc - 0.17, uc + 0.17, z1 + 1, z1 + 3), f === LIT ? "#cfc8bb" : "#a8a296"); // lintel
-            win(ctx, F, uc - 0.14, uc + 0.14, z0, z1, Object.assign(ws, { frame: "#e8e2d6", vacant, curtain: CURTAIN[(hash(ctx.p.id + fl + side)) % CURTAIN.length], sill: "#cfc8bb", mullion: true, idx: i + fl * 5,
+            win(ctx, F, uc - 0.14, uc + 0.14, z0, z1, Object.assign(ws, { frame: "#e8e2d6", vacant, curtain: CURTAIN[(hash(ctx.sid + fl + side)) % CURTAIN.length], sill: "#cfc8bb", mullion: true, idx: i + fl * 5,
               box: stage === 0 && f === LIT && !vacant && (i + fl) % 2 === 0 })); // kept: window boxes in flower
             if (isDoor && fl >= 1 && i % 2 === 0) { // balcony under the outer window pair
               const r = F.rect(uc - 0.24, uc + 0.24, 0, 0.2);
-              const hb = hash(ctx.p.id + ":bal:" + fl + ":" + i);
+              const hb = hash(ctx.sid + ":bal:" + fl + ":" + i);
               if (stage >= 1) { // rust bleeding from the rail fixings down the wall
                 for (const [ru, k] of [[uc - 0.21, 0], [uc + 0.17, 1], [uc - 0.02, 2]]) {
                   if (k === 2 && stage < 2) continue;
@@ -1221,11 +1301,9 @@
       const st = STYLE[p.style] || STYLE.house;
       const isHome = p.kind === "home";
       const stage = isHome ? Math.max(0, Math.min(4, look.stage | 0)) : 0;
-      const h0 = hash(p.id);
-      const floors = Math.max(1, p.floors || CV.FLOORS[p.style] || 1);
-      const flatTop = st.roof === "flat" || st.roof === "glass" || st.roof === "saw";
-      const H = floors * st.floorPx + (p.style === "house" ? 0 : 4) + (st.fascia || 0);
-      const Hw = H + (flatTop ? 4 : 0);
+      const variant = CV.variantOf(p), sid = variant == null ? String(p.id) : p.style + "#" + variant;
+      const h0 = hash(sid);
+      const { floors, H, Hw } = heights(p);
       const body = CV.bodyOf(p);
       let wall = st.wall ? (Array.isArray(st.wall) ? st.wall[h0 % st.wall.length] : st.wall) : p.style === "big_house" ? VILLA_PAINT[h0 % VILLA_PAINT.length] : HOUSE_PAINT[h0 % HOUSE_PAINT.length];
       let roofC = st.roofC || (p.style === "big_house" ? VILLA_ROOF[(h0 >>> 4) % VILLA_ROOF.length] : HOUSE_ROOF[(h0 >>> 4) % HOUSE_ROOF.length]);
@@ -1235,15 +1313,9 @@
         roofC = shade(mix(roofC, "#77736a", FADE[stage] * 0.7), DIM[stage]);
         trim = shade(mix(trim, "#a8a090", FADE[stage]), DIM[stage]);
       }
-      const extra = (st.roofPx || 0) + (p.style === "factory" ? 96 : p.style === "city_hall" ? 70 : p.style === "tower" ? 62 : p.style === "apartments" ? 34 : p.style === "school" ? 26 : p.style === "diner" ? 30 : 16);
-      const topZ = Hw + extra;
-      const fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
-      const pts = [];
-      for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { pts.push(P(a, b, 0)); pts.push(P(a, b, topZ)); }
-      const bx0 = Math.min(...pts.map(q => q[0])) - 6, bx1 = Math.max(...pts.map(q => q[0])) + 6;
-      const by0 = Math.min(...pts.map(q => q[1])) - 6, by1 = Math.max(...pts.map(q => q[1])) + 4;
-      const S = art.sprite(bx0, by0, bx1, by1);
-      const ctx = { g: S.g, p, st, look, stage, isHome, h0, floors, H, Hw, wall, roofC, trim, season, body,
+      const box = boxOf(proj, p);
+      const S = art.sprite(box.ox, box.oy, box.ox + box.w, box.oy + box.h);
+      const ctx = { g: S.g, p, st, look, stage, isHome, h0, sid, variant, signText: CV.signTextOf(p), floors, H, Hw, wall, roofC, trim, season, body,
         x0: body.x0, y0: body.y0, x1: body.x1, y1: body.y1, windows: [], lights: [], porch: null, neon: null, smoke: null, beacon: null };
       switch (p.style) {
         case "house": drawHouse(ctx); break;
@@ -1265,10 +1337,9 @@
         S.g.fillStyle = "rgba(255,255,255,0.22)"; S.g.fillRect(Math.round(c0[0]) - 1, Math.round(c1[1]), 1, Math.round(c0[1] - c1[1]));
       }
       if (look.works) scaffold(ctx);
-      const roofTop = Hw + (st.roofPx || 0);
       const litShare = isHome ? 70 : p.style === "tower" ? 45 : 60;
-      return { c: S.c, ox: S.ox, oy: S.oy, windows: ctx.windows, lights: ctx.lights, height: roofTop, id: p.id, litShare,
-        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: roofTop + (p.style === "city_hall" ? 50 : p.style === "factory" ? 20 : 10) };
+      return { c: S.c, ox: S.ox, oy: S.oy, windows: ctx.windows, lights: ctx.lights, height: box.height, id: p.id, litShare,
+        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: null };
     };
 
     // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty; in
