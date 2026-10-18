@@ -1155,35 +1155,82 @@ class Folk:
     # --- stats and pages -------------------------------------------------------------------------------------
 
     def worth(self, sim, p) -> int:
-        """Cash + savings + the adult's share of a home the household owns."""
+        """Cash + savings + the adult's share of a home the household owns. sample_hour adds the same up inline,
+        once per household for the share (tests/test_folk_protocol.py's TestHourlySample checks the two agree)."""
         w = p.money + p.savings
         hh = self.hh_of(p)
         if p.age >= 18 and hh is not None:
-            homes = getattr(sim, "homes", {})
-            home = homes.get(hh.home_id)
-            if home is not None and home.owner == hh.id:
-                adults = 0
-                for mid in hh.member_ids:
-                    q = self.person(mid)
-                    if q is not None and q.alive and not q.gone and q.age >= 18:
-                        adults += 1
-                lots = getattr(sim, "lots", None)
-                if lots is not None and home.place in lots:
-                    from . import housing
-                    value = housing.value(sim, hh.home_id)
-                else:  # a home without a lot (a test world): its base value
-                    value = home.base_value
-                w += value / max(1, adults)
+            share = self._home_share(sim, hh)
+            if share is not None:
+                w += share
         return int(w // 1)
 
-    def sample_hour(self, sim) -> None:
+    def _home_share(self, sim, hh) -> float | None:
+        """Each adult's share of the home the household owns (its value over its adults), None if it owns none."""
+        homes = getattr(sim, "homes", {})
+        home = homes.get(hh.home_id)
+        if home is None or home.owner != hh.id:
+            return None
+        adults = 0
+        for mid in hh.member_ids:
+            q = self.person(mid)
+            if q is not None and q.alive and not q.gone and q.age >= 18:
+                adults += 1
+        lots = getattr(sim, "lots", None)
+        if lots is not None and home.place in lots:
+            from . import housing
+            value = housing.value(sim, hh.home_id)
+        else:  # a home without a lot (a test world): its base value
+            value = home.base_value
+        return value / max(1, adults)
+
+    def sample_hour(self, sim) -> dict:
+        """stats.sample's call on every whole hour: each living townsperson's worth goes into their 24-hour ring
+        (stats.folk.worth_24h) and, in the same pass, their share of the hourly sample comes back: `population`,
+        `working` (adults with a job, city_parts's `employed`), `mood_sum`, `health_sum` and `money_sum` (rounded
+        as city_parts rounds them), `adult_worths`, `worth_sum` and `in_debt` (adults whose cash and savings are
+        below 0). Mood and health are read with `Person.peek`: what a settle would give, settling nobody, so the
+        sample changes nothing it watches. One pass, each household's home share worked out once, keeps the hourly
+        step within perf_folk's p99."""
         self._bind()
+        rings = self.rings
+        tick = sim.clock.tick
+        households = self.households
+        nh = len(households)
+        shares: dict = {}  # household index -> each adult's share of the home it owns (None: it owns none)
+        pop = working = in_debt = money_sum = mood_sum = health_sum = worth_sum = 0
+        worths = []
         for p in self.people:
-            if p.alive and not p.gone:
-                r = self.rings.get(p.i)
-                if r is None:
-                    r = self.rings[p.i] = deque(maxlen=24)
-                r.append(self.worth(sim, p))
+            if not p.alive or p.gone:
+                continue
+            cash = p.money + p.savings
+            w = cash  # worth(sim, p), inline
+            adult = p.age >= 18
+            if adult and 0 <= p.hh < nh:
+                share = shares.get(p.hh, False)
+                if share is False:
+                    share = shares[p.hh] = self._home_share(sim, households[p.hh])
+                if share is not None:
+                    w += share
+            w = int(w // 1)
+            r = rings.get(p.i)
+            if r is None:
+                r = rings[p.i] = deque(maxlen=24)
+            r.append(w)
+            pop += 1
+            money_sum += int(cash)
+            mood, health = p.peek(tick)
+            mood_sum += int(mood + 0.5)
+            health_sum += int(health + 0.5)
+            worth_sum += w
+            if adult:
+                worths.append(w)
+                if p.job is not None:
+                    working += 1
+                if cash < 0:
+                    in_debt += 1
+        return {"population": pop, "working": working, "mood_sum": mood_sum, "health_sum": health_sum,
+                "money_sum": money_sum, "adult_worths": worths, "worth_sum": worth_sum, "in_debt": in_debt}
 
     def stats_json(self, sim) -> dict:
         self._bind()

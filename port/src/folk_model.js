@@ -129,6 +129,25 @@
       return total / NEEDS.length;
     }
 
+    // [mood, health] exactly as settle(tick) then a read would give them, settling nobody: settle runs on a copy
+    // of the raw needs and what it writes (the needs, _nt, health) is put back (see the Python twin).
+    peek(tick = null) {
+      const needs = this._needs, nt = this._nt, health = this.health;
+      this._needs = Object.assign({}, needs);
+      try {
+        this.settle(tick);
+        const { NEEDS } = G.agent;
+        const got = this._needs;
+        let total = 0.0;
+        for (const n of NEEDS) total += got[n];
+        return [total / NEEDS.length, this.health];
+      } finally {
+        this._needs = needs;
+        this._nt = nt;
+        this.health = health;
+      }
+    }
+
     remember(stamp, text) {
       this.memory.push(`${stamp}: ${text}`);
       if (this.memory.length > MEMORY_KEEP) this.memory.splice(0, this.memory.length - MEMORY_KEEP);

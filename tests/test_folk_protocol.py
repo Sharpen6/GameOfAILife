@@ -424,7 +424,7 @@ for (let i = 0; i < 200; i++) sim.step();
 for (let i = 0; i < 200; i++) sim.set_luck(`f${i}`, 95);
 for (let i = 0; i < 70; i++) sim.step();
 const st = sim.stats_json(true);
-process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts }));
+process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts, samples: sim.stats.samples }));
 """
 
 STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth", "homes")
@@ -536,6 +536,119 @@ class TestFolkCityStats(unittest.TestCase):
                 self.assertEqual(js["city"][k], self.st["city"][k], k)
         row = lambda d: (d["id"], d["people"], d["median_worth"], d["homes"], d["vacant"], d["shabby_plus"])  # noqa: E731
         self.assertEqual([row(d) for d in js["districts"]], [row(d) for d in self.st["districts"]])
+        self.assertEqual(js["samples"], self.sim.stats.samples)  # the hourly samples, townsfolk included
+
+
+# --- the hourly sample -----------------------------------------------------------------------------------------
+
+SAMPLE_KEYS = ("pop", "mood", "health", "wealth", "median", "top10", "in_debt", "working", "owned", "shabby_plus")
+
+SAMPLE_CHECK_JS = r"""
+const G = require(process.argv[1] + "/port/tools/engine.cjs").load();
+const S = G.stats;
+const sim = new G.sim.Simulation(1, null, null, 1, { world: "region", folk: Number(process.argv[2]) });
+const KEYS = JSON.parse(process.argv[4]);
+const out = { peeks: 0, peek_bad: [], rows_bad: [] };
+const sample = S.CityStats.prototype.sample;
+S.CityStats.prototype.sample = function (s) {
+  const tick = s.clock.tick;
+  const peeked = s.folk.living().map(p => [p, p.peek(tick)]);
+  sample.call(this, s);
+  const got = this.samples[this.samples.length - 1];
+  const city = S._city_block(s, S._people(s), S.folk_parts(s)); // reads every mood: settles everyone to now
+  const want = { pop: city.population, mood: city.mood, health: city.health, wealth: city.wealth.total,
+    median: city.wealth.median, top10: city.wealth.top10_share, in_debt: city.wealth.in_debt, working: city.working,
+    owned: city.homes.owned, shabby_plus: city.homes.lots_by_stage.slice(2).reduce((a, b) => a + b, 0) };
+  for (const k of KEYS) if (got[k] !== want[k]) out.rows_bad.push([tick, k, got[k], want[k]]);
+  for (const [p, [mood, health]] of peeked) {
+    out.peeks += 1;
+    if (mood !== p.mood || health !== p.health) out.peek_bad.push([tick, p.id, mood, p.mood, health, p.health]);
+  }
+};
+for (let i = 0; i < Number(process.argv[3]); i++) sim.step();
+out.samples = sim.stats.samples;
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def sample_check_python(folk: int, steps: int) -> dict:
+    """SAMPLE_CHECK_JS's run in Python (the named on the JS port's dice): at every whole hour each townsperson's
+    `peek` is taken, the sample recorded, then the full city block built, which reads every mood and so settles
+    everyone to now; the sample must equal the block's numbers and each peek the settled mood and health."""
+    from gameofailife import stats
+    from tests.test_port import MulberryDice
+
+    class RegionDiceSim(Simulation):
+        def _roll_weather(self) -> None:
+            if not isinstance(self.rng, MulberryDice):
+                self.rng = MulberryDice(1)
+            super()._roll_weather()
+
+    out = {"peeks": 0, "peek_bad": [], "rows_bad": []}
+    sample = stats.CityStats.sample
+
+    def checked(self, s):
+        tick = s.clock.tick
+        peeked = [(p, p.peek(tick)) for p in s.folk.living()]
+        sample(self, s)
+        got = self.samples[-1]
+        city = stats._city_block(s, stats._people(s), stats.folk_parts(s))  # settles everyone to now
+        want = {"pop": city["population"], "mood": city["mood"], "health": city["health"],
+                "wealth": city["wealth"]["total"], "median": city["wealth"]["median"],
+                "top10": city["wealth"]["top10_share"], "in_debt": city["wealth"]["in_debt"],
+                "working": city["working"], "owned": city["homes"]["owned"],
+                "shabby_plus": sum(city["homes"]["lots_by_stage"][2:])}
+        out["rows_bad"] += [[tick, k, got[k], want[k]] for k in SAMPLE_KEYS if got[k] != want[k]]
+        for p, (mood, health) in peeked:
+            out["peeks"] += 1
+            if (mood, health) != (p.mood, p.health):
+                out["peek_bad"].append([tick, p.id, mood, p.mood, health, p.health])
+
+    sim = RegionDiceSim(1, world="region", folk=folk)
+    stats.CityStats.sample = checked
+    try:
+        for _ in range(steps):
+            sim.step()
+    finally:
+        stats.CityStats.sample = sample
+    out["samples"] = sim.stats.samples
+    return out
+
+
+class TestHourlySample(unittest.TestCase):
+    """The hourly sample (CityStats.sample) settles nobody: it reads each townsperson with folk_model's
+    `Person.peek` (what a settle would give, written nowhere) and keeps only the city numbers it records
+    (stats._sample_city). Over one game day, at every hour, in both engines: each peek equals the mood and health a
+    settle gives, the sample equals the full city block's numbers, and the JS samples equal Python's."""
+
+    STEPS = MINUTES_PER_DAY
+
+    @classmethod
+    def setUpClass(cls):
+        cls.py = sample_check_python(FOLK, cls.STEPS)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.py = None
+        gc.collect()
+
+    def check(self, got: dict) -> None:
+        self.assertEqual(got["peek_bad"][:5], [])
+        self.assertEqual(got["rows_bad"][:5], [])
+        self.assertGreater(got["peeks"], 23 * 900)  # 24 hours of ~1,000 townsfolk
+        self.assertEqual(len(got["samples"]), 24)
+
+    def test_peek_is_what_a_settle_gives_and_the_sample_is_the_city_block(self):
+        self.check(self.py)
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_the_js_twin_peeks_and_samples_the_same(self):
+        run = subprocess.run([NODE, "-e", SAMPLE_CHECK_JS, str(ROOT), str(FOLK), str(self.STEPS),
+                              json.dumps(SAMPLE_KEYS)], capture_output=True, text=True, timeout=300)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        js = json.loads(run.stdout)
+        self.check(js)
+        self.assertEqual(js["samples"], self.py["samples"])
 
 
 # --- client/dev/fixture_folk.js ---------------------------------------------------------------------------------

@@ -1196,41 +1196,81 @@
 
     // --- stats and pages ---
 
-    // Cash + savings + the adult's share of a home the household owns.
+    // Cash + savings + the adult's share of a home the household owns. sample_hour adds the same up inline, once
+    // per household for the share (see the Python twin).
     worth(sim, p) {
       let w = p.money + p.savings;
       const hh = this.hh_of(p);
       if (p.age >= 18 && hh !== null) {
-        const home = sim.homes ? sim.homes.get(hh.home_id) : undefined;
-        if (home !== undefined && home.owner === hh.id) {
-          let adults = 0;
-          for (const mid of hh.member_ids) {
-            const q = this.person(mid);
-            if (q !== null && q.alive && !q.gone && q.age >= 18) adults += 1;
-          }
-          const lots = sim.lots;
-          let value;
-          if (lots && lots.has(home.place)) value = G.housing.value(sim, hh.home_id);
-          else value = home.base_value; // a home without a lot (a test world): its base value
-          w += value / Math.max(1, adults);
-        }
+        const share = this._home_share(sim, hh);
+        if (share !== null) w += share;
       }
       return Math.floor(w);
     }
 
+    // Each adult's share of the home the household owns (its value over its adults), null if it owns none.
+    _home_share(sim, hh) {
+      const home = sim.homes ? sim.homes.get(hh.home_id) : undefined;
+      if (home === undefined || home.owner !== hh.id) return null;
+      let adults = 0;
+      for (const mid of hh.member_ids) {
+        const q = this.person(mid);
+        if (q !== null && q.alive && !q.gone && q.age >= 18) adults += 1;
+      }
+      const lots = sim.lots;
+      let value;
+      if (lots && lots.has(home.place)) value = G.housing.value(sim, hh.home_id);
+      else value = home.base_value; // a home without a lot (a test world): its base value
+      return value / Math.max(1, adults);
+    }
+
+    // stats.sample's call on every whole hour: each living townsperson's worth goes into their 24-hour ring
+    // (stats.folk.worth_24h) and, in the same pass, their share of the hourly sample comes back (see the Python
+    // twin): population, working, mood_sum, health_sum, money_sum (rounded as city_parts rounds them),
+    // adult_worths, worth_sum and in_debt. Mood and health are read with Person.peek, settling nobody.
     sample_hour(sim) {
       this._bind();
+      const rings = this.rings;
+      const tick = sim.clock.tick;
+      const households = this.households;
+      const nh = households.length;
+      const shares = new Map(); // household index -> each adult's share of the home it owns (null: it owns none)
+      let pop = 0, working = 0, in_debt = 0, money_sum = 0, mood_sum = 0, health_sum = 0, worth_sum = 0;
+      const worths = [];
       for (const p of this.people) {
-        if (p.alive && !p.gone) {
-          let r = this.rings.get(p.i);
-          if (r === undefined) {
-            r = [];
-            this.rings.set(p.i, r);
+        if (!p.alive || p.gone) continue;
+        const cash = p.money + p.savings;
+        let w = cash; // worth(sim, p), inline
+        const adult = p.age >= 18;
+        if (adult && 0 <= p.hh && p.hh < nh) {
+          let share = shares.get(p.hh);
+          if (share === undefined) {
+            share = this._home_share(sim, households[p.hh]);
+            shares.set(p.hh, share);
           }
-          r.push(this.worth(sim, p));
-          if (r.length > 24) r.shift();
+          if (share !== null) w += share;
+        }
+        w = Math.floor(w);
+        let r = rings.get(p.i);
+        if (r === undefined) {
+          r = [];
+          rings.set(p.i, r);
+        }
+        r.push(w);
+        if (r.length > 24) r.shift();
+        pop += 1;
+        money_sum += Math.trunc(cash);
+        const [mood, health] = p.peek(tick);
+        mood_sum += Math.floor(mood + 0.5);
+        health_sum += Math.floor(health + 0.5);
+        worth_sum += w;
+        if (adult) {
+          worths.push(w);
+          if (p.job !== null) working += 1;
+          if (cash < 0) in_debt += 1;
         }
       }
+      return { population: pop, working, mood_sum, health_sum, money_sum, adult_worths: worths, worth_sum, in_debt };
     }
 
     stats_json(sim) {

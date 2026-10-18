@@ -397,7 +397,7 @@ class NoFolk:
         return {}
 
     def sample_hour(self, sim) -> None:
-        pass
+        return None  # no townsfolk: no share of the hourly sample
 
     def roster_rows(self, sim) -> list:
         return []
