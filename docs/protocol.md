@@ -1,15 +1,24 @@
 # GameOfAILife WebSocket protocol
 
 This is the complete reference for the one WebSocket endpoint the game server
-exposes, for this build: the 80 x 50 tile Millbrook with 7 districts, 37 homes,
-about 60 people and 8 buses, God's dashboard (the wealth ranking, News and the
-LLM decisions log) and the housing market. Everything here is taken from
-`gameofailife/server.py`, `gameofailife/ws.py`, `gameofailife/sim.py`,
-`gameofailife/forks.py`, `gameofailife/housing.py`, `gameofailife/stats.py`,
-`gameofailife/chronicle.py` and `gameofailife/transit.py`. If this document and
-the code disagree, the code is right and this document has a bug.
-`tests/test_integration.py` records a session from a running server and checks
-that every field name it sees is written down here.
+exposes, for this build (v3). The server starts the `region` world by default:
+Millbrook (v2's 80 x 50 tile town, its 7 districts, 37 homes, about 60 named
+characters and 8 buses) in the north-west corner of a 256 x 192 tile region of
+17 districts, two railway lines and about 1,000 townsfolk who live default
+lives. `--world millbrook` (or `--folk 0` for a region with nobody else in it)
+runs v2's town alone, with the same messages: the region's fields are empty
+there, as each section says. Both worlds have God's dashboard (the wealth
+ranking, News and the LLM decisions log), the housing market, and v3's social
+life, illness, births, deaths, careers and weekly money for everyone.
+Everything here is taken from `gameofailife/server.py`, `gameofailife/ws.py`,
+`gameofailife/sim.py`, `gameofailife/forks.py`, `gameofailife/housing.py`,
+`gameofailife/stats.py`, `gameofailife/chronicle.py`,
+`gameofailife/transit.py`, `gameofailife/region.py`, `gameofailife/rail.py`,
+`gameofailife/folk.py`, `gameofailife/people.py`, `gameofailife/social.py`,
+`gameofailife/life.py`, `gameofailife/career.py` and `gameofailife/money.py`.
+If this document and the code disagree, the code is right and this document
+has a bug. `tests/test_integration.py` records a session from a running server
+and checks that every field name it sees is written down here.
 
 - [Connecting](#connecting)
 - [Message basics](#message-basics)
@@ -22,6 +31,11 @@ that every field name it sees is written down here.
 - [Answer windows: 5 seconds and 10 seconds](#answer-windows-5-seconds-and-10-seconds)
 - [One God per city](#one-god-per-city)
 - [Shared shapes](#shared-shapes)
+- [Region map](#region-map)
+- [Trains](#trains)
+- [Townsfolk](#townsfolk)
+- [Life](#life): [Social](#social), [Life, work and money](#life-work-and-money)
+- [View data](#view-data)
 - [Hidden information](#hidden-information)
 - [Worked example](#worked-example)
 
@@ -1479,7 +1493,9 @@ household's id. Each townsperson has a unique name across all 1,060, `age`, `sex
 two decimals), `owns_car`, a `job` (title, place, hourly wage, start and end hour, workdays; pupils are
 `"student"` at a school with wage 0) and a `commute` `[place_id, minutes, "walk" | "car" | "train"]`. Folk money:
 take-home pay at the end of each shift, the $400 pension on Friday 09:00 to 65+ without a paid job, and on Sunday
-23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Three
+23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Groceries
+cost $35 at a grocer in reach, or $8 more delivered to a household with none in reach; someone off sick eats at
+home at 12:30 and 18:30 and orders in when the fridge is empty. Three
 Sundays in the red move a household to a cheaper rental or out of town (`left_town`, its `agents` the folk ids).
 Folk homes have their own damp, chills and emergencies; they are routine, so the residents remember them (a
 line in each one's memory) and no event is sent. With `folk_isolated`, no townsperson has a tie to the 60, a
