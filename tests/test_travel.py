@@ -5,7 +5,6 @@ fork builder, and the tick budget."""
 from __future__ import annotations
 
 import collections
-import gc
 import time
 import unittest
 from unittest import mock
@@ -71,25 +70,16 @@ class Run:
             return fork
 
         self.cpu = 0.0
-        # In the full suite the heap holds the objects of every earlier test (about 450,000), and each full
-        # collection inside a timed tick walks them all: the mean tick measured 0.33-0.34 ms alone and 0.37-0.43 ms
-        # late in the suite. Collect now and freeze what is left, as test_region_named's identity test does, so the
-        # timed ticks' collections walk only what this city allocates; the budget is on the engine's own work.
-        gc.collect()
-        gc.freeze()
-        try:
-            with mock.patch.object(Simulation, "_begin_activity", on_begin), \
-                    mock.patch.object(Simulation, "_decide", on_decide), \
-                    mock.patch.object(sim_module, "build_fork", on_build):
-                for t in range(days * MINUTES_PER_DAY):
-                    t0 = time.process_time()
-                    sim.step()
-                    sim.drain()
-                    self.cpu += time.process_time() - t0
-                    if t < probe_days * MINUTES_PER_DAY and t % PROBE_EVERY == 0:
-                        self.probe()
-        finally:
-            gc.unfreeze()
+        with mock.patch.object(Simulation, "_begin_activity", on_begin), \
+                mock.patch.object(Simulation, "_decide", on_decide), \
+                mock.patch.object(sim_module, "build_fork", on_build):
+            for t in range(days * MINUTES_PER_DAY):
+                t0 = time.process_time()
+                sim.step()
+                sim.drain()
+                self.cpu += time.process_time() - t0
+                if t < probe_days * MINUTES_PER_DAY and t % PROBE_EVERY == 0:
+                    self.probe()
         self.ticks = days * MINUTES_PER_DAY
 
     def record(self, fork: forks.Fork) -> None:
