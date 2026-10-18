@@ -486,6 +486,17 @@ def _headline(sim):
     return None
 
 
+def _told(p, headline) -> bool:
+    """p has talked about this headline already (in their last RING talks)."""
+    life = p.life
+    if life is None:
+        return False
+    for t in life.talks:
+        if t["topic"] == "news" and headline in t["text"]:
+            return True
+    return False
+
+
 def _kid_of(sim, p):
     for m in people.members(sim, p):
         if m is not p and m.age < 18:
@@ -512,6 +523,9 @@ def talk_ctx(sim, a, b, ra, cls, place_id) -> dict:
         if p.life is not None and p.life.conditions:
             illness = p.life.conditions[0].id.replace("_", " ")
             break
+    headline = _headline(sim)
+    if headline is not None and (_told(a, headline) or _told(b, headline)):
+        headline = None  # old news to one of them
     place = sim.town.places.get(place_id)
     job = a.job if a.job is not None else b.job
     work = sim.town.places.get(job.place_id) if job is not None else None
@@ -526,7 +540,7 @@ def talk_ctx(sim, a, b, ra, cls, place_id) -> dict:
         "baby": kid is not None and kid.age == 0,
         "health": ill,
         "love": ra.kind is DATING or ra.romance >= 20,
-        "headline": _headline(sim),
+        "headline": headline,
         "place": place.name if place is not None else None,
         "work": work.name if work is not None else None,
         "kid": _first(kid.name) if kid is not None else None,

@@ -454,6 +454,14 @@
     return null;
   }
 
+  // p has talked about this headline already (in their last RING talks).
+  function _told(p, headline) {
+    const life = p.life;
+    if (nil(life)) return false;
+    for (const t of life.talks) if (t.topic === "news" && t.text.includes(headline)) return true;
+    return false;
+  }
+
   function _kid_of(sim, p) {
     for (const m of P().members(sim, p)) {
       if (m !== p && m.age < 18) {
@@ -480,6 +488,8 @@
     for (const p of [a, b]) {
       if (!nil(p.life) && p.life.conditions.length) { illness = p.life.conditions[0].id.replace(/_/g, " "); break; }
     }
+    let headline = _headline(sim);
+    if (headline !== null && (_told(a, headline) || _told(b, headline))) headline = null; // old news to one of them
     const place = sim.town.places.get(place_id);
     const job = !nil(a.job) ? a.job : b.job;
     const work = !nil(job) ? sim.town.places.get(job.place_id) : undefined;
@@ -493,7 +503,7 @@
       baby: kid !== null && kid.age === 0,
       health: ill,
       love: ra.kind === DATING || ra.romance >= 20,
-      headline: _headline(sim),
+      headline,
       place: !nil(place) ? place.name : null,
       work: !nil(work) ? work.name : null,
       kid: kid !== null ? _first(kid.name) : null,
