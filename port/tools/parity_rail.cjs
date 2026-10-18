@@ -30,7 +30,10 @@ function pairs(town, n) {
 }
 
 const AT = [0, 0.5, 1, 2.25, 3.7, 7, 12.5, 20, 33.3, 61, 999];
-const legJson = leg => [leg[0], leg[1], leg[2], leg[3] instanceof G.roads.Route ? { mode: leg[3].mode, pts: leg[3].pts, minutes: leg[3].minutes } : leg[3]];
+const legJson = leg => {
+  const d = leg[3];
+  return [leg[0], leg[1], leg[2], d instanceof G.roads.Route ? { mode: d.mode, pts: d.pts, minutes: d.minutes } : d];
+};
 
 function main() {
   const [cmd, arg] = process.argv.slice(2);

@@ -233,8 +233,11 @@
       }
       this.rank = new Map(this.order.map((s, n) => [s, n]));
       this.exits = new Map();
-      for (const ln of this.lines.values()) for (const s of ln.stations) if (!this.exits.has(s)) this.exits.set(s, ln.exits[s]);
-      this.serving = new Map(this.order.map(s => [s, Array.from(this.lines.values()).filter(ln => ln.stations.includes(s))]));
+      for (const ln of this.lines.values()) {
+        for (const s of ln.stations) if (!this.exits.has(s)) this.exits.set(s, ln.exits[s]);
+      }
+      const all = Array.from(this.lines.values());
+      this.serving = new Map(this.order.map(s => [s, all.filter(ln => ln.stations.includes(s))]));
       this.hubs = this.order.filter(s => this.serving.get(s).length > 1); // where riders change lines
       this.plans = new Map(); // "s|t" -> _plans(this, s, t)
       this.pair_worst = new Map(); // "s|t" -> the least worst wait + ride over the plans, or null
