@@ -11,6 +11,8 @@
 // behind another), and walkers bound for one spot of pavement on the same tick are spread apart along it;
 // idle people on one tile stand in a small ring.
 // Also the housing look adapter (state.lots / state.homes -> per-place looks) and occupancy counts.
+// Exports CV.easeL(x0, y0, x1, y1, t, xFirst) (the L ease crowd.js shares), CV.lClear and CV.regionOf (the
+// region's tile predicates); M.tickMs is the measured real time between ticks.
 // Classic script on window.CityView.
 "use strict";
 (function () {
@@ -84,6 +86,17 @@
     }
     return via;
   }
+  // The point at share t (0..1) of an L-shaped move from tile (x0, y0) to (x1, y1), the x leg first or the y
+  // leg first, with its step direction: the ease the named, the buses and the townsfolk share.
+  function easeL(x0, y0, x1, y1, t, xFirst) {
+    const dx = x1 - x0, dy = y1 - y0, total = Math.abs(dx) + Math.abs(dy);
+    if (!total) return { x: x1, y: y1, sx: 0, sy: 0 };
+    const s = Math.max(0, Math.min(1, t)) * total;
+    if (xFirst) return s <= Math.abs(dx) ? { x: x0 + Math.sign(dx) * s, y: y0, sx: Math.sign(dx), sy: 0 } : { x: x1, y: y0 + Math.sign(dy) * (s - Math.abs(dx)), sx: 0, sy: Math.sign(dy) };
+    return s <= Math.abs(dy) ? { x: x0, y: y0 + Math.sign(dy) * s, sx: 0, sy: Math.sign(dy) } : { x: x0 + Math.sign(dx) * (s - Math.abs(dy)), y: y1, sx: Math.sign(dx), sy: 0 };
+  }
+  CV.easeL = easeL;
+  CV.lClear = lClear;
   // A point at share t of the way along the polyline pts: where, the step direction, which segment (i,
   // from pts[i]) and the polyline's length.
   function along(pts, t) {
@@ -173,16 +186,8 @@
         const u = !tr.via.length && Math.abs(dx) === 1 && Math.abs(dy) === 1 && Math.abs(t - 0.5) < CORNER ? (t < 0.5 ? 0.5 - CORNER : 0.5 + CORNER) : t;
         return along([tr.prev, ...tr.via, tr.cur], u);
       }
-      const s = t * total;
-      let x, y, sx = 0, sy = 0;
-      if (tr.first === "x") {
-        if (s <= Math.abs(dx)) { x = px + Math.sign(dx) * s; y = py; sx = Math.sign(dx); }
-        else { x = cx; y = py + Math.sign(dy) * (s - Math.abs(dx)); sy = Math.sign(dy); }
-      } else {
-        if (s <= Math.abs(dy)) { x = px; y = py + Math.sign(dy) * s; sy = Math.sign(dy); }
-        else { x = px + Math.sign(dx) * (s - Math.abs(dy)); y = cy; sx = Math.sign(dx); }
-      }
-      return { x, y, sx, sy, t, moving: t < 1 };
+      const p = easeL(px, py, cx, cy, t, tr.first === "x");
+      return { x: p.x, y: p.y, sx: p.sx, sy: p.sy, t, moving: t < 1 };
     }
     // A new tile for a track. ok(x, y): the tiles this mover may use on the way. A diagonal move takes the
     // L whose inner tiles all pass ok (a car leaving its driveway turns onto the road first instead of
