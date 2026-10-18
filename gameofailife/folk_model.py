@@ -60,7 +60,7 @@ class Person:
                  "owns_car", "job", "household_id", "inside", "activity", "activity_place", "state",
                  "relationships", "life", "memory", "traits", "sex",
                  "i", "hh", "gone", "trip", "next_tick", "worked_day", "fav", "choices", "inbox", "commute",
-                 "skill", "_needs", "_nt")
+                 "skill", "role", "_needs", "_nt")
 
     clock = None  # the simulation's Clock, set by Folk.__init__ (lazy needs settle to clock.tick)
     town = None  # the TownMap, set by Folk.__init__ (positions)
@@ -101,7 +101,8 @@ class Person:
         self.choices = []  # last CHOICES_KEEP {time, kind, options, choice, by}
         self.inbox = []  # last INBOX_KEEP messages
         self.commute = None  # (place, minutes, mode) | None
-        self.skill = 0.0
+        self.skill = 0.0  # job matching (generation)
+        self.role = "a"  # household role at generation: "a" head or partner, "k" child, "g" grandparent, "s" sharer
         self._needs = {n: 75.0 for n in NEEDS}
         self._nt = 0
 
