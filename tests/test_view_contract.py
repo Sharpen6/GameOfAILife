@@ -3,7 +3,8 @@ from the morning start.
 
 `crowd` is `[i, x, y, k, ...]` with i ascending, unique and < `folk_n`, positions on the map and `k < 16`, and
 never a named character; `occ` has one count a place; every `stats.folk` array and the roster (`get_folk` rows) has
-length `folk_n`; folk pages carry `choices` and `life`; `housing_version` changes iff `housing_maps()` does.
+length `folk_n`, also after a birth; folk pages carry `choices` and `life`; the housing maps travel apart from the
+state (PLAN 2.11: `state_json(housing=False)` leaves them out and the server sends `housing_maps()` when it changed).
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import inspect
 import json
 import unittest
 
+from gameofailife import folk as folk_mod
 from gameofailife import people, stats
 from gameofailife.sim import Simulation
 
@@ -33,14 +35,19 @@ class ViewContractTest(unittest.TestCase):
             raise unittest.SkipTest("Simulation does not take world= yet")
         cls.sim = sim = Simulation(seed=SEED, world="region", folk=FOLK)
         cls.frames = []  # (tick, state without housing maps, occ)
-        cls.versions = []  # (housing_version or None, housing_maps JSON)
         end = sim.clock.tick + HOURS * 60
         while sim.clock.tick < end:
             sim.step()
             if sim.clock.tick % 5 == 0:
                 cls.frames.append((sim.clock.tick, sim.state_json(housing=False), sim.folk.occ()))
-                cls.versions.append((getattr(sim, "housing_version", None),
-                                     json.dumps(sim.housing_maps(), sort_keys=True)))
+        cls.full = sim.state_json()
+        cls.maps = sim.housing_maps()
+        # a birth, then a few minutes: folk_n, stats.folk and the roster all grow together
+        mother = next(p for p in sim.folk.living() if p.sex == "f" and 20 <= p.age <= 40 and p.household_id)
+        cls.baby = folk_mod.add_baby(sim, mother)
+        for _ in range(3):
+            sim.step()
+        cls.after_birth = (sim.state_json(housing=False), stats.stats_json(sim)["folk"], sim.folk.roster_rows(sim))
 
     def test_crowd(self):
         sim = self.sim
@@ -98,11 +105,24 @@ class ViewContractTest(unittest.TestCase):
             json.dumps(page)
         self.assertIsNone(sim.agent_json(f"f{FOLK + 5}"))
 
-    def test_housing_version(self):
-        if self.versions[0][0] is None:
-            self.skipTest("sim.housing_version is not in this build yet (F3)")
-        for (v0, m0), (v1, m1) in zip(self.versions, self.versions[1:]):
-            self.assertEqual(v0 != v1, m0 != m1, "housing_version must change iff housing_maps() does")
+    def test_housing_maps_apart(self):
+        for tick, state, _ in self.frames:
+            self.assertNotIn("lots", state, tick)
+            self.assertNotIn("homes", state, tick)
+        self.assertEqual(set(self.maps), {"lots", "homes"})
+        for key in ("lots", "homes"):
+            self.assertEqual(json.dumps(self.full[key], sort_keys=True), json.dumps(self.maps[key], sort_keys=True))
+
+    def test_lengths_after_a_birth(self):
+        self.assertIsNotNone(self.baby)
+        state, block, rows = self.after_birth
+        n = state["folk_n"]
+        self.assertEqual(n, FOLK + 1)
+        self.assertEqual(n, self.baby.i + 1)
+        for key in STATS_FOLK:
+            self.assertEqual(len(block[key]), n, key)
+        self.assertEqual(len(rows), n)
+        self.assertTrue(all(0 <= i < n for i in state["crowd"][0::4]))
 
 
 if __name__ == "__main__":

@@ -145,10 +145,8 @@
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
       this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
-      const { Person } = fm();
-      Person.clock = sim.clock;
-      Person.town = town;
-      Person.locate = (p, tick) => this._locate(p, tick);
+      this._locator = (p, tick) => this._locate(p, tick);
+      this._bind();
       if (this.n <= 0) {
         this.n = 0;
         return;
@@ -243,14 +241,32 @@
           if (place !== null) this._enter(p, place);
         }
         if (p._nt === 0) p._nt = now;
+        if (p.age < 5) {
+          p.activity = "baby";
+        } else if (p.trip === null && p.activity === "sleep") {
+          // wake at folk's own minute when that is earlier, so the first morning has time for breakfast
+          const day = Math.floor(now / DAY);
+          const w = day * DAY + this._wake_minute(p, day);
+          if (now < w && w < p.next_tick) p.next_tick = w;
+        }
         this.stay.set(p.i, [now, Math.max(p.next_tick, now + 1)]);
-        if (p.age < 5) p.activity = "baby";
         this.schedule(p, p.next_tick > now ? p.next_tick : this._wake_tick(p, now));
       }
     }
 
+    // Point folk_model's Person at this Simulation's clock, town and locator. They are class attributes, so
+    // each entry point re-binds them: with two Simulations in one process the last one built must not win.
+    _bind() {
+      const { Person } = fm();
+      Person.clock = this.sim.clock;
+      Person.town = this.town;
+      Person.locate = this._locator;
+    }
+
     tick(sim) {
       const t0 = (typeof performance !== "undefined" ? performance : Date).now();
+      this._bind();
+      this.n = this.people.length; // anyone added to people (a birth, a newcomer) counts in folk_n
       const now = sim.clock.tick;
       if (now % DAY === 0) this.today = { boardings: 0, train_trips: 0, lines: {} };
       const b = this.wheel.get(now);
@@ -474,6 +490,7 @@
           G.career.on_shift_end(sim, p);
         } else {
           this.counters.school_days += 1;
+          G.career.on_shift_end(sim, p); // a pupil's school day counts as a shift (career: v2's +0.5)
         }
         this.choose(sim, p, now, m >= EVENING ? "evening" : "after_work");
         return;
@@ -925,7 +942,7 @@
         const roll = rr.random();
         G.people.log_roll(sim, p, what, prob, roll);
         if (roll < prob) {
-          p.money += money;
+          if (money) (this._payer(p) || p).money += money; // the household's purse, as the outing's cost was
           if (fun) p.adjust("fun", fun);
         }
       }
@@ -1088,6 +1105,7 @@
 
     // [i, x, y, k, ...] for folk outdoors and not aboard, sorted by i; k = mode | child << 3.
     crowd(sim) {
+      this._bind();
       const tick = sim.clock.tick;
       const out = [];
       const people = this.people;
@@ -1110,6 +1128,7 @@
 
     // The crowd invariant's terms: crowd + inside + aboard + passengers == present (living, in town).
     counts(sim) {
+      this._bind();
       const tick = sim.clock.tick;
       let aboard = 0, passengers = 0;
       for (const i of this.out.keys()) {
@@ -1195,6 +1214,7 @@
     }
 
     sample_hour(sim) {
+      this._bind();
       for (const p of this.people) {
         if (p.alive && !p.gone) {
           let r = this.rings.get(p.i);
@@ -1209,6 +1229,7 @@
     }
 
     stats_json(sim) {
+      this._bind();
       const n = this.people.length;
       const worth = new Array(n).fill(null), w24 = new Array(n).fill(null), mood = new Array(n).fill(null);
       const health = new Array(n).fill(null), luck = new Array(n).fill(null);
@@ -1227,6 +1248,7 @@
 
     // Everyone's share of the city block: counts, money and moods by district (stats sums them in).
     city_parts(sim) {
+      this._bind();
       const out = { population: 0, adults: 0, children: 0, employed: 0, pupils: 0, money: 0, mood: 0, health: 0,
         outdoors: this.out.size + this.strollers.size, districts: {} };
       for (const p of this.people) {
@@ -1279,6 +1301,7 @@
 
     // The light townsperson page (view.md 4.3) plus folk.md 8's keys, `choices` and `life`.
     page_json(sim, fid) {
+      this._bind();
       const p = this.person(fid);
       if (p === null) return null;
       const people = G.people;
@@ -1404,6 +1427,25 @@
     f.out.delete(p.i);
     const start = t.legs.length ? t.legs[0][1] : now;
     const end = t.legs.length ? t.legs[t.legs.length - 1][2] : now;
+    const RIDE = fm().RIDE;
+    const rides = t.legs.filter((leg) => leg[0] === RIDE);
+    if (rides.length && now < rides[0][1]) {
+      // cut before the first train leaves: the fare paid at departure comes back and the boardings never were
+      p.money += ft().fare(p.age);
+      f.counters.boardings -= rides.length;
+      f.counters.train_trips -= 1;
+      if (Math.floor(start / DAY) === Math.floor(now / DAY)) { // counted in today's figures (not a trip from before midnight)
+        f.today.boardings -= rides.length;
+        f.today.train_trips -= 1;
+        const per = f.today.lines;
+        for (const leg of rides) {
+          const line = f._line_of(leg[3]);
+          const left = (per[line] || 0) - 1;
+          if (left > 0) per[line] = left;
+          else delete per[line];
+        }
+      }
+    }
     let place = now - start >= end - now ? t.dest : null;
     if (place === null) place = t.dest !== f.home_place(p) ? f.home_place(p) : t.dest;
     p.state = "busy";
@@ -1468,6 +1510,7 @@
     p._nt = sim.clock.tick;
     p.activity = p.age < 5 ? "baby" : "relax_home";
     f.people.push(p);
+    f.n = f.people.length; // state.folk_n, stats.folk and the roster all have this length (PLAN 2.10)
     hh.member_ids.push(p.id);
     const home = f.home_place(p);
     if (home !== null) f._enter(p, home);

@@ -182,7 +182,7 @@ class Probe:
             probe.last_step[p.i] = now
             was = p.activity if p.trip is None else None
             orig_step(sim_, p, now)
-            if was != "work" and p.trip is None and p.activity == "work":
+            if was not in ("work", "school") and p.trip is None and p.activity in ("work", "school"):
                 probe.shift_arrivals[(p.i, now // DAY)] += 1
 
         f.step = step
@@ -344,7 +344,9 @@ class FolkDaysTest(unittest.TestCase):
             self.assertTrue(all(v == 1 for v in probe.shift_arrivals.values()), seed)
             missing = [key for key in probe.shift_calls if key not in probe.shift_arrivals]
             self.assertEqual(missing[:5], [], seed)
-            self.assertEqual(sum(probe.shift_calls.values()), probe.f.counters["shifts"], seed)
+            # work shifts and pupils' school days both end in one career.on_shift_end
+            self.assertEqual(sum(probe.shift_calls.values()),
+                             probe.f.counters["shifts"] + probe.f.counters["school_days"], seed)
 
     def test_perf(self):
         for seed, probe in self.probes.items():
