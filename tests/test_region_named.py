@@ -582,16 +582,25 @@ class CastMarketSoak(unittest.TestCase):
                 sim = region_sim(seed)
                 sim.town.warm()
                 housing.list_vacancies(sim)
-                moves = 0
+                moves, worst, longest = 0, 0.0, 0
                 for _ in range(days):
                     for _ in range(MINUTES_PER_DAY):
+                        c = time.process_time()
                         sim.step()
+                        worst = max(worst, time.process_time() - c)
                     events, _, _ = sim.drain()
                     moves += sum(e["tag"] in ("home_bought", "home_rented", "evicted", "forced_sale") for e in events)
                     for hh in sim.households.values():
                         self.assertTrue(housing.is_v2_home(hh.home_id), (seed, sim.clock.tick, hh.id, hh.home_id))
                     self.assertEqual(housing.list_vacancies(sim), REGION_HOMES)
-                print(f"\n[R1b soak] seed {seed}, {days} d: {moves} cast moves, all in the 37", file=sys.stderr)
+                    for a in sim.agents.values():  # region.md 11 R1b 3: no named commute over an hour
+                        if a.alive and a.job and a.job.hourly_wage > 0:
+                            longest = max(longest, travel.commute_minutes(sim, a))
+                print(f"\n[R1b soak] seed {seed}, {days} d: {moves} cast moves, all in the 37; longest commute "
+                      f"{longest} min; tick max {worst * 1000:.1f} ms CPU (load {os.getloadavg()[0]:.1f})",
+                      file=sys.stderr)
+                self.assertLessEqual(longest, 60)
+                self.assertLessEqual(worst, TICK_CPU_CAP)
 
 
 if __name__ == "__main__":
