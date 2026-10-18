@@ -67,6 +67,7 @@
       this.base = o.base ?? 0.0; // common-sense value whatever the personality (going to work beats skipping it)
       this.household_pays = o.household_pays ?? false; // the cost comes from the pooled adults' money and savings
       this.charge = o.charge ?? true; // false: deciding charges nothing (a move pays its own way when it goes through)
+      this.late_by = o.late_by ?? 0; // minutes late the work fork's timing found when it was built (_on_time; sim._retime redoes it)
     }
 
     // What the agent (and God) may see: never the outcome table.
@@ -182,7 +183,7 @@
 
   // --- helpers ------------------------------------------------------------------
 
-  const _late = p => new Outcome("late", "Arrives late", p, -1, { reputation: -3, memory: "Got in late and the boss noticed." });
+  const _late = p => new Outcome("late", "Arrives late", p, -1, { reputation: -3, memory: "Got in late and the boss noticed." }, "arrival");
 
   const _meet_new = p => new Outcome("meet_new", "Meets someone new", p, +1, { meet_new: true });
 
@@ -193,11 +194,22 @@
     const late_by = trip - minutes_left;
     if (late_by > 0) {
       opt.base = pyRound(opt.base - Math.min(1.0, late_by / LATE_BASE_DROP), 3);
-      for (const out of opt.outcomes) {
-        if (out.id === "late") out.p = Math.min(1.0, out.p + Math.min(0.5, late_by / LATE_ODDS));
-      }
+      retime_late(opt, late_by);
     }
     return opt;
+  }
+
+  // Set the option's hidden "Arrives late" odds for arriving `late_by` minutes late (none when on time): the late
+  // odds it was built with, plus a fortieth a minute, at most 0.5 (sim._retime calls it again when an answer lands
+  // after the character set off).
+  function retime_late(opt, late_by) {
+    for (const out of opt.outcomes) {
+      if (out.id === "late") {
+        out.p = Math.max(0.0, Math.min(1.0, out.p - Math.min(0.5, Math.max(0, opt.late_by) / LATE_ODDS)
+          + Math.min(0.5, Math.max(0, late_by) / LATE_ODDS)));
+      }
+    }
+    opt.late_by = Math.max(0, late_by);
   }
 
   // True when a child should not be heading out (now or within `hours_ahead`).
@@ -305,8 +317,8 @@
     const opts = [
       new Option(`Accept and meet ${first} at ${place.name}`, [[meet, place.id]],
         { tags: { social: 1.0, adventure: 0.3 }, gains: { social: 40, fun: 20 },
-          outcomes: [new Outcome("great_time", "Has a great time together", 0.6, +1, { [rel]: 6, fun: 8 }),
-            new Outcome("awkward", "Conversation feels awkward", 0.12, -1, { [rel]: -3 }),
+          outcomes: [new Outcome("great_time", "Has a great time together", 0.6, +1, { [rel]: 6, fun: 8 }, "hang_out"),
+            new Outcome("awkward", "Conversation feels awkward", 0.12, -1, { [rel]: -3 }, "hang_out"),
             _meet_new(0.06)],
           extra: { invite: invite.id, answer: "accept" } }),
       new Option("Decline politely", [["relax_home", "home"]], { tags: { social: -0.5, thrift: 0.2 },
@@ -379,7 +391,7 @@
       fast = new Option(`Run to ${where}`, [["work", "job"]], { vehicle: "run", base: 0.5,
         tags: { diligence: 0.7, health: 0.5, adventure: 0.2 },
         outcomes: [_late(0.03), new Outcome("ankle", "Twists an ankle", 0.03, -1, { health: -8, fun: -6 }),
-          new Outcome("buzz", "Arrives buzzing with energy", 0.3, +1, { energy: 6, fun: 4 })] });
+          new Outcome("buzz", "Arrives buzzing with energy", 0.3, +1, { energy: 6, fun: 4 }, "arrival")] });
     } else { // PLAN decision 63: dear, so it is rarely the default
       fast = new Option(`Take a taxi to ${where} ($${G.travel.TAXI_FARE})`, [["work", "job"]], { cost: G.travel.TAXI_FARE,
         vehicle: "taxi", base: 0.3, tags: { thrift: -0.6, diligence: 0.5, adventure: 0.1 },
@@ -425,8 +437,8 @@
     const skip = new Option(!school ? "Call in sick and stay home" : "Pretend to be sick and stay home",
       [["rest", "home"]], { tags: { diligence: -1.0, health: 0.3, adventure: 0.2 }, base: -0.4,
         gains: { energy: 30, fun: 25 },
-        outcomes: [new Outcome("annoyed", !school ? "The boss is annoyed" : "The teacher calls home", 0.5, -1, { reputation: -6 }),
-          new Outcome("lazy_day", "A lovely lazy day", 0.5, +1, { fun: 12 })],
+        outcomes: [new Outcome("annoyed", !school ? "The boss is annoyed" : "The teacher calls home", 0.5, -1, { reputation: -6 }, "skip"),
+          new Outcome("lazy_day", "A lovely lazy day", 0.5, +1, { fun: 12 }, "skip")],
         extra: { skip_work: true } });
     const options = [_on_time(usual, usual_trip, minutes_to_start), _on_time(fast, fast_trip, minutes_to_start),
       _on_time(coffee, coffee_trip, minutes_to_start), skip];
@@ -446,12 +458,12 @@
     if (start !== null && start - tick <= SHIFT_SOON) return null;
     const friend = _best_friend(sim, agent);
     const rel = friend ? relKey(friend.id) : null;
-    const text_outcomes = [new Outcome("warm_reply", "Gets a warm reply", 0.6, +1, Object.assign({ social: 8 }, rel ? { [rel]: 2 } : {})),
-      new Outcome("no_reply", "No reply comes", 0.3, -1, { social: -4 })];
+    const text_outcomes = [new Outcome("warm_reply", "Gets a warm reply", 0.6, +1, Object.assign({ social: 8 }, rel ? { [rel]: 2 } : {}), "text"),
+      new Outcome("no_reply", "No reply comes", 0.3, -1, { social: -4 }, "text")];
     const opts = [
       new Option("Go to sleep now", [["sleep", "home"]], { tags: { health: 0.8, diligence: 0.3 }, gains: { energy: 70 }, base: 0.2,
-        outcomes: [new Outcome("deep_sleep", "Sleeps deeply", 0.6, +1, { energy: 10 }),
-          new Outcome("insomnia", "Lies awake for hours", 0.1, -1, { energy: -15 })] }),
+        outcomes: [new Outcome("deep_sleep", "Sleeps deeply", 0.6, +1, { energy: 10 }, "sleep"),
+          new Outcome("insomnia", "Lies awake for hours", 0.1, -1, { energy: -15 }, "sleep")] }),
       new Option("Stay up watching a show", [["stay_up", "home"], ["sleep", "home"]],
         { tags: { health: -0.6, adventure: 0.3, diligence: -0.3 }, gains: { fun: 35 },
           outcomes: [new Outcome("hooked", "Loves the show", 0.45, +1, { fun: 10 }),
@@ -473,8 +485,8 @@
     if (hh.groceries > 0) {
       cook = new Option("Cook at home", [["eat_home", "home"]], { tags: { thrift: 0.6, family: 0.5, health: 0.4 },
         gains: { hunger: 60 },
-        outcomes: [new Outcome("tasty", "Makes a really tasty meal", 0.5, +1, { fun: 6 }),
-          new Outcome("burnt", "Burns the food", 0.08, -1, { fun: -6 })] });
+        outcomes: [new Outcome("tasty", "Makes a really tasty meal", 0.5, +1, { fun: 6 }, "cook"),
+          new Outcome("burnt", "Burns the food", 0.08, -1, { fun: -6 }, "cook")] });
     } else if (agent.is_adult && agent.money >= 35 && (market = _open_place(sim, agent, ["market"], GROCERY_MINUTES))) {
       cook = new Option(`Buy groceries at ${market.name}, then cook`, [["buy_groceries", market.id], ["eat_home", "home"]],
         { cost: 35, tags: { thrift: 0.4, family: 0.6, diligence: 0.3 }, gains: { hunger: 60 },
@@ -539,8 +551,8 @@
         outcomes: [new Outcome("cosy_drink", "A relaxed evening in", 0.6, +1, { fun: 6 }),
           new Outcome("hangover", "Wakes up with a hangover", 0.15, -1, { energy: -12, delay: 720 })] });
     }
-    const bought = [new Outcome("love_it", "Loves the purchase", 0.6, +1, { fun: 15 }),
-      new Outcome("regret", "Regrets the spending", 0.3, -1, { fun: -8 })];
+    const bought = [new Outcome("love_it", "Loves the purchase", 0.6, +1, { fun: 15 }, "purchase"),
+      new Outcome("regret", "Regrets the spending", 0.3, -1, { fun: -8 }, "purchase")];
     const shop = _open_place(sim, agent, ["shop", "market"], SHOP_MINUTES); // open until the shopping is done
     let buy;
     if (shop) {
@@ -557,19 +569,19 @@
     if (dinner) {
       treat = new Option(`Treat the family to dinner at ${dinner.name}`, [["family_dinner", dinner.id]], { cost: 50,
         tags: { family: 1.0, thrift: -0.4, social: 0.3 }, gains: { hunger: 40, social: 30 },
-        outcomes: [new Outcome("bonding", "A warm family evening", 0.7, +1, { family_bond: 4, fun: 8 }),
-          new Outcome("argument", "An argument at the table", 0.1, -1, { family_bond: -3 })],
+        outcomes: [new Outcome("bonding", "A warm family evening", 0.7, +1, { family_bond: 4, fun: 8 }, "dinner"),
+          new Outcome("argument", "An argument at the table", 0.1, -1, { family_bond: -3 }, "dinner")],
         extra: { family: true, place: dinner.id } });
     } else if (family) { // every cafe would shut before dinner is over: a takeaway for everyone
       treat = new Option("Order a takeaway feast for the family", [["order_food", "home"], ["relax_home", "home"]],
         { cost: 40, tags: { family: 0.8, thrift: -0.3 }, gains: { hunger: 40, fun: 20 },
-          outcomes: [new Outcome("feast", "Everyone loves the feast", 0.6, +1, { fun: 6 }),
-            new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 })] });
+          outcomes: [new Outcome("feast", "Everyone loves the feast", 0.6, +1, { fun: 6 }, "dinner"),
+            new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 }, "dinner")] });
     } else { // nobody at home to treat
       treat = new Option("Treat yourself to a takeaway night in", [["order_food", "home"], ["relax_home", "home"]], { cost: 25,
         tags: { thrift: -0.4, social: -0.4, adventure: -0.2 }, gains: { hunger: 40, fun: 25 },
-        outcomes: [new Outcome("cosy_night", "A cosy night in", 0.6, +1, { fun: 6 }),
-          new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 })] });
+        outcomes: [new Outcome("cosy_night", "A cosy night in", 0.6, +1, { fun: 6 }, "dinner"),
+          new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 }, "dinner")] });
     }
     return new Fork(agent.id, "payday", `It's payday and you have $${fmt(agent.money)}. What do you do with it?`,
       [save, out, buy, treat], sim.clock.tick);
@@ -621,15 +633,15 @@
     } else { // every cafe would shut before a hang-out there is over
       opts.push(new Option("Message a few people from home", [["text", "home"]], { tags: { social: 0.6, thrift: 0.2 },
         gains: { social: 15 },
-        outcomes: [new Outcome("warm_replies", "Gets some warm replies", 0.6, +1, { social: 6 }),
-          new Outcome("no_reply", "No reply comes", 0.3, -1, { social: -4 })] }));
+        outcomes: [new Outcome("warm_replies", "Gets some warm replies", 0.6, +1, { social: 6 }, "call"),
+          new Outcome("no_reply", "No reply comes", 0.3, -1, { social: -4 }, "call")] }));
     }
     const who = family || friend;
     if (who) {
       opts.push(new Option(`Call ${firstName(who.name)}`, [["phone_call", null]], { tags: { family: 0.8, social: 0.4 },
         gains: { social: 30 },
-        outcomes: [new Outcome("lovely_talk", "A lovely long talk", 0.7, +1, { [relKey(who.id)]: 3 }),
-          new Outcome("argue", "The call turns into an argument", 0.08, -1, { [relKey(who.id)]: -5, fun: -6 })],
+        outcomes: [new Outcome("lovely_talk", "A lovely long talk", 0.7, +1, { [relKey(who.id)]: 3 }, "call"),
+          new Outcome("argue", "The call turns into an argument", 0.08, -1, { [relKey(who.id)]: -5, fun: -6 }, "call")],
         extra: { call: who.id } }));
     } else {
       opts.push(new Option("Write in a diary", [["read", "home"]], { tags: { social: -0.2 }, gains: { fun: 10 },
@@ -642,8 +654,8 @@
         RAIN_CHANCE[sim.clock.season] * (sim.weather === "rain" ? 1 : 0), -1, { fun: -8 })] }));
     opts.push(new Option("Stay home alone", [["relax_home", "home"]], { tags: { social: -1.0, thrift: 0.3 },
       gains: { fun: 20 },
-      outcomes: [new Outcome("peaceful", "A peaceful evening", 0.5, +1, { fun: 5 }),
-        new Outcome("lonely", "Feels lonely", 0.4, -1, { social: -5 })] }));
+      outcomes: [new Outcome("peaceful", "A peaceful evening", 0.5, +1, { fun: 5 }, "stay_home"),
+        new Outcome("lonely", "Feels lonely", 0.4, -1, { social: -5 }, "stay_home")] }));
     return new Fork(agent.id, "lonely", "You haven't talked to anyone in a while. What do you do?", opts, sim.clock.tick);
   }
 
@@ -670,14 +682,14 @@
         gains: { fun: 35 }, outcomes: [_meet_new(0.1)] }),
       new Option("Relax at home", [["relax_home", "home"]], { tags: { thrift: 0.4, family: 0.4, adventure: -0.4 },
         gains: { fun: 30, energy: 5 },
-        outcomes: [new Outcome("unwind", "Properly unwinds", 0.5, +1, { fun: 6 }),
-          new Outcome("restless", "Gets restless and bored", 0.3, -1, { fun: -6 })] }),
+        outcomes: [new Outcome("unwind", "Properly unwinds", 0.5, +1, { fun: 6 }, "relax"),
+          new Outcome("restless", "Gets restless and bored", 0.3, -1, { fun: -6 }, "relax")] }),
       out,
       new Option("Work on a side project", [["side_project", "home"]], { tags: { diligence: 0.6, adventure: 0.5, social: -0.3 },
         gains: { fun: 25 },
         outcomes: [new Outcome("breakthrough", "Makes a breakthrough", 0.15, +1,
-          agent.is_adult ? { fun: 15, money: 50 } : { fun: 20 }),
-        new Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, { fun: -6 })] }),
+          agent.is_adult ? { fun: 15, money: 50 } : { fun: 20 }, "project"),
+        new Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, { fun: -6 }, "project")] }),
     ];
     return new Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick);
   }
@@ -721,7 +733,7 @@
     HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, SNACK_MINUTES, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
     LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, WOKE_GAP, SHIFT_SOON, MAX_OUTING_MINUTES, TRAVEL_KINDS, TRAVEL_COST,
     NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, COOPED_KINDS, COOPED_UP, COOPED_HOURS, Outcome, Option, Fork, luck_odds,
-    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, _curfew,
+    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, retime_late, _curfew,
     _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,
     work_lead, work_fork, sleep_fork, hunger_fork,
     payday_fork, groceries_fork, lonely_fork, free_time_fork, BUILDERS, COOLDOWN, builders, build_fork,
