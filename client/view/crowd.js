@@ -115,7 +115,7 @@
         seen[i] = 3; // not yet in this frame
       }
       t0 = now;
-      const next = [];
+      const next = [], born = new Set();
       for (let k = 0; k + 3 < c.length; k += 4) {
         const i = c[k], x = c[k + 1], y = c[k + 2], kk = c[k + 3] & 15, m = kk & 7;
         if (i < 0 || i >= n) continue;
@@ -123,6 +123,7 @@
         if (seen[i] !== 3) { // a newcomer (or one coming back as it faded): appears in place
           prev[2 * i] = x; prev[2 * i + 1] = y; cur[2 * i] = x; cur[2 * i + 1] = y; kind[i] = kk; seen[i] = 1;
           offset(i, x, y, face[i], m, o0, 2 * i); o1[2 * i] = o0[2 * i]; o1[2 * i + 1] = o0[2 * i + 1];
+          born.add(i);
           continue;
         }
         seen[i] = 1;
@@ -167,6 +168,7 @@
       for (const ids of stand.values()) if (ids.length >= 2) ids.forEach((i, k) => {
         const an = 2 * Math.PI * k / ids.length + (hash2(ids[0], 13) % 628) / 100;
         o1[2 * i] = Math.cos(an) * RING; o1[2 * i + 1] = Math.sin(an) * RING;
+        if (born.has(i)) { o0[2 * i] = o1[2 * i]; o0[2 * i + 1] = o1[2 * i + 1]; } // a newcomer appears in its place in the ring
       });
       version++;
     }
@@ -189,6 +191,10 @@
       }
     }
     const viewNow = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+    // drawing (items, marks, pick, pos, each) runs on the time of the frame being drawn, which view.js sets
+    // (setNow); frames arrive (setState) on the real clock. A frame drawn at a fixed time draws the same pixels.
+    let frameNow = null;
+    const drawNow = () => (frameNow != null ? frameNow : viewNow());
     const sheetOf = (art, i) => {
       const v = hash2(i, 5) % 24, ch = (kind[i] >> 3) & 1;
       if (typeof art.folkSheet === "function") return art.folkSheet(v, !!ch);
@@ -206,21 +212,22 @@
       pos(i, now) {
         i = typeof i === "string" ? +i.slice(1) : i;
         if (!(i >= 0 && i < n) || seen[i] !== 1) return null;
-        positions(now == null ? viewNow() : now);
+        positions(now == null ? drawNow() : now);
         const j = bs(i);
         return j < 0 ? null : [fx[j], fy[j]];
       },
       // calls fn(x, y, i, kind) for everyone outdoors now (tile units; the minimap)
       each(fn, now) {
-        positions(now == null ? viewNow() : now);
+        positions(now == null ? drawNow() : now);
         for (let j = 0; j < list.length; j++) { const i = list[j]; if (seen[i] === 1) fn(fx[j], fy[j], i, kind[i]); }
       },
       has: id => { const i = typeof id === "string" ? +id.slice(1) : id; return i >= 0 && i < n && seen[i] === 1; },
       kindOf: i => kind[i],
       stats: () => ({ crowd: K.count(), crowdDrawn: drawn, crowdInView: inView, crowdSprites: sprites }),
       version: () => version,
+      setNow(t) { frameNow = t == null ? null : +t; },
       items(v, outItems) {
-        const now = viewNow();
+        const now = drawNow();
         positions(now);
         drawn = 0; inView = 0; sprites = 0;
         if (v.lod && v.lod !== "near") return;
@@ -287,7 +294,7 @@
       },
       // mid: 2 x 3 px walkers and 4 x 3 px vehicles; far: 1 px dots (vehicles 2 px). Device px.
       marks(g, v, lod) {
-        const now = viewNow();
+        const now = drawNow();
         positions(now);
         drawn = 0; inView = 0; sprites = 0;
         if (lod !== "mid" && lod !== "far") return;
@@ -307,7 +314,7 @@
       // the person nearest (wx, wy) within r world px of their sprite (near) or dot
       pick(wx, wy, r) {
         if (!list.length) return null;
-        positions(viewNow());
+        positions(drawNow());
         const proj = scene.proj, zoom = (scene.cam && scene.cam.zoom) || 1;
         const lod = typeof scene.lod === "function" ? scene.lod() : scene.lod, near = lod ? lod === "near" : zoom >= 0.5;
         if (!near) r = Math.max(r, 10 / zoom); // a dot or a mark: within 10 CSS px

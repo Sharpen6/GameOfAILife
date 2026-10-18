@@ -533,6 +533,8 @@
       const dt = lastT ? Math.max(0, Math.min(0.1, (now - lastT) / 1000)) : 0;
       if (lastT && dynamic && now > lastT) adapt(now - lastT, now);
       lastT = now;
+      if (crowd && crowd.setNow) crowd.setNow(now);
+      if (trains && trains.setNow) trains.setNow(now);
       movers.update(now);
       cam.update(dt, followPos());
       if (!cam.follow && chip.classList.contains("cv-show") && !chip.classList.contains("cv-paused")) syncChip();

@@ -46,6 +46,9 @@
     const trains = new Map(); // id -> {row, line, track, s0, s1, t0, dur}
     let lastTick = null, drawnCars = 0, version = 0;
     const viewNow = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+    // drawing runs on the time of the frame being drawn (view.js: setNow), frames arrive on the real clock
+    let frameNow = null;
+    const drawNow = () => (frameNow != null ? frameNow : viewNow());
     const sOf = (t, now) => t.s0 + (t.s1 - t.s0) * Math.min(1, Math.max(0, (now - t.t0) / t.dur));
 
     function setState(st, now) {
@@ -107,8 +110,9 @@
       M, lines,
       setState(st, now) { setState(st, now == null ? viewNow() : now); },
       // tile-unit car centres of a train now (tests, minimap, follow)
-      carsOf(id, now) { const t = trains.get(id); return t ? cars(t, now == null ? viewNow() : now) : null; },
-      sOf(id, now) { const t = trains.get(id); return t ? sOf(t, now == null ? viewNow() : now) : null; },
+      carsOf(id, now) { const t = trains.get(id); return t ? cars(t, now == null ? drawNow() : now) : null; },
+      sOf(id, now) { const t = trains.get(id); return t ? sOf(t, now == null ? drawNow() : now) : null; },
+      setNow(t) { frameNow = t == null ? null : +t; },
       rows: () => [...trains.values()].map(t => t.row),
       // The Transit layer, drawn by view.js over the scene: each line's tracks in its colour, the bus loops
       // dashed (town.timetable.bus.lines[*].corners, when the town has them), and a ring at each station
@@ -152,7 +156,7 @@
       items(v, out) {
         drawnCars = 0;
         if (v.lod && v.lod !== "near") return;
-        const now = viewNow(), proj = scene.proj, art = scene.art;
+        const now = drawNow(), proj = scene.proj, art = scene.art;
         for (const t of trains.values()) {
           const open = !!t.row.at_station, cs = cars(t, now), n = cs.length;
           for (const c of cs) {
@@ -179,7 +183,7 @@
       marks(g, v, lod) {
         drawnCars = 0;
         if (lod !== "mid" && lod !== "far") return;
-        const now = viewNow(), proj = scene.proj, S = v.S, k = Math.max(1, Math.round(scene.dpr || 1));
+        const now = drawNow(), proj = scene.proj, S = v.S, k = Math.max(1, Math.round(scene.dpr || 1));
         g.lineCap = "butt";
         for (const t of trains.values()) {
           const cs = cars(t, now);
@@ -195,7 +199,7 @@
         }
       },
       pick(wx, wy, r) {
-        const now = viewNow(), proj = scene.proj;
+        const now = drawNow(), proj = scene.proj;
         let best = null, bd = Infinity;
         for (const t of trains.values()) for (const c of cars(t, now)) {
           const w = proj.toWorld(c.x, c.y, 8), d = Math.abs(wx - w[0]) / 34 + Math.abs(wy - w[1]) / 20;
