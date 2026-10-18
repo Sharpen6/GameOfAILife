@@ -304,9 +304,10 @@ def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
     counted in `population` (the means then cover everyone; without `needs_sum` the named needs means stand);
     `adult_worths` (the folk adults' worths, ints: median, top-10 share and gini cover everyone) and `worth_sum`
     (all the folk's worth, the wealth total; else the adults' worths); `in_debt` (int); `luck` ({touched, raised,
-    lowered}, ints, and `sum`; without it the named luck stands); `folk_parts` builds all of these; `money_sum` (cash and savings, added to the wealth total when there are no worths). F2a's own
-    names (`employed`, `pupils`, `mood`, `health`, `money`) arrive through `canon_parts`. Named-only stays
-    named-only: `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
+    lowered}, ints, and `sum`; without it the named luck stands); `money_sum` (cash and savings, added to the
+    wealth total when there are no worths). `folk_parts` builds all of these. F2a's own names (`employed`,
+    `pupils`, `mood`, `health`, `money`) arrive through `canon_parts`. Named-only stays named-only:
+    `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
     named_n = block["population"]
     for k in PART_COUNTS:
         block[k] += int(parts.get(k, 0))
