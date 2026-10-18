@@ -1,6 +1,6 @@
 """Townsfolk generation (folk.md 12 Generation, PLAN 2.6 and 2.15) on the SimStub, seeds 1-3.
 
-1,000 folk in 410-440 households in the region's homes; ages; employment, commutes and Millbrook's 142 job rows;
+1,000 folk in 410-440 households in the region's homes; ages; employment, commutes and Millbrook's 143 job slots;
 named workers' folk coworkers and named pupils' folk classmates; money against the named; unique names; every job
 slot on the board; the isolated case; the 2 s generation budget; the fixture (and the Node fixture when node and
 the JS rail are present). The train commuters and teen riders are printed for the handoff.
@@ -157,7 +157,7 @@ class GenerationTest(unittest.TestCase):
             sim = stub(seed)
             mb = sim.town.millbrook_ids
             rows = [s for s, job in enumerate(sim.job_board.jobs) if job.place_id in mb]
-            self.assertEqual(len(rows), 142)
+            self.assertEqual(len(rows), 143)  # region.md's 142 rows + the green's second gardener
             filled = sum(1 for s in rows if sim.job_board.holder[s] is not None)
             self.assertGreaterEqual(filled, 130, seed)
 
@@ -170,10 +170,10 @@ class GenerationTest(unittest.TestCase):
                 if a.job.title == "student":
                     self.assertGreaterEqual(classmates(sim, a), 2, (seed, a.id))
                 elif a.job.hourly_wage > 0:
-                    # Where region.json gives the place fewer than 2 folk slots on the shift (Millbrook Green has
-                    # one gardener row), every one of them is filled.
-                    want = min(2, open_to(sim, a))
-                    self.assertGreaterEqual(want, 1, (seed, a.id, a.job.place_id))
+                    # At least 2 folk coworkers on the shift (folk.md); region.json gives every named workplace 2
+                    # or more folk slots there (Millbrook Green's gardener row has count 2, regiongen.RAISED).
+                    want = 2
+                    self.assertGreaterEqual(open_to(sim, a), want, (seed, a.id, a.job.place_id))
                     self.assertGreaterEqual(coworkers(sim, a), want, (seed, a.id, a.job.place_id))
 
     def test_ties(self):

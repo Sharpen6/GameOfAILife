@@ -155,6 +155,11 @@ class Generator(unittest.TestCase):
         self.assertEqual(region.car_extra(m, "quay_market"), 0)
         self.assertEqual(region.car_extra(m, "hospital"), 0)
         self.assertEqual(region.car_extra(T.build_map(1), "hospital"), 0)
+        rows = {(j[0], j[1]): j[6] for j in d["jobs"]}
+        hour0 = {(j[0], j[1]): j[6] for j in regiongen.strip_additive(d)["jobs"]}
+        for key, (was, now) in regiongen.RAISED.items():
+            self.assertEqual((hour0[key], rows[key]), (was, now), key)
+        self.assertEqual(rows[("gardener", "green")], 2)
 
 
 class Fixture(unittest.TestCase):
@@ -169,7 +174,7 @@ class Fixture(unittest.TestCase):
         s = summary(1)
         self.assertEqual(s["start_occupied"], 572)
         self.assertEqual(s["decor"], 656)
-        self.assertEqual(s["slots"], {"region": 1241, "millbrook": 142})
+        self.assertEqual(s["slots"], {"region": 1241, "millbrook": 143})  # 142 at hour 0; regiongen.RAISED
         self.assertEqual(s["run_minutes"], {"R": {"out": [0, 3, 8, 12, 19, 24], "in": [0, 4, 11, 15, 20, 24]},
                                             "S": {"out": [0, 3, 9, 14], "in": [0, 4, 10, 14]}})
         self.assertEqual(s["stops"]["R"]["millbrook_station"], [4, 184])
@@ -316,7 +321,7 @@ class Invariants(unittest.TestCase):
             self.assertNotEqual(m.places[pid].kind, "home")
             self.assertTrue(0 <= s < e <= 24 and wage > 0 and n > 0 and days and set(days) <= set(range(7)),
                             (title, pid))
-        self.assertEqual(sum(r[6] for r in m.job_slots if r[1] in m.millbrook_ids), 142)
+        self.assertEqual(sum(r[6] for r in m.job_slots if r[1] in m.millbrook_ids), 143)  # 142 + regiongen.RAISED
 
     def test_reachable_from_millbrook_station(self):
         m = self.m
@@ -365,7 +370,7 @@ class Targets(unittest.TestCase):
         self.assertTrue(0.55 <= flats <= 0.75, flats)
         pl = {p["id"] for p in d["places"]}
         self.assertGreaterEqual(sum(j[6] for j in d["jobs"] if j[1] in pl), 1200)
-        self.assertEqual(sum(j[6] for j in d["jobs"] if j[1] not in pl), 142)
+        self.assertEqual(sum(j[6] for j in d["jobs"] if j[1] not in pl), 143)  # 142 + regiongen.RAISED
         self.assertLessEqual(len(d["places"]), 360)
         kinds = Counter(p["kind"] for p in d["places"])
         self.assertGreaterEqual(sum(p["capacity"] for p in d["places"] if p["kind"] == "school"), 900)

@@ -15,8 +15,9 @@ factories at the stations, Millbrook East flats in the strip x 69-79, folk job r
 district price table, varied lot conditions, primary schools, and the decor pass (view.md 4.1).
 
 After the region freeze (PLAN 3, `v3-region-frozen`) changes are additive only: ids and counts stay.
-`ADDITIVE` lists the keys added since the hour-0 file (sha1 HOUR0_SHA1), which --write output minus those keys
-reproduces byte for byte.
+`ADDITIVE` lists the keys added since the hour-0 file (sha1 HOUR0_SHA1) and `RAISED` the job rows whose slot count
+was raised since (no row added or removed, no id changed); --write output minus those keys, with those counts put
+back, reproduces the hour-0 file byte for byte.
 """
 from __future__ import annotations
 
@@ -32,6 +33,9 @@ DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "region.
 HOUR0_SHA1 = "29a45ed5f37906a194b6dc91ab70d1af0f492436"  # scratch-region/region.json, the v3-skel-region file
 PARKING_MINUTES = {"downtown_riverton": 10, "midtown": 8}  # minutes to park a car (region.car_extra), else 0
 ADDITIVE = {"districts": ("parking_minutes",)}  # keys added after the hour-0 file, by top-level key
+# Job rows (title, place) whose count was raised after the hour-0 file: (hour-0 count, count now). The green's
+# gardener has 2 so the named park keeper meets folk coworkers on the shift (F1, folk.md: >= 2).
+RAISED = {("gardener", "green"): (1, 2)}
 
 W, H = 256, 192
 FROZEN_W, FROZEN_H = 69, 50  # x < 69 and y < 50: Millbrook's own tiles from town.build_map(seed)
@@ -277,7 +281,7 @@ MILLBROOK_JOBS = [  # folk rows at Millbrook's own places: (title, place, wage, 
     ("teller", "bank", 22, 9, 17, (0, 1, 2, 3, 4), 4), ("advisor", "bank", 30, 9, 17, (0, 1, 2, 3, 4), 2),
     ("clerk", "cityhall", 24, 8, 16, (0, 1, 2, 3, 4), 5), ("inspector", "cityhall", 28, 9, 17, (0, 1, 2, 3, 4), 1),
     ("gardener", "park", 18, 7, 15, (0, 1, 2, 3, 4), 1), ("gardener", "maple_park", 18, 7, 15, (0, 1, 2, 3, 4), 1),
-    ("gardener", "square", 18, 7, 15, (0, 1, 2, 3, 4), 1), ("gardener", "green", 18, 7, 15, (0, 1, 2, 3, 4), 1),
+    ("gardener", "square", 18, 7, 15, (0, 1, 2, 3, 4), 1), ("gardener", "green", 18, 7, 15, (0, 1, 2, 3, 4), 2),
 ]
 CIVIC_STAFF = {  # kind -> rows (title, wage, start, end, days, count)
     "hospital": [("nurse", 30, 7, 15, (0, 1, 2, 3, 4, 5, 6), 20), ("nurse", 30, 15, 23, (0, 1, 2, 3, 4, 5, 6), 20),
@@ -808,10 +812,13 @@ def dumps(data: dict) -> str:
 
 
 def strip_additive(data: dict) -> dict:
-    """A copy of region.json's data without the keys added after the hour-0 file (for the byte check)."""
+    """A copy of region.json's data without the keys added after the hour-0 file and with the RAISED job rows at
+    their hour-0 counts (for the byte check)."""
     out = dict(data)
     for top, keys in ADDITIVE.items():
         out[top] = [{k: v for k, v in row.items() if k not in keys} for row in data[top]]
+    hour0 = {key: was for key, (was, now) in RAISED.items()}
+    out["jobs"] = [row[:6] + [hour0[(row[0], row[1])]] if (row[0], row[1]) in hour0 else row for row in data["jobs"]]
     return out
 
 

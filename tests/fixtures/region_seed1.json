@@ -1,5 +1,5 @@
 {
- "region_sha1": "3db25cc30ec506054ef76123d518967734a34c59",
+ "region_sha1": "3c9cbf4fc882a65347439c4325a2fee4a1e3876e",
  "hour0_sha1": "29a45ed5f37906a194b6dc91ab70d1af0f492436",
  "tiles_sha1": "d8531578bd4c9c99e43c90344d09ff644c3659aa",
  "places": 334,
@@ -41,13 +41,13 @@
  "start_occupied": 572,
  "slots": {
   "region": 1241,
-  "millbrook": 142
+  "millbrook": 143
  },
  "slots_by_district": {
   "downtown_riverton": 379,
   "ironworks": 319,
   "midtown": 195,
-  "millbrook": 142,
+  "millbrook": 143,
   "north_woods": 10,
   "northgate": 58,
   "quayside": 52,
