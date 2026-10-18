@@ -1132,6 +1132,7 @@
       if (!a.alive) return `${a.name} · died`;
       return `${a.name}, ${a.age} · ${a.state === "deciding" ? "deciding…" : pretty(a.activity)}${a.riding ? " · on the bus" : ""}`;
     }
+    if (hit.kind === "train") return `Train ${hit.id} · ${plural(hit.riders | 0, "rider")}`;
     if (hit.kind === "bus") {
       const b = (S.state.buses || []).find(x => x.id === hit.id);
       if (!b) return "";
