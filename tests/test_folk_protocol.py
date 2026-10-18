@@ -10,6 +10,7 @@ sets of the welcome, a frame, `stats`, `get_folk` and the pages with the JS port
 
 from __future__ import annotations
 
+import gc
 import json
 import shutil
 import subprocess
@@ -128,6 +129,14 @@ class TestFolkProtocol(unittest.TestCase):
         for _ in range(2 * MINUTES_PER_DAY):  # two more days, plain steps (the named's rectangle check)
             sim.step()
         cls.millbrook = millbrook
+
+    @classmethod
+    def tearDownClass(cls):
+        # A 1,000-townsfolk city and a day of frames: let them go, so later modules' CPU-per-tick gates do not pay
+        # for collecting them.
+        for name in ("sim", "server", "view", "welcome", "frames", "positions", "stats_pushes", "after_day"):
+            setattr(cls, name, None)
+        gc.collect()
 
     def test_the_crowd_invariant_holds_on_every_frame(self):
         self.assertGreater(len(self.frames), 600)

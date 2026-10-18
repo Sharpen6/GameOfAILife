@@ -9,6 +9,7 @@ and roll their own dice, so a difference here is a leak from one tier into the o
 
 from __future__ import annotations
 
+import gc
 import unittest
 
 from gameofailife import people
@@ -41,6 +42,11 @@ class TestFolkIsolation(unittest.TestCase):
     def setUpClass(cls):
         cls.alone = named_run(0, False)
         cls.isolated = named_run(1000, True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.alone = cls.isolated = None  # three days of traces: do not keep them for the rest of the suite
+        gc.collect()
 
     def test_the_townsfolk_were_there(self):
         self.assertEqual((self.alone["folk_n"], self.isolated["folk_n"]), (0, 1000))
