@@ -167,8 +167,8 @@
           const at = data.at(m);
           return [at[0], at[1]];
         }
-        if (kind === WAIT && town !== null && town.places[data] !== undefined) {
-          const e = town.places[data].entry;
+        if (kind === WAIT && town !== null && town.places.has(data)) {
+          const e = town.places.get(data).entry;
           return [e[0], e[1]];
         }
         if (kind === RIDE && town !== null) {
@@ -182,8 +182,8 @@
         if (xy !== null && xy !== undefined) return [xy[0], xy[1]];
       }
       const pid = this.inside !== null ? this.inside : this.activity_place;
-      if (town !== null && pid !== null && town.places[pid] !== undefined) {
-        const e = town.places[pid].entry;
+      if (town !== null && pid !== null && town.places.has(pid)) {
+        const e = town.places.get(pid).entry;
         return [e[0], e[1]];
       }
       return [0, 0];

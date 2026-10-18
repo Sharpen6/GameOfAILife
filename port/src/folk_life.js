@@ -169,8 +169,16 @@
     if (!payers.length || funds(folk, hh) < FIX_FACTOR * cost) return false;
     const payer = richest(payers);
     _pay(payer, cost);
-    H.fix_emergency(sim, hh, payer); // the payer as agent keeps the news folk-only
+    const live = home.emergency;
+    home.emergency = null; // housing.fix_emergency's effect; its emergency_settled news is importance 0 (memory only)
+    _remember(sim, members(folk, hh), `The ${H.EMERGENCY_NAME[live.kind]} at ${home.name} is fixed.`);
     return true;
+  }
+
+  // A townsfolk importance-0 happening (PLAN 2.8): each one's memory, never `sim.event`.
+  function _remember(sim, people, text) {
+    const stamp = sim.clock.stamp();
+    for (const p of people) p.remember(stamp, text);
   }
 
   // Midnight, after housing.nightly (which leaves the townsfolk homes alone): an emergency left unfixed for
@@ -196,8 +204,7 @@
       if (live && _fix(sim, folk, hh, home)) live = null;
       if (live && now - live.since >= H.EMERGENCY_DAYS * H.DAY) {
         home.emergency = null;
-        sim.event(`The ${H.EMERGENCY_NAME[live.kind]} at ${home.name} is never properly fixed.`, null, null,
-          { tag: "emergency_settled", agents: ids, place: home.place });
+        _remember(sim, mem, `The ${H.EMERGENCY_NAME[live.kind]} at ${home.name} is never properly fixed.`);
         H._change_condition(sim, sim.lots.get(home.place), -H.SETTLE_DAMAGE);
       }
       if (!mem.length) continue;
@@ -211,7 +218,10 @@
         const k = winter ? 2 : 1;
         for (const p of mem) {
           p.health = Math.max(0.0, p.health - H.DAMP_HEALTH[st] * k);
-          if (rr.random() < luck_odds(H.DAMP_CHILL[st] * k, -1, p.luck)) {
+          const prob = luck_odds(H.DAMP_CHILL[st] * k, -1, p.luck);
+          const roll = rr.random();
+          G.people.log_roll(sim, p, "damp_chill", prob, roll);
+          if (roll < prob) {
             p.health = Math.max(0.0, p.health + H.CHILL.health);
             p.adjust("fun", H.CHILL.fun);
             sim.event(`${p.name} catches a chill in the damp house.`, p, null,
@@ -224,7 +234,10 @@
         if (winter) p0 *= H.WINTER_EMERGENCY;
         let luck = 0.0;
         for (const p of payers) luck += p.luck;
-        if (rr.random() < luck_odds(p0, -1, luck / payers.length)) {
+        const prob = luck_odds(p0, -1, luck / payers.length);
+        const roll = rr.random();
+        G.people.log_roll(sim, payers[0], "home_emergency", prob, roll);
+        if (roll < prob) {
           const kinds = ["leak", "electrics", "boiler"].concat(winter ? ["boiler", "boiler"] : [],
             (sim.weather || "clear") === "rain" ? ["roof"] : []);
           const kind = rr.pick(kinds);
@@ -259,6 +272,7 @@
     }
     if (best !== null) {
       folk_move(sim, hh, best.id, "rent");
+      _refresh(sim, mem); // commutes from the new home
       hh.arrears = 0;
       hh.last_funds = null;
       return;
@@ -338,23 +352,38 @@
     return out;
   }
 
-  // Move people into household dst, emptying (and vacating) the households they leave.
+  // Move people into household dst, emptying (and vacating) the households they leave. A home the movers owned
+  // and left empty is sold: the richest adult mover from it (else the richest mover) gets the sale proceeds.
   function _move_people(folk, people, dst) {
     const left = [];
+    const movers = new Map();
     for (const p of people) {
       const src = folk.household(p.household_id) ?? null;
       if (src === dst) continue;
       if (src !== null) {
         const k = src.member_ids.indexOf(p.id);
         if (k >= 0) src.member_ids.splice(k, 1);
-        if (!left.includes(src)) left.push(src);
+        if (!left.includes(src)) {
+          left.push(src);
+          movers.set(src.id, []);
+        }
+        movers.get(src.id).push(p);
       }
       p.household_id = dst.id;
       p.hh = dst.j;
       dst.member_ids.push(p.id);
     }
+    const sim = left.length ? _sim_of(folk) : null;
     for (const src of left) {
-      if (!members(folk, src).length) on_household_empty(folk, src);
+      if (members(folk, src).length) continue;
+      const home = sim.homes.get(src.home_id);
+      if (home !== undefined && home.household === src.id && home.owner === src.id) {
+        const from = movers.get(src.id);
+        const grown = from.filter(q => q.age >= ADULT_AGE);
+        const payer = richest(grown.length ? grown : from);
+        if (payer !== null) payer.money = r2(payer.money + housing().sale_proceeds(sim, home.id));
+      }
+      on_household_empty(folk, src);
     }
     _touch(folk);
   }
