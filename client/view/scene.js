@@ -64,6 +64,7 @@
     };
     const placeById = new Map(places.map((p, i) => [p.id, i]));
     scene.placeById = placeById;
+    const moverSources = [];
     const homePlace = new Map(town.homes.map(h => [h.id, h.place]));
 
     // --- tile classification (client-derived; no new tile codes) -----------------------------------------
@@ -1051,10 +1052,18 @@
       const pad = 2;
       const dyn = [];
       for (const [fx, fy] of fountains) { const spr = art.fountainJet(Math.floor(now / 140) % 6), p = proj.toWorld(fx, fy); dyn.push({ img: spr.c, sx: 0, sy: 0, sw: spr.c.width, sh: spr.c.height, wx: Math.round(p[0] - spr.ax), wy: Math.round(p[1] - spr.ay), depth: proj.depth(fx, fy) }); }
+      // mover sources registered with scene.addMovers (crowd, trains, pings): their items join the merge
+      const vv = { S, ox: v.ox, oy: v.oy, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, lod: "near", level, night };
+      for (const src of moverSources) if (src.items) src.items(vv, dyn);
       const merged = dyn.length ? ms.concat(dyn).sort((a, b) => a.depth - b.depth) : ms;
       while (i < statics.length || j < merged.length) {
         const s = i < statics.length ? statics[i] : null, m = j < merged.length ? merged[j] : null;
         const it = m && (!s || m.depth < s.depth) ? (j++, m) : (i++, s);
+        if (it.draw) { // a seam item: {depth, wx, wy, wx1, wy1, draw(g, S, ox, oy)}
+          if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx1 < v.x0 - pad || it.wy1 < v.y0 - pad) continue;
+          it.draw(g, S, v.ox, v.oy); n++;
+          continue;
+        }
         if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx + it.sw < v.x0 - pad || it.wy + it.sh < v.y0 - pad) continue;
         if (!(ghost && it.rec && ghost.has(it.rec) && ghostBlit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v, gh.rect))) blit(it.img, it.sx, it.sy, it.sw, it.sh, it.wx, it.wy, v);
         if (it.extra) it.extra(g, v);
@@ -1232,11 +1241,13 @@
     // Rain or snow in screen space, density by viewport area (CSS px). Rain falls as slanted 2-px streaks,
     // 10-14 px long, along the way the drops drift; snow as 2-px flakes.
     const drops = [];
-    let lastRain = 0;
+    let lastRain = 0, dropSeed = 0x2545f491;
+    // a fixed LCG: the view draws no random numbers (view.md 7)
+    const rnd = () => (dropSeed = (Math.imul(dropSeed, 1664525) + 1013904223) >>> 0) / 4294967296;
     function weather(now, snow) {
       const k = scene.dpr, area = (cv.width / k) * (cv.height / k);
       const want = Math.round(area / (snow ? 7000 : 4000) * (scene.quality === "low" ? 0.5 : 1));
-      while (drops.length < want) drops.push({ x: Math.random() * cv.width, y: Math.random() * cv.height, s: 2 + Math.random() * 3, l: 10 + Math.random() * 4 });
+      while (drops.length < want) drops.push({ x: rnd() * cv.width, y: rnd() * cv.height, s: 2 + rnd() * 3, l: 10 + rnd() * 4 });
       const dt = Math.max(0, Math.min(0.1, (now - lastRain) / 1000 || 0)); lastRain = now;
       const vx = -80, vy = 520, vl = Math.hypot(vx, vy);
       if (snow) g.fillStyle = "rgba(255,255,255,.9)";
@@ -1244,7 +1255,7 @@
       for (let i = 0; i < want; i++) {
         const d = drops[i];
         d.y += (snow ? 40 : vy) * dt * (d.s / 3) * k; d.x += (snow ? Math.sin(d.y / 30) * 12 : vx * (d.s / 3)) * dt * k;
-        if (d.y > cv.height) { d.y = -16 * k; d.x = Math.random() * (cv.width + 60 * k); }
+        if (d.y > cv.height) { d.y = -16 * k; d.x = rnd() * (cv.width + 60 * k); }
         if (d.x < -16 * k) d.x = cv.width + 5;
         if (snow) { g.fillRect(d.x, d.y, 2 * k, 2 * k); continue; }
         const L = d.l * k;
@@ -1511,6 +1522,10 @@
         c.push({ hit: { kind: "place", id: r.p.id }, depth: sl && opaqueAt(r, wx, wy) ? sl.depth : r.depth - 1e6, mover: 0 });
       }
       for (const it of shelters) if (inBox(it.wx + 4, it.wy + 4, it.wx + it.sw - 2, it.wy + it.sh - 2)) c.push({ hit: { kind: "stop", id: it.ref }, depth: it.depth, mover: 0 });
+      for (const src of moverSources) {
+        const h = src.pick ? src.pick(wx, wy, tol) : null;
+        if (h) c.push({ hit: h, depth: h.depth != null ? h.depth : 1e9, mover: 1 });
+      }
       c.sort((a, b) => b.depth - a.depth || b.mover - a.mover);
       const ground = [];
       const [tx, ty] = proj.toTile(wx, wy);
@@ -1577,6 +1592,10 @@
     scene.isRoad = (x, y) => at(x, y) === "#";
     scene.driveOf = id => { const i = placeById.get(id); for (let k = 0; k < N; k++) if (driveOf[k] === i) return [k % W, Math.floor(k / W)]; return null; };
     scene.prewarm = () => { scene.eager = true; };
+    // The V1a-V1b seam (view.md 4.5): a mover source {items(v, out), marks(g, v, lod), pick(wx, wy, r) -> hit | null}.
+    // items pushes {depth, wx, wy, wx1, wy1, draw(g, S, ox, oy)} merged by depth at near; marks draws after the
+    // ground at mid and on top at far; v = {S, ox, oy, x0, y0, x1, y1, lod, level, night}. Returns a remover.
+    scene.addMovers = src => { moverSources.push(src); return () => { const k = moverSources.indexOf(src); if (k >= 0) moverSources.splice(k, 1); }; };
     return scene;
   };
 })();

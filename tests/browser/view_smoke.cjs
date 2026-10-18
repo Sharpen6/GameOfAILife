@@ -64,7 +64,7 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..", "..");
 const CLIENT = path.join(REPO, "client");
 const SHOTS = process.env.VIEW_SHOTS || "";
-const VIEW_SCRIPTS = ["proj", "art", "buildings", "actors", "scene", "movers", "camera", "minimap", "view"];
+const VIEW_SCRIPTS = ["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart", "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view"];
 const FACADE = ["setTown", "setState", "select", "focus", "highlight", "setOverlay", "ping", "setInset", "camera",
   "setMode", "start", "stop"];
 const DESKTOP = { width: 1440, height: 900 };
