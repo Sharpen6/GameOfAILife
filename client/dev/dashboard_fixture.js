@@ -24,7 +24,10 @@
 // host.send(msg) answers asynchronously, like a socket; host.onmessage = msg => ... gets every reply and push
 // (a JSON copy); host.start() / host.stop() run the frame loop; host.demote() pushes a "demoted".
 // Options: browser = the browser port's welcome (host.kind "browser", nobody controlled, llm_log empty);
-// slow = the AI player times out on about 40% of asks; fresh = Day 1 Mon 06:00 with no news or samples yet.
+// slow = the AI player times out on about 40% of asks; fresh = Day 1 Mon 06:00 with no news or samples yet;
+// backlog = how many game hours of decided forks happened before the welcome (default 10; the dev page's
+// ?backlog=90 fills the city's 500-fork LLM ring and most characters' rings of 30, for paging the LLM log).
+// Each stats people row also carries `llm`, the person's controller-decided forks since the city began.
 "use strict";
 (function () {
   const TOWN = {
@@ -495,6 +498,14 @@
       h: [[], [], [], []],
       major: true,
     },
+    family: { // forks.family_fork: Saturday evening, once a week for a household's adults
+      q: () => "It's Saturday evening and everyone's home. What shall we do?",
+      o: (a, w) => [`Take ${w.family} out to dinner at Corner Cafe`, `Cook a big dinner for ${w.family}`,
+        `A games night at home with ${w.family}`, "Let everyone do their own thing tonight"],
+      r: ["We've all earned a night out together.", "A proper meal with all of us round the table.",
+        "Nothing beats a board game with this lot.", "Everyone's tired, a quiet night is fine."],
+      h: [["A lovely evening together"], ["Makes a really tasty meal"], ["Laughs with the family"], ["A quiet night in"]],
+    },
     housing_trouble: {
       q: () => "The household is $640 in the red after the week's bills. What do you do?",
       o: () => ["Rent Elm Court, flat 1A at $180/week", "Ask Rina Mizrahi for help", "Cut back on everything",
@@ -553,7 +564,7 @@
         luck: LUCK[id] || 50, health: 70 + R() * 28, needs, reputation: ri(40, 75),
         controller: controlled.has(id) ? CONTROLLER : null, alive: true, state: "busy", activity: "relax_home",
         inside: null, x: 0, y: 0, vehicle: "walk", plan: null, nextAt: 0, decide: null, traits,
-        prompt: "", edited: false, learned: 0, rel: {}, memory: [], forks: [], llmForks: [], worthRing: [],
+        prompt: "", edited: false, learned: 0, rel: {}, memory: [], forks: [], llmForks: [], llmCount: 0, worthRing: [],
       };
       a.prompt = describe(a);
       W.agents.push(a);
@@ -886,9 +897,9 @@
     W.headlines = all.filter(e => e.importance === 2).slice(-20);
     for (const a of W.agents) if (a.alive && a.inside) [a.x, a.y] = placeById[a.inside].entry;
 
-    // Decided forks of the last ten hours: the llm_log (model and timeout) and every person's last 10.
+    // Decided forks of the last ten hours (or opt.backlog): the llm_log (model and timeout) and every person's last 10.
     const forks = [];
-    for (let t = now - 600; t < now; t += ri(1, 4)) {
+    for (let t = now - 60 * (opt.backlog > 0 ? opt.backlog : 10); t < now; t += ri(1, 4)) {
       const a = pick(living(W));
       forks.push(makeFork(W, a, t, a.controller && W.R() < 0.85 ? (W.R() < (W.slow ? 0.4 : 0.13) ? "timeout" : "model")
         : (W.R() < 0.4 ? "habit" : "default"), true));
@@ -918,9 +929,11 @@
 
   // --- decided forks ---------------------------------------------------------------------------------
 
-  function kindsFor(W, a) {
+  function kindsFor(W, a, tick) {
     const ks = ["hunger", "sleep", "lonely", "free_time", "invite"];
     if (a.age >= 18) ks.push("groceries");
+    const day = Math.floor(tick / 1440) % 7, m = tick % 1440; // Saturday 17:00-18:30, as forks.DINNER_FROM/UNTIL
+    if (a.age >= 18 && day === 5 && m >= 17 * 60 && m <= 20 * 60 - 90 && familyOf(W, a).length) ks.push("family");
     if (a.job && a.job.hourly_wage) ks.push("work", "work", "payday");
     const hh = W.hh[a.hh];
     if (a.age >= 18 && tenure(W, a.hh) === "owned") ks.push("upkeep");
@@ -928,12 +941,19 @@
     if (a.hh === "peretz" && a.age >= 18) ks.push("housing_trouble");
     return ks;
   }
+  // The rest of a's household, alive: who comes to the family evening.
+  function familyOf(W, a) { return W.hh[a.hh].members.filter(id => id !== a.id && W.byId[id].alive).map(id => W.byId[id]); }
+  function namesOf(people) {
+    const first = people.map(p => p.first);
+    return first.length > 1 ? `${first.slice(0, -1).join(", ")} and ${first[first.length - 1]}` : first.join("");
+  }
   function makeFork(W, a, tick, decidedBy, settled) {
-    const kind = W.pick(kindsFor(W, a)), T = FORK[kind];
+    const kind = W.pick(kindsFor(W, a, tick)), T = FORK[kind];
     const friends = Object.entries(a.rel).filter(([, r]) => r.kind === "friend").map(([id]) => W.byId[id].name);
     const m = tick % 1440;
     const ctx = { hm: `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`,
-      friend: friends.length ? W.pick(friends) : "an old friend", homeName: homeSpec[W.hh[a.hh].home].name };
+      friend: friends.length ? W.pick(friends) : "an old friend", homeName: homeSpec[W.hh[a.hh].home].name,
+      family: namesOf(familyOf(W, a)) };
     const options = T.o(a, ctx);
     const profile = W.ri(0, 3) === 0 ? W.ri(0, 3) : 0;
     let choice = profile;
@@ -958,6 +978,7 @@
     a.forks.push(f);
     if (a.forks.length > 10) a.forks.shift();
     if (f.decided_by === "model" || f.decided_by === "timeout") {
+      a.llmCount += 1;
       a.llmForks.push(f);
       if (a.llmForks.length > 30) a.llmForks.shift();
       W.llmRing.push(f);
@@ -1070,7 +1091,8 @@
     const people = alive.map(a => {
       const p = worthParts(W, a);
       return { id: a.id, household: a.hh, worth: round(p.worth), worth_24h: a.worthRing[0], cash: round(p.cash),
-        savings: round(p.savings), home_equity: round(p.home), job: a.job ? a.job.title : null, health: round(a.health) };
+        savings: round(p.savings), home_equity: round(p.home), job: a.job ? a.job.title : null, health: round(a.health),
+        llm: a.llmCount };
     }).sort((x, y) => y.worth - x.worth || cmp(x.id, y.id));
     const districts = [];
     for (const d of TOWN.districts) {
@@ -1158,8 +1180,14 @@
 
   // --- the host --------------------------------------------------------------------------------------
 
+  // An option the dev page's address gives (?backlog=90), for the ones client/dev/dashboard.html does not pass on.
+  function pageOption(name) {
+    try { return new URLSearchParams(window.location.search).get(name); } catch (e) { return null; }
+  }
+
   function createHost(options) {
-    const opt = Object.assign({ browser: false, slow: false, fresh: false, seed: 7, speed: 1, frameMs: 50 }, options || {});
+    const opt = Object.assign({ browser: false, slow: false, fresh: false, seed: 7, speed: 1, frameMs: 50,
+      backlog: Number(pageOption("backlog")) || 10 }, options || {});
     const W = buildWorld(opt);
     const host = { onmessage: null, speed: opt.speed, world: W, sent: [] };
     const plan = opt.fresh ? [] : script(W);

@@ -39,12 +39,24 @@
     // are walk frames; each cell is 16 x 30 with the feet at (8, 28).
     art.person = function (a) {
       const band = a.age != null && a.age < 13 ? "c" : a.age >= 65 ? "o" : "a";
-      return item(`pp:${a.id}:${band}`, 64, 120, 8, 28, (g, c) => {
-        const skin = SKIN[hash(a.id + "s") % SKIN.length];
-        const hair = band === "o" ? "#d4d4d4" : CV.hair(a.id);
-        const shirt = CV.shirtHex(a.id), pants = PANTS[hash(a.id + "p") % PANTS.length];
-        const shoes = SHOES[hash(a.id + "f") % 3];
-        const long = hash(a.id + "l") % 3 === 0; // longer hair
+      return item(`pp:${a.id}:${band}`, 64, 120, 8, 28, (g, c) => paintSheet(g, c, band, {
+        skin: SKIN[hash(a.id + "s") % SKIN.length], hair: band === "o" ? "#d4d4d4" : CV.hair(a.id),
+        shirt: CV.shirtHex(a.id), pants: PANTS[hash(a.id + "p") % PANTS.length], shoes: SHOES[hash(a.id + "f") % 3],
+        long: hash(a.id + "l") % 3 === 0 }));
+    };
+    // Townsfolk share 24 sheets (v = 0..23) in the same 64 x 120 layout, with a child size of each: 0.18 MP for
+    // the 24 adults. The shirt colour of sheet v is CV.folkShirt(v) (pings and picks use it).
+    const FOLK_HUES = [8, 28, 48, 90, 140, 170, 195, 215, 235, 260, 290, 330];
+    CV.folkShirt = v => CV.color.hslHex(FOLK_HUES[(v | 0) % 12], (v | 0) % 24 < 12 ? 62 : 45, (v | 0) % 24 < 12 ? 52 : 40);
+    art.folkSheet = function (v, child) {
+      v = ((v | 0) % 24 + 24) % 24;
+      const band = child ? "c" : v % 7 === 6 ? "o" : "a";
+      return item(`fs:${v}:${band}`, 64, 120, 8, 28, (g, c) => paintSheet(g, c, band, {
+        skin: SKIN[(v * 3 + 1) % SKIN.length], hair: band === "o" ? "#d4d4d4" : ["#3b2416", "#6b4423", "#1d1d1d", "#c9a14a", "#8a3b1c", "#b8b8b8"][(v * 5 + 2) % 6],
+        shirt: CV.folkShirt(v), pants: PANTS[(v * 7 + 3) % PANTS.length], shoes: SHOES[v % 3], long: v % 3 === 1 }));
+    };
+    function paintSheet(g, c, band, pal) {
+        const { skin, hair, shirt, pants, shoes, long } = pal;
         const child = band === "c", old = band === "o";
         for (let dir = 0; dir < 4; dir++) for (let fr = 0; fr < 4; fr++) {
           const cx = fr * 16, cy = dir * 30, flip = dir === 1 || dir === 3, back = dir >= 2;
@@ -95,13 +107,13 @@
           CV.ellipse(g, fr * 16 + 8, dir * 30 + 28, 5, 1, "rgba(0,0,0,0.28)");
           g.globalCompositeOperation = "source-over";
         }
-      });
-    };
+    }
 
     // --- vehicles -----------------------------------------------------------------------------------------
     // Drawn through the projection around tile-local (0.5, 0.5). d: 0 heading +x, 1 +y, 2 -x, 3 -y.
-    function vehicle(key, d, L, Wd, draw) {
-      return oriented(key, 112, 84, 56, 58, g => {
+    // h: canvas height (v2's 84; long vehicles take 92 so the flat view's shadow fits below the anchor)
+    function vehicle(key, d, L, Wd, draw, h) {
+      return oriented(key, 112, h || 84, 56, 58, g => {
         const ax = d % 2 === 0, hl = (ax ? L : Wd) / 2, hw = (ax ? Wd : L) / 2;
         draw(g, 0.5 - hl, 0.5 - hw, 0.5 + hl, 0.5 + hw, ax);
       });
@@ -124,6 +136,7 @@
       }
     }
     art.car = function (color, kind, d) {
+      if (kind === "van" || kind === "truck") return goods(color, kind, d);
       const body = kind === "taxi" ? "#f2c40c" : kind === "ambulance" ? "#f4f4f4" : color;
       const L = kind === "ambulance" ? 0.74 : 0.62, Wd = kind === "ambulance" ? 0.36 : 0.32;
       return vehicle(`car:${body}:${kind}:${d}`, d, L, Wd, (g, x0, y0, x1, y1, ax) => {
@@ -192,6 +205,28 @@
         CV.pixelText(g, line, Math.round(c[0]) - 1, Math.round(c[1]) - 2, "#ffffff");
       });
     };
+    // Delivery van (a short high box, cab in the body colour) and box truck (a longer, taller box behind a cab).
+    function goods(color, kind, d) {
+      const truck = kind === "truck", L = truck ? 1.0 : 0.72, Wd = truck ? 0.4 : 0.34;
+      return vehicle(`car:${color}:${kind}:${d}`, d, L, Wd, (g, x0, y0, x1, y1, ax) => {
+        poly(g, [P(x0 + 0.04, y0 + 0.07), P(x1 + 0.1, y0 + 0.07), P(x1 + 0.1, y1 + 0.09), P(x0 + 0.04, y1 + 0.09)], "rgba(0,0,0,.3)");
+        wheels(g, x0, y0, x1, y1);
+        const f = d < 2 ? 1 : -1, cab = truck ? 0.28 : 0.2;
+        let bx0 = x0, bx1 = x1, by0 = y0, by1 = y1, kx0 = x0, kx1 = x1, ky0 = y0, ky1 = y1;
+        if (ax) { if (f > 0) { bx1 = x1 - cab; kx0 = x1 - cab; } else { bx0 = x0 + cab; kx1 = x0 + cab; } }
+        else { if (f > 0) { by1 = y1 - cab; ky0 = y1 - cab; } else { by0 = y0 + cab; ky1 = y0 + cab; } }
+        const cabC = truck ? shade(color, 0.9) : color;
+        boxAt(g, kx0, ky0, kx1, ky1, 2, truck ? 16 : 13, cabC, shade(cabC, 1.1));
+        for (const fc of FACES) { const F = faceFn(fc, kx0, ky0, kx1, ky1); poly(g, quad(F, 0.03, F.len - 0.03, truck ? 10 : 8, truck ? 15 : 12), "#9fcdeb"); }
+        const boxC = truck ? "#eceae4" : color;
+        boxAt(g, bx0, by0, bx1, by1, 3, truck ? 27 : 17, boxC, shade(boxC, 1.08));
+        for (const fc of FACES) {
+          const F = faceFn(fc, bx0, by0, bx1, by1);
+          if (F.len > 0.4) poly(g, quad(F, 0.04, F.len - 0.04, truck ? 12 : 9, truck ? 16 : 11), truck ? color : shade(color, 0.8));
+        }
+        lights(g, x0, y0, x1, y1, d, 4, 6);
+      }, 92);
+    }
     art.van = function (d) {
       return vehicle(`van:${d}`, d, 0.9, 0.38, (g, x0, y0, x1, y1, ax) => {
         poly(g, [P(x0 + 0.04, y0 + 0.07), P(x1 + 0.1, y0 + 0.07), P(x1 + 0.1, y1 + 0.09), P(x0 + 0.04, y1 + 0.09)], "rgba(0,0,0,.3)");
@@ -225,8 +260,9 @@
       g.beginPath(); g.moveTo(p1[0] + ox, p1[1] + oy); g.lineTo(p2[0] + ox, p2[1] + oy); g.lineTo(p3[0] + ox, p3[1] + oy); g.lineTo(p4[0] + ox, p4[1] + oy); g.closePath(); g.fill();
     });
 
-    // The plane: a small airliner seen from above-left, and its shadow far below.
-    art.plane = () => item("plane", 64, 40, 32, 20, g => {
+    // The plane: a small airliner seen from above-left, outlined dark so it reads as a craft overhead even
+    // over a pale roof, and its shadow far below.
+    art.plane = () => item("plane", 64, 40, 32, 20, (g, c) => {
       const W = "#f4f6fa", D = "#c8ced8";
       g.fillStyle = D; g.fillRect(14, 19, 36, 5);
       g.fillStyle = W; g.fillRect(12, 17, 38, 5); g.fillRect(48, 18, 4, 3);
@@ -236,9 +272,10 @@
       g.fillStyle = W; g.fillRect(28, 10, 10, 8); g.fillRect(30, 7, 6, 3);
       g.fillStyle = W; g.fillRect(10, 12, 5, 6); g.fillStyle = "#4b6ea8"; g.fillRect(10, 12, 3, 5);
       g.fillStyle = D; g.fillRect(9, 20, 8, 2);
+      outline(c, "#2a3140");
     });
     art.planeShadow = () => item("planeS", 64, 24, 32, 12, g => {
-      g.fillStyle = "rgba(0,0,0,0.16)";
+      g.fillStyle = "rgba(0,0,0,0.28)";
       g.fillRect(12, 10, 38, 4); g.fillRect(26, 4, 10, 16); g.fillRect(10, 8, 6, 8);
     });
   });

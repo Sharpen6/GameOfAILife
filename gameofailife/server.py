@@ -14,24 +14,33 @@ See `docs/protocol.md` for every message.
 from __future__ import annotations
 
 import asyncio
+import errno
+import ipaddress
 import json
 import math
 import mimetypes
+import os
 import socket
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from . import transit
+from . import people, transit
 from .clock import TICKS_PER_REAL_SECOND
 from .sim import Simulation
-from .ws import ConnectionClosed, WebSocket, server_handshake
+from .ws import ConnectionClosed, MessageTooBig, WebSocket, server_handshake
 
 CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 HOUSING_EVERY = 40  # frames carry `lots` and `homes` when they change, and in every 40th frame anyway
+REGION_HOUSING_CHECK = 20  # the region's `lots` and `homes` are compared every 20th frame ...
+REGION_HOUSING_EVERY = 200  # ... and sent anyway every 200th (PLAN 2.11)
+OCC_EVERY = 40  # a frame carries `occ` at most every 40th frame ...
+OCC_TICKS = 10  # ... once the last one sent is 10 ticks old (PLAN 2.11)
+CATCH_UP_FRAMES = 4  # a late loop pass runs at most this many frames' worth of ticks (folk.md 9)
 WELCOME_HISTORY, WELCOME_NEWS, WELCOME_HEADLINES, WELCOME_LLM_LOG = 80, 120, 20, 80
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
 AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in the inbox
@@ -40,6 +49,8 @@ PACED = ("send_message", "invite")  # what lands on other controllers and in eve
 PACE_RATE, PACE_BURST = 20, 100  # how many of those one controller may send a second, after a burst
 STATS_SECONDS = 3.0  # a stats push this often while the city runs ...
 STATS_MAJOR_SECONDS = 0.5  # ... and this soon after the last one when a major event happened
+HEADER_SECONDS = 10.0  # how long a client may take to send its request line and headers; a session has no limit
+HEADER_LINES, HEADER_BYTES = 100, 16384  # the most header lines, and bytes of them, one request may carry
 
 
 class Encoded(str):
@@ -56,12 +67,70 @@ def encoded(kind: str, msg: dict) -> Encoded:
     return text
 
 
+def local_host(host: str) -> bool:
+    """True when a Host header names `localhost` or an IP address (with or without a port): never a DNS name, which
+    whoever runs that name's DNS could point at this machine (DNS rebinding)."""
+    try:
+        parts = urlsplit(f"//{host}")
+        _ = parts.port  # a port that is not a number from 0 to 65535 raises ValueError
+    except ValueError:  # also an unclosed "[" and the like
+        return False
+    if "@" in parts.netloc or parts.path or parts.query or parts.fragment:
+        return False
+    name = parts.hostname or ""
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def origin_allowed(headers: dict[str, str]) -> bool:
+    """Whether a WebSocket upgrade may go ahead (docs/protocol.md, Connecting). Its Host must be `localhost` or an
+    IP address, whatever the client. A browser also sends `Origin`, and that must be this very address: the page God
+    loaded from here. The Python and Node controllers send no Origin."""
+    host = headers.get("host", "").lower()
+    if not local_host(host):
+        return False
+    origin = headers.get("origin")
+    if origin is None:
+        return True
+    try:
+        return urlsplit(origin).netloc.lower() == host
+    except ValueError:
+        return False
+
+
+def url_host(host: str, bound: str) -> str:
+    """The host for the startup message's URLs, for --host `host` listening on address `bound`: one that /ws lets
+    in. Every interface (0.0.0.0) is `localhost` here; a DNS name is the address it resolved to."""
+    if host in ("", "0.0.0.0", "::") or host.lower() == "localhost":
+        return "localhost"
+    for address in (host, bound):
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        return f"[{ip}]" if ip.version == 6 else str(ip)
+    return bound
+
+
+def frame_span(elapsed: float) -> float:
+    """The real seconds a loop pass turns into ticks: the time since the last pass, exactly FRAME_SECONDS when it
+    was on time (to the float, so an on-time loop runs v2's tick sequence), at most CATCH_UP_FRAMES frames."""
+    if abs(elapsed - FRAME_SECONDS) < 1e-9:
+        return FRAME_SECONDS
+    return max(0.0, min(elapsed, CATCH_UP_FRAMES * FRAME_SECONDS))
+
+
 def merge_state(old: dict, new: dict) -> dict:
     """One state frame for two (PLAN 3.14): the newer frame, with the older one's events before its own, the
     older one's fork summaries upserted by id (the newer copy wins, in the older one's place), and the older one's
-    `lots` and `homes` when the newer frame lacks them. Neither frame is changed."""
+    `lots`, `homes` and `occ` when the newer frame lacks them. Neither frame is changed."""
     state = new["state"]
-    kept = {k: old["state"][k] for k in ("lots", "homes") if k in old["state"] and k not in state}
+    kept = {k: old["state"][k] for k in ("lots", "homes", "occ") if k in old["state"] and k not in state}
     if kept:
         state = {**state, **kept}
     forks = list(old["forks"])
@@ -176,6 +245,7 @@ class GameServer:
     def __init__(self, sim: Simulation, speed: int = 1):
         self.sim = sim
         self.speed = speed
+        sim.speed = speed  # type: ignore[attr-defined]  # fork messages carry minutes_per_second (protocol, Fork)
         self.god: WebSocket | None = None
         self.observers: set[WebSocket] = set()
         self.controllers: dict[str, WebSocket] = {}
@@ -187,6 +257,7 @@ class GameServer:
         self._loop_task: asyncio.Task | None = None
         self._pending_ticks = 0.0
         self._frames = 0  # state frames encoded so far
+        self._occ_tick: int | None = None  # the tick of the last `occ` a frame carried
         self._housing_sent: dict[str, str] = {}  # the encoded `lots` and `homes` the views last got
         self._stats_at = time.monotonic()  # when the last stats push went out
         self._stats_stepped = False  # a tick ran since then
@@ -215,9 +286,14 @@ class GameServer:
             await self._server.wait_closed()
 
     async def _run(self) -> None:
+        # folk.md 9: each pass sleeps what is left of its frame after the last pass's work, then runs the ticks
+        # the real time since the last pass is worth (frame_span), so a slow tick costs speed, not ticks.
+        last = time.monotonic()
         while True:
-            await asyncio.sleep(FRAME_SECONDS)
-            self._pending_ticks += FRAME_SECONDS * TICKS_PER_REAL_SECOND * self.speed
+            await asyncio.sleep(max(0.0, FRAME_SECONDS - (time.monotonic() - last)))
+            now = time.monotonic()
+            self._pending_ticks += frame_span(now - last) * TICKS_PER_REAL_SECOND * self.speed
+            last = now
             stepped = False
             while self._pending_ticks >= 1:
                 self._pending_ticks -= 1
@@ -239,6 +315,7 @@ class GameServer:
         if viewers and (stepped or events or forks):
             state = self.sim.state_json(housing=False)
             state.update(self._housing_changes())
+            self._add_occ(state)
             frame = encoded("state", {"type": "state", "speed": self.speed, "state": state, "events": events,
                                       "forks": forks})
             for ws in viewers:
@@ -263,9 +340,15 @@ class GameServer:
 
     def _housing_changes(self) -> dict:
         """The frame's `lots` and `homes`: each one when its encoded JSON differs from what was last sent, and
-        both in every HOUSING_EVERY-th frame. Views keep the last copy they got."""
+        both in every HOUSING_EVERY-th frame. In the region they are compared only every REGION_HOUSING_CHECK-th
+        frame and sent anyway every REGION_HOUSING_EVERY-th (PLAN 2.11). Views keep the last copy they got."""
         self._frames += 1
-        every = self._frames % HOUSING_EVERY == 0
+        if self.sim.world == "region":
+            if self._frames % REGION_HOUSING_CHECK:
+                return {}
+            every = self._frames % REGION_HOUSING_EVERY == 0
+        else:
+            every = self._frames % HOUSING_EVERY == 0
         out = {}
         for key, value in self.sim.housing_maps().items():
             text = json.dumps(value)
@@ -274,10 +357,18 @@ class GameServer:
                 out[key] = value
         return out
 
+    def _add_occ(self, state: dict) -> None:
+        """`occ` in every OCC_EVERY-th frame once the last one sent is OCC_TICKS old (the welcome always has it)."""
+        tick = self.sim.clock.tick
+        if self._frames % OCC_EVERY == 0 and (self._occ_tick is None or tick - self._occ_tick >= OCC_TICKS):
+            state["occ"] = self.sim.folk.occ()
+            self._occ_tick = tick
+
     def _welcome_god(self) -> dict:
         """A new God view's (or watcher's) start: the town once, the full state, and the recent past."""
         sim = self.sim
         state = sim.state_json(housing=True)
+        state["occ"] = sim.folk.occ()  # who is in each place, folk and named (PLAN 2.11; frames send it now and then)
         return {"type": "welcome", "role": "god", "town": sim.town_json(), "state": state,
                 "history": sim.history[-WELCOME_HISTORY:], "news": sim.news[-WELCOME_NEWS:],
                 "headlines": sim.headlines[-WELCOME_HEADLINES:], "llm_log": sim.llm_log[-WELCOME_LLM_LOG:],
@@ -289,19 +380,19 @@ class GameServer:
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._connections.add(writer)
         try:
-            request = await reader.readline()
-            parts = request.decode(errors="replace").split()
+            # The request line and headers get HEADER_SECONDS (a TimeoutError is an OSError); the session after
+            # an upgrade has no time limit.
+            parts, headers = await asyncio.wait_for(self._preamble(reader), HEADER_SECONDS)
             if len(parts) < 2:
                 return
-            headers = {}
-            while True:
-                line = (await reader.readline()).decode(errors="replace").strip()
-                if not line:
-                    break
-                k, _, v = line.partition(":")
-                headers[k.strip().lower()] = v.strip()
+            if headers is None:
+                await self._refuse(writer, "431 Request Header Fields Too Large")
+                return
             path = parts[1].split("?")[0]
             if path == "/ws" and headers.get("upgrade", "").lower() == "websocket":
+                if not origin_allowed(headers):  # another site's page, or a DNS name pointed here
+                    await self._refuse(writer, "403 Forbidden")
+                    return
                 ws = await server_handshake(reader, writer, headers)
                 await self._session(ws)
                 return
@@ -311,6 +402,29 @@ class GameServer:
         finally:
             self._connections.discard(writer)
             writer.close()  # after a session too: before Python 3.13 nothing else closes the socket
+
+    async def _preamble(self, reader: asyncio.StreamReader) -> tuple[list[str], dict[str, str] | None]:
+        """The request line's words and the headers (names lowercased). The headers are None when there are more
+        than HEADER_LINES of them or more than HEADER_BYTES in all; the rest is then left unread."""
+        parts = (await reader.readline()).decode(errors="replace").split()
+        headers: dict[str, str] = {}
+        if len(parts) < 2:
+            return parts, headers
+        lines = size = 0
+        while True:
+            raw = await reader.readline()
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                return parts, headers
+            lines, size = lines + 1, size + len(raw)
+            if lines > HEADER_LINES or size > HEADER_BYTES:
+                return parts, None
+            k, _, v = line.partition(":")
+            headers[k.strip().lower()] = v.strip()
+
+    async def _refuse(self, writer: asyncio.StreamWriter, status: str) -> None:
+        writer.write(f"HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode())
+        await writer.drain()
 
     async def _static(self, writer: asyncio.StreamWriter, path: str) -> None:
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
@@ -452,6 +566,10 @@ class GameServer:
             while True:
                 try:
                     msg = json.loads(await ws.recv())
+                except MessageTooBig as exc:  # read past unparsed, so it has no req_id to answer with
+                    why = f"the most the server reads is {exc.limit:,} bytes, so it was dropped unread"
+                    await self._send(ws, {"type": "error", "error": f"message too large: {why}"})
+                    continue
                 except (ValueError, RecursionError):  # also bad UTF-8, a too-long number, deep nesting
                     await self._send(ws, {"type": "error", "error": "messages must be JSON"})
                     continue
@@ -520,7 +638,7 @@ class GameServer:
                     wanted = [a.id for a in self.sim.living() if not a.controller]
                 if not isinstance(wanted, list):
                     raise TypeError('characters must be a list of ids or "all"')
-                wanted = [str(w) for w in wanted]
+                wanted = list(dict.fromkeys(str(w) for w in wanted))  # a repeated id is claimed, and announced, once
                 claimed = [aid for aid in wanted if self.sim.claim(aid, name)]
                 welcome = {
                     "type": "welcome", "role": "controller", "name": name, "characters": claimed,
@@ -548,16 +666,19 @@ class GameServer:
                 raise TypeError("luck must be a number")
             ok = self.sim.set_luck(str(msg.get("agent_id")), float(luck))
             return {"type": "luck_set", "ok": ok, "agent_id": msg.get("agent_id"),
-                    "luck": self.sim.agents[msg["agent_id"]].luck if ok else None}
+                    "luck": self.sim.luck_of(str(msg["agent_id"])) if ok else None}
         if t == "set_speed":
             speed = int(msg.get("speed", 1))
             self.speed = speed if speed in SPEEDS else 1
+            self.sim.speed = self.speed  # type: ignore[attr-defined]
             return {"type": "speed", "speed": self.speed}
         if t == "pause":
             self.speed = 0
+            self.sim.speed = 0  # type: ignore[attr-defined]  # paused: fork messages carry no minutes_per_second
             return {"type": "speed", "speed": 0}
         if t == "resume":
             self.speed = self.speed or 1
+            self.sim.speed = self.speed  # type: ignore[attr-defined]
             return {"type": "speed", "speed": self.speed}
         if t == "get_agent":
             data = self.sim.agent_json(str(msg.get("agent_id")))
@@ -567,6 +688,8 @@ class GameServer:
             return {"type": "home", "home": home} if home else {"type": "error", "error": "unknown home"}
         if t == "get_stats":
             return self.sim.stats_json(full=True)
+        if t == "get_folk":
+            return {"type": "folk", "v": self.sim.folk.v, "rows": self.sim.folk.roster_rows(self.sim)}
         if t == "get_decisions":
             page = self.sim.decisions(msg.get("agent_id"), msg.get("before"), msg.get("limit"))
             return page if page is not None else {"type": "error", "error": "unknown character"}
@@ -600,14 +723,14 @@ class GameServer:
             answers = {
                 "possessions": lambda: sim.possessions(agent),
                 "attributes": agent.attributes,
-                "relationships": lambda: {oid: {**r.to_json(), "name": sim.agents[oid].name}
-                                          for oid, r in agent.relationships.items()},
+                "relationships": lambda: {oid: people.rel_row(sim, oid, r) for oid, r in agent.relationships.items()},
                 "memory": lambda: agent.memory[-30:],
                 "inbox": lambda: agent.inbox[-20:],
                 "world": lambda: {"time": sim.clock.stamp(), "season": sim.clock.season, "weather": sim.weather,
                                   "places": {p.id: {"name": p.name, "kind": p.kind, "district": p.district,
                                                     "open": p.is_open(sim.clock.hour)}
-                                             for p in sim.town.places.values()},
+                                             for p in sim.town.places.values()
+                                             if sim.town.millbrook_ids is None or p.id in sim.town.millbrook_ids},
                                   "timetable": transit.timetable_json()},
                 "people": lambda: {a.id: a.name for a in sim.living()},
                 "market": lambda: sim.market_json(),
@@ -624,11 +747,38 @@ class GameServer:
         return {"type": "error", "error": f"unknown message type {t!r}"}
 
 
+def _listen_failed(exc: OSError, host: str, port: int) -> SystemExit:
+    """The one-line startup error for a port that is taken or an address that is not this machine's."""
+    if exc.errno == errno.EADDRINUSE:
+        return SystemExit(f"Port {port} is already in use on {host} (is GameOfAILife already running?). "
+                          "Try --port 0 for any free port, or another --port.")
+    why = os.strerror(exc.errno) if exc.errno and exc.errno > 0 else exc.strerror or str(exc)  # gaierror: < 0
+    return SystemExit(f"Could not listen on {host}:{port}: {why}. Check --host and --port.")
+
+
+def check_listen(host: str, port: int) -> None:
+    """Fail fast, before the region and its townsfolk are built (a few seconds), when the server could not listen
+    on host:port; `serve` checks again when it really starts."""
+    try:
+        infos = socket.getaddrinfo(host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+        family, kind, proto, _, address = infos[0]
+        with socket.socket(family, kind, proto) as probe:
+            if os.name == "posix":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as asyncio.start_server does
+            probe.bind(address)
+    except OSError as exc:
+        raise _listen_failed(exc, host, port) from None
+
+
 async def serve(sim: Simulation, host: str, port: int, speed: int = 1) -> None:
     server = GameServer(sim, speed)
-    actual = await server.start(host, port)
-    print(f"GameOfAILife is running. Open http://{host if host != '0.0.0.0' else 'localhost'}:{actual} to watch as God.")
-    print(f"Controllers connect to ws://{host if host != '0.0.0.0' else 'localhost'}:{actual}/ws")
+    try:
+        actual = await server.start(host, port)
+    except OSError as exc:  # only here, at startup: the port is taken, or --host is not an address of this machine
+        raise _listen_failed(exc, host, port) from None
+    shown = url_host(host, server._server.sockets[0].getsockname()[0])
+    print(f"GameOfAILife is running. Open http://{shown}:{actual} to watch as God.")
+    print(f"Controllers connect to ws://{shown}:{actual}/ws")
     try:
         await asyncio.Event().wait()
     finally:

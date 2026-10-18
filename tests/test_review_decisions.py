@@ -13,7 +13,7 @@ from gameofailife import sim as sim_module
 from gameofailife.__main__ import run_headless
 from gameofailife.clock import MINUTES_PER_DAY
 from gameofailife.forks import (Fork, Option, Outcome, build_fork, free_time_fork, groceries_fork, hunger_fork, invite_fork,
-                                payday_fork, work_fork)
+                                payday_fork, work_fork, work_lead)
 from gameofailife.server import GameServer
 from gameofailife.sim import ANSWER_SECONDS, GROCERY_COST, SHIFT_MARGIN, Simulation
 
@@ -83,7 +83,7 @@ class TestChoiceHappensAtLeaveTime(Case):
 
     def test_answer_after_leave_time_still_goes_shopping(self):
         sami = self.sim.agents["sami"]
-        self.at(5, 10)  # Saturday; his chef shift starts at 11:00
+        self.at(5, 9)  # Saturday; his chef shift starts at 11:00 (an hour later the shop would run into it)
         sami.controller = "bot"
         fork = payday_fork(self.sim, sami)
         with always_ask():
@@ -160,9 +160,11 @@ class TestChoiceHappensAtLeaveTime(Case):
     def test_park_walk_at_leave_time_still_gets_to_work(self):
         ari = self.sim.agents["ari"]
         self.at(0, 9)
-        self.sim.clock.tick = self.leave_tick("ari")  # Monday, when he must set off for the office
+        # Package D item 11: no free-time fork opens inside the work fork's window, so it is built just before it.
+        self.sim.clock.tick = self.sim._shift_start_tick(ari) - work_lead(self.sim, ari) - 1
         ari.needs["fun"] = 20
         fork = free_time_fork(self.sim, ari)
+        self.sim.clock.tick = self.leave_tick("ari")  # Monday, when he must set off for the office
         park = self.sim.town.places[fork.options[0].steps[0][1]]  # the park nearest him
         self.assertEqual((park.kind, fork.options[0].label), ("park", f"Walk in {park.name}"))
         self.sim._decide(ari, fork, 0, "timeout", "No answer in time; played the default.")
@@ -263,6 +265,7 @@ class TestSavingsWithoutGoal(Case):
     def test_goal_saving_unchanged(self):
         ari = self.sim.agents["ari"]
         saved = ari.savings
+        ari.goal["target"] = 1000.0  # package D item 9: cash on hand that covers the goal buys it outright
         self.at(4, 18)
         fork = payday_fork(self.sim, ari)
         self.sim._decide(ari, fork, 0, "model", "")
@@ -412,7 +415,7 @@ class TestOneLateAnswer(Case):
         for _ in range(5):
             self.assertEqual(self.sim.answer(fork.id, late, "again", controller="bot"),
                              {"accepted": False, "error": "too late"})
-        self.assertEqual(dana.profile.traits[tag], 0.54)  # moved once: 0.5 + 0.04
+        self.assertEqual(dana.profile.traits[tag], 0.53)  # moved once: 0.5 + 0.04 x (1 - the options' mean 0.25), v3 D 17
         self.assertEqual(len(dana.profile.learned), 1)
         self.assertEqual(fork.late_answer, {"choice": late, "reason": "first"})
 
@@ -527,17 +530,25 @@ class TestOldAgeOdds(Case):
     """Finding 54: the comment's odds match the code."""
 
     def test_monthly_odds_at_74_and_80(self):
-        for age, monthly in ((74, 0.0075), (80, 0.036)):
+        # v3 (L2): life's daily mortality (life.md 5.5) replaces v2's old-age roll at midnight. With no chronic
+        # condition and good health the daily odds are DEATH_YEAR[age] x PACE["death"] / 360 at Luck 50: about
+        # 0.24% a month at 74 and 0.41% at 80.
+        from gameofailife import dice, life, life_tables, people
+
+        for age, monthly in ((74, 0.0024), (80, 0.0041)):
             sim = Simulation(seed=1)
-            sim.agents["david"].age = age
+            david = sim.agents["david"]
+            david.age, david.health = age, 90.0
+            david.life.chronic, david.life.treated, david.life.conditions = [], [], []
             odds = {}
 
-            def record(agent, what, p, roll, base=None):
-                odds[agent.id, what] = p  # the unrounded daily chance
+            def record(sim_, p, what, prob, roll):
+                odds[p.id, what] = prob  # the unrounded daily chance
 
-            with mock.patch.object(sim, "_log_roll", record):
-                sim._new_day()
-            self.assertAlmostEqual(1 - (1 - odds["david", "old_age"]) ** 30, monthly, delta=0.001)
+            with mock.patch.object(people, "log_roll", record):
+                life._health(sim, david, dice.stream(1, dice.DAY_HEALTH, "david", 0), 0)
+            self.assertEqual(odds["david", "death"], life_tables.DEATH_YEAR[age] * life.PACE["death"] / 360)
+            self.assertAlmostEqual(1 - (1 - odds["david", "death"]) ** 30, monthly, delta=0.0002)
 
 
 if __name__ == "__main__":

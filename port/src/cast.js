@@ -12,6 +12,7 @@
   const { Rng, r2, mix } = G.rng;
 
   const CAST_SIZE = 60;
+  const START_ENERGY = 85; // the city starts at 05:00, just after waking: energy 85-100 (the drawn 60-90 halved onto it)
 
   const job = (title, place, wage, start, end, days = [0, 1, 2, 3, 4]) => new Job(title, place, wage, start, end, days.slice());
 
@@ -158,6 +159,7 @@
         x: place.entry[0], y: place.entry[1], inside: place.id, profile: new Profile(traits), savings });
       const needs = {};
       for (const n of Object.keys(agent.needs)) needs[n] = rng.uniform(60, 90);
+      needs.energy = START_ENERGY + (needs.energy - 60) / 2; // the day starts like a morning
       agent.needs = needs;
       households.get(hid).member_ids.push(aid);
       agents.set(aid, agent);
@@ -367,7 +369,7 @@
   }
 
   G.cast = {
-    CAST_SIZE, job, NAMED, NAMED_HOMES, SAVINGS, FRIENDS, GOALS, GOAL_POOL, SLOTS, TEMPLATES, SURNAMES, FEMALE, MALE,
+    CAST_SIZE, START_ENERGY, job, NAMED, NAMED_HOMES, SAVINGS, FRIENDS, GOALS, GOAL_POOL, SLOTS, TEMPLATES, SURNAMES, FEMALE, MALE,
     CAR_ODDS, RETIREE_CAR, MONEY, SAVINGS_RANGE, GOAL_CHANCE, _student_job, build_cast, golden,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

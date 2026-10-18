@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import importlib.util
+import sys
 
-from .server import serve
-from .sim import Simulation
+from .server import check_listen, serve
+from .sim import WORLDS, Simulation
 
 
 def main() -> None:
@@ -20,9 +22,27 @@ def main() -> None:
     ap.add_argument("--luck-log", help="append every hidden odds roll to this JSONL file")
     ap.add_argument("--headless", action="store_true", help="simulate without a server and print what happened")
     ap.add_argument("--days", type=float, default=3, help="days to simulate with --headless")
+    ap.add_argument("--world", default="region", choices=WORLDS,
+                    help="region: Millbrook in the region with its railway (default); millbrook: the 80 x 50 town alone")
+    ap.add_argument("--folk", type=int, default=1000,
+                    help="townsfolk living default lives in the region (0 in millbrook; at most what its homes take, "
+                         "about 1,300: more is cut to that with a notice)")
     args = ap.parse_args()
 
-    sim = Simulation(seed=args.seed, luck_log_path=args.luck_log)
+    if not args.headless:
+        check_listen(args.host, args.port)  # one line and out, before the region and its townsfolk are built
+    folk = max(0, args.folk)
+    if folk and importlib.util.find_spec(f"{__package__}.folk") is None:
+        print("The townsfolk are not in this build yet: running with --folk 0.", file=sys.stderr)
+        folk = 0
+    try:
+        sim = Simulation(seed=args.seed, luck_log_path=args.luck_log, world=args.world, folk=folk)
+    except ValueError as err:  # folk_gen.TooManyFolk: more townsfolk than the region's homes take
+        limit = getattr(err, "limit", None)
+        if limit is None:
+            raise
+        print(f"--folk {folk}: {err}; running with --folk {limit}.", file=sys.stderr)
+        sim = Simulation(seed=args.seed, luck_log_path=args.luck_log, world=args.world, folk=limit)
     if args.headless:
         run_headless(sim, args.days)
         return

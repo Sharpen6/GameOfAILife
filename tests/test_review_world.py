@@ -190,7 +190,8 @@ class OpeningHoursForksTest(unittest.TestCase):
         eli = self.hungry("eli")
         self.assertNotIn(3, eli.job.workdays)  # Thursday: no shift to get to
         first, market = min((p.hours[0] * 60 - self.sim.walk_minutes(eli, p.id), p.id)
-                            for p in self.sim.town.places.values() if p.kind == "market")
+                            for p in self.sim.town.places.values() if p.kind == "market"
+                            and self.sim.walk_minutes(eli, p.id) <= forks.MAX_OUTING_MINUTES)  # within reach
         at(self.sim, 3, 0, first - 7)  # would arrive 7 minutes before any market opens
         self.assertIsNone(groceries_fork(self.sim, eli))
         at(self.sim, 3, 0, first + 3)  # arrives 3 minutes after the first one opens
@@ -326,8 +327,8 @@ class ShutOnArrivalTest(unittest.TestCase):
 class PaydayAloneTest(unittest.TestCase):
     """Findings 10, 22: people living alone were offered a family dinner with no family."""
 
-    def payday(self, sim: Simulation, aid: str) -> Fork:
-        at(sim, 4, 18)  # Friday evening
+    def payday(self, sim: Simulation, aid: str, day: int = 4) -> Fork:
+        at(sim, day, 18)  # Friday evening (or another day's)
         agent = sim.agents[aid]
         agent.money = 300.0
         fork = payday_fork(sim, agent)
@@ -357,10 +358,12 @@ class PaydayAloneTest(unittest.TestCase):
 
     def test_family_still_offered_dinner(self):
         sim = Simulation(seed=SEED)
-        fork = self.payday(sim, "dana")
+        fork = self.payday(sim, "dana", day=5)  # package D item 5: a dinner out is a Saturday evening's
         treat = fork.options[option_for(fork, "family_dinner")]
         cafe = sim.town.places[treat.steps[0][1]]  # the cafe nearest home: the whole family goes to that one
-        self.assertEqual(treat.label, f"Treat the family to dinner at {cafe.name}")
+        from gameofailife.forks import names
+        party = [sim.agents[m] for m in sim.household(sim.agents["dana"]).member_ids if m != "dana"]
+        self.assertEqual(treat.label, f"Treat {names(party)} to dinner at {cafe.name}")
         self.assertEqual(treat.extra, {"family": True, "place": cafe.id})
 
 

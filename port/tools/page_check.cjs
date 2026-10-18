@@ -5,7 +5,9 @@
 //
 // Opens the page from file:// in Chromium, waits for the city to run, opens a person (through Dash when the
 // client has the dashboard, else from the classic roster), and checks: no console errors or page errors, no
-// request leaves the page, the clock moves, the person's panel shows, and no a[href*="character.html"] exists.
+// request leaves the page, the clock moves, the person's panel shows, no a[href*="character.html"] exists, the
+// page did not fall back to Millbrook (it reports the world and townsfolk it runs: `world`, `folk`), and a region
+// opens on its default view (view.md 3.7: CityView.DEFAULT_VIEW, within one tile; `camera`).
 // Prints one JSON line. Without Playwright or a browser it can launch it prints {"skip": why} and exits 0.
 "use strict";
 
@@ -47,6 +49,15 @@ async function main() {
   const result = { ok: false, errors, external };
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await page.addInitScript(() => { // keep the CityView instance game.js makes (window.__view)
+      const CV = window.CityView = window.CityView || {};
+      let create = null;
+      Object.defineProperty(CV, "create", {
+        configurable: true, enumerable: true,
+        get() { return create && function () { const v = create.apply(this, arguments); window.__view = v; return v; }; },
+        set(fn) { create = fn; },
+      });
+    });
     page.on("console", msg => { if (msg.type() === "error") errors.push(`console: ${msg.text()}`); });
     page.on("pageerror", err => errors.push(`page: ${err.message}`));
     page.on("request", req => { if (!/^(file|data|blob|about):/.test(req.url())) external.push(req.url()); });
@@ -54,6 +65,20 @@ async function main() {
     await page.waitForFunction(() => /Day \d+/.test((document.getElementById("clock") || {}).textContent || ""),
       null, { timeout: 20000 });
     result.clock_start = await page.textContent("#clock");
+    // the world the page runs (page.js: region with 1,000 townsfolk unless ?world= says otherwise) and whether it had
+    // to fall back to Millbrook (the notice page.js shows when the region cannot start)
+    Object.assign(result, await page.evaluate(() => {
+      const p = window.GameOfAILifePage || {};
+      return { world: p.world, folk: p.folk, fallback: !!document.getElementById("world-notice") };
+    }));
+    // The camera the page opens on: a region's default view (no stored camera in a fresh browser)
+    result.camera = await page.evaluate(() => {
+      const v = window.__view, d = window.CityView && window.CityView.DEFAULT_VIEW;
+      if (!v || !d) return null;
+      const c = v.camera();
+      return { x: Math.round(c.x * 10) / 10, y: Math.round(c.y * 10) / 10, zoom: c.zoom, want: d,
+        ok: Math.abs(c.x - d.x) <= 1 && Math.abs(c.y - d.y) <= 1 && Math.abs(c.zoom - d.zoom) < 1e-6 };
+    });
     // The dashboard client is the one whose game.js started Dash (Dash.inspect() is null until Dash.init).
     const dash = await page.evaluate(() => (window.Dash && typeof Dash.inspect === "function" ? Dash.inspect() : null));
     result.client = dash ? "dashboard" : "classic";
@@ -74,7 +99,8 @@ async function main() {
     result.clock_end = await page.textContent("#clock");
     result.character_links = await page.evaluate(() => document.querySelectorAll('a[href*="character.html"]').length);
     result.ok = !errors.length && !external.length && result.character_links === 0 && result.clock_end !== result.clock_start
-      && (!dash || result.host.kind === "browser");
+      && (!dash || result.host.kind === "browser") && !result.fallback
+      && (result.world !== "region" || (!!result.camera && result.camera.ok));
   } catch (err) {
     result.error = String(err.message || err).split("\n")[0];
   } finally {

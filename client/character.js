@@ -16,7 +16,7 @@ const TRAITS = {
   adventure: ["tries new things", "sticks to routine"],
 };
 const STAGES = ["kept", "worn", "shabby", "neglected", "derelict"];
-const STAGE_COLORS = ["#6fcf7c", "#b8d46a", "#f6c445", "#ef9b4b", "#ef6b6b"]; // kept .. derelict
+const STAGE_COLORS = ["#0ca30c", "#9aa5b8", "#fab219", "#ec835a", "#d03b3b"]; // kept .. derelict, as the dashboard, the Condition overlay and the minimap draw them
 const HISTORY_WORDS = { bought: "Bought", rented: "Moved into", sold: "Sold", left: "Left", evicted: "Evicted from",
                         forced_sale: "Forced to sell" };
 const CONSENT_KEY = "goal.character.god-ok";

@@ -16,7 +16,7 @@ from gameofailife.sim import Simulation
 from gameofailife.town import H, W, build_map
 
 SEED = 1
-PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes", "household"}
+PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes", "household", "home"}  # home: v3 D item 15
 
 
 class TownMapTest(unittest.TestCase):
@@ -132,7 +132,7 @@ class DefaultScoresTest(unittest.TestCase):
     def test_unaffordable_option_is_penalized(self):
         sim = Simulation(seed=SEED)
         agent = sim.agents["ari"]
-        agent.money = 20.0
+        agent.money, agent.savings = 20.0, 0.0  # she lives alone: no savings, so nothing else to pay with
         same = dict(tags={"social": 0.5}, gains={"fun": 20})
         fork = Fork(agent.id, "test", "?", [
             Option("free", [("relax_home", "home")], cost=0, **same),

@@ -3,7 +3,7 @@
 // It speaks the God side of the protocol exactly as GameServer does (docs/protocol.md, PLAN 3.2-3.9): the same
 // `welcome` (with `host: {kind: "browser", controllers: false}` and the full `stats`), a `state` frame every
 // flush, `stats` pushes on the PLAN 3.8 cadence, and the replies to set_luck, set_speed, pause, resume,
-// get_agent, get_home, set_profile, get_stats and get_decisions. Nothing plays a character from outside the
+// get_agent, get_home, set_profile, get_stats, get_folk and get_decisions. Nothing plays a character from outside the
 // page, so a controller's hello is refused and every fork is decided by habit or the profile's default.
 //
 // The client talks to it through `LocalHost.socket()`, a WebSocket look-alike: page.js installs it as
@@ -16,6 +16,11 @@
   const SPEEDS = [0, 1, 2, 4, 8, 16];
   const GOD_ONLY = new Set(["set_luck", "set_speed", "pause", "resume", "set_profile"]);
   const HOUSING_EVERY = 40; // frames carry `lots` and `homes` when they change, and in every 40th frame anyway
+  const REGION_HOUSING_CHECK = 20; // the region's `lots` and `homes` are compared every 20th frame ...
+  const REGION_HOUSING_EVERY = 200; // ... and sent anyway every 200th (PLAN 2.11)
+  const OCC_EVERY = 40; // a frame carries `occ` at most every 40th frame ...
+  const OCC_TICKS = 10; // ... once the last one sent is 10 ticks old (PLAN 2.11)
+  const CATCH_UP_FRAMES = 4; // a late loop pass runs at most this many frames' worth of ticks (folk.md 9)
   const WELCOME_HISTORY = 80, WELCOME_NEWS = 120, WELCOME_HEADLINES = 20, WELCOME_LLM_LOG = 80;
   const STATS_SECONDS = 3.0; // a stats push this often while the city runs ...
   const STATS_MAJOR_SECONDS = 0.5; // ... and this soon after the last one when a major event happened
@@ -25,6 +30,13 @@
   const CAUGHT = new Set(["ValueError", "TypeError", "KeyError", "AttributeError", "OverflowError"]);
 
   const defaultNow = () => (globalThis.performance ? globalThis.performance.now() / 1000 : Date.now() / 1000);
+
+  // The real seconds a loop pass turns into ticks: the time since the last pass, exactly FRAME_SECONDS when it was
+  // on time (to the float, so an on-time loop runs v2's tick sequence), at most CATCH_UP_FRAMES frames.
+  function frame_span(elapsed) {
+    if (Math.abs(elapsed - FRAME_SECONDS) < 1e-9) return FRAME_SECONDS;
+    return Math.max(0.0, Math.min(elapsed, CATCH_UP_FRAMES * FRAME_SECONDS));
+  }
 
   // Python's msg[key]: a KeyError when it is missing.
   function item(msg, key) {
@@ -39,6 +51,7 @@
     constructor(sim, speed = 1, now = defaultNow) {
       this.sim = sim;
       this.speed = speed;
+      sim.speed = speed; // fork messages carry minutes_per_second (protocol, Fork)
       this.now = now;
       this.god = null;
       this.observers = new Set();
@@ -46,6 +59,8 @@
       this._timer = null;
       this._pending_ticks = 0.0;
       this._frames = 0; // state frames encoded so far
+      this._occ_tick = null; // the tick of the last `occ` a frame carried
+      this._last = null; // when the last loop pass ran (this.now() seconds)
       this._housing_sent = {}; // the encoded `lots` and `homes` the views last got
       this._stats_at = this.now(); // when the last stats push went out
       this._stats_stepped = false; // a tick ran since then
@@ -71,13 +86,19 @@
       } catch (err) {
         console.error("GameOfAILife: the simulation hit an error", err);
       } finally {
-        if (this._timer !== null) this._timer = setTimeout(() => this._run(), FRAME_SECONDS * 1000);
+        // folk.md 9: sleep what is left of this frame after the pass's work.
+        const wait = Math.max(0, FRAME_SECONDS - (this.now() - this._last));
+        if (this._timer !== null) this._timer = setTimeout(() => this._run(), wait * 1000);
       }
     }
 
-    // One pass of GameServer._run's loop: the ticks FRAME_SECONDS of real time is worth, then a flush.
+    // One pass of GameServer._run's loop: the ticks the real time since the last pass is worth (frame_span; one
+    // frame for the first pass), then a flush.
     frame() {
-      this._pending_ticks += FRAME_SECONDS * G.clock.TICKS_PER_REAL_SECOND * this.speed;
+      const now = this.now();
+      const span = this._last === null ? FRAME_SECONDS : frame_span(now - this._last);
+      this._last = now;
+      this._pending_ticks += span * G.clock.TICKS_PER_REAL_SECOND * this.speed;
       let stepped = false;
       while (this._pending_ticks >= 1) {
         this._pending_ticks -= 1;
@@ -96,6 +117,7 @@
       if (viewers.length && (stepped || events.length || forks.length)) {
         const state = this.sim.state_json(false);
         Object.assign(state, this._housing_changes());
+        this._add_occ(state);
         const frame = JSON.stringify({ type: "state", speed: this.speed, state, events, forks });
         for (const ws of viewers) this._push(ws, frame);
       }
@@ -119,10 +141,17 @@
     }
 
     // The frame's `lots` and `homes`: each one when its encoded JSON differs from what was last sent, and both in
-    // every HOUSING_EVERY-th frame. Views keep the last copy they got.
+    // every HOUSING_EVERY-th frame. In the region they are compared only every REGION_HOUSING_CHECK-th frame and
+    // sent anyway every REGION_HOUSING_EVERY-th (PLAN 2.11). Views keep the last copy they got.
     _housing_changes() {
       this._frames += 1;
-      const every = this._frames % HOUSING_EVERY === 0;
+      let every;
+      if (this.sim.world === "region") {
+        if (this._frames % REGION_HOUSING_CHECK) return {};
+        every = this._frames % REGION_HOUSING_EVERY === 0;
+      } else {
+        every = this._frames % HOUSING_EVERY === 0;
+      }
       const out = {};
       for (const [key, value] of Object.entries(this.sim.housing_maps())) {
         const text = JSON.stringify(value);
@@ -134,10 +163,20 @@
       return out;
     }
 
+    // `occ` in every OCC_EVERY-th frame once the last one sent is OCC_TICKS old (the welcome always has it).
+    _add_occ(state) {
+      const tick = this.sim.clock.tick;
+      if (this._frames % OCC_EVERY === 0 && (this._occ_tick === null || tick - this._occ_tick >= OCC_TICKS)) {
+        state.occ = this.sim.folk.occ();
+        this._occ_tick = tick;
+      }
+    }
+
     // A new God view's (or watcher's) start: the town once, the full state, and the recent past.
     _welcome_god() {
       const sim = this.sim;
       const state = sim.state_json(true);
+      state.occ = sim.folk.occ(); // who is in each place, folk and named (PLAN 2.11; frames send it now and then)
       return { type: "welcome", role: "god", town: sim.town_json(), state,
         history: sim.history.slice(-WELCOME_HISTORY), news: sim.news.slice(-WELCOME_NEWS),
         headlines: sim.headlines.slice(-WELCOME_HEADLINES), llm_log: sim.llm_log.slice(-WELCOME_LLM_LOG),
@@ -232,19 +271,22 @@
         if (typeof luck !== "number" || !Number.isFinite(luck)) throw new PyError("TypeError", "luck must be a number");
         const ok = sim.set_luck(pyStr(getd(msg, "agent_id", null)), pyFloat(luck));
         return { type: "luck_set", ok, agent_id: getd(msg, "agent_id", null),
-          luck: ok ? sim.agents.get(item(msg, "agent_id")).luck : null };
+          luck: ok ? sim.luck_of(pyStr(item(msg, "agent_id"))) : null };
       }
       if (t === "set_speed") {
         const speed = pyInt(getd(msg, "speed", 1));
         this.speed = SPEEDS.includes(speed) ? speed : 1;
+        sim.speed = this.speed;
         return { type: "speed", speed: this.speed };
       }
       if (t === "pause") {
         this.speed = 0;
+        sim.speed = 0; // paused: fork messages carry no minutes_per_second
         return { type: "speed", speed: 0 };
       }
       if (t === "resume") {
         this.speed = this.speed || 1;
+        sim.speed = this.speed;
         return { type: "speed", speed: this.speed };
       }
       if (t === "get_agent") {
@@ -256,6 +298,7 @@
         return home ? { type: "home", home } : { type: "error", error: "unknown home" };
       }
       if (t === "get_stats") return sim.stats_json(true);
+      if (t === "get_folk") return { type: "folk", v: sim.folk.v, rows: sim.folk.roster_rows(sim) };
       if (t === "get_decisions") {
         const page = sim.decisions(getd(msg, "agent_id", null), getd(msg, "before", null), getd(msg, "limit", null));
         return page !== null ? page : { type: "error", error: "unknown character" };
@@ -398,6 +441,7 @@
 
   G.host = {
     FRAME_SECONDS, SPEEDS, GOD_ONLY, HOUSING_EVERY, WELCOME_HISTORY, WELCOME_NEWS, WELCOME_HEADLINES,
-    WELCOME_LLM_LOG, STATS_SECONDS, STATS_MAJOR_SECONDS, HOST, LocalHost,
+    WELCOME_LLM_LOG, STATS_SECONDS, STATS_MAJOR_SECONDS, HOST, LocalHost, REGION_HOUSING_CHECK,
+    REGION_HOUSING_EVERY, OCC_EVERY, OCC_TICKS, CATCH_UP_FRAMES, frame_span,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

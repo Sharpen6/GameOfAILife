@@ -158,6 +158,7 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         """Put a real, non-obvious hunger fork to the character, as the sim would."""
         agent = self.sim.agents[agent_id]
         agent.needs["hunger"] = 20
+        self.sim.clock.tick = max(self.sim.clock.tick, 6 * 60)  # the cafes open at 06:00 (the world starts at 05:00)
         fork = forks.hunger_fork(self.sim, agent)
         scores = sorted(forks.default_scores(agent, fork, self.sim), reverse=True)
         self.assertLess(scores[0] - scores[1], forks.OBVIOUS_MARGIN, "precondition: the fork must not be obvious")
@@ -222,6 +223,26 @@ class TestGod(ServerCase):
         self.assertEqual((await god.request({"type": "resume"}, "speed"))["speed"], 1)
         await god.request({"type": "set_speed", "speed": 16}, "speed")
         await wait_until(lambda: self.sim.clock.tick > tick)
+
+    async def test_fork_messages_follow_the_speed(self):
+        # The server tells the sim its speed on start, set_speed, pause and resume, so a fork message says how many
+        # game minutes go by per real second (protocol, Fork: minutes_per_second), and says nothing when paused.
+        self.assertEqual(self.sim.speed, 0)
+        c, _ = await self.controller("bot", ["tom"])
+        fork = self.ask_hunger_fork("tom")
+        msg = await c.expect(lambda m: m.get("type") == "fork" and m.get("fork_id") == fork.id)
+        self.assertNotIn("minutes_per_second", msg)
+        god, _ = await self.god()
+        await god.request({"type": "set_speed", "speed": 8}, "speed")
+        self.assertEqual(self.sim.speed, 8)
+        self.assertEqual(self.sim.fork_message(self.sim.agents["tom"], fork)["minutes_per_second"], 19.2)
+        await god.request({"type": "pause"}, "speed")
+        self.assertEqual(self.sim.speed, 0)
+        self.assertNotIn("minutes_per_second", self.sim.fork_message(self.sim.agents["tom"], fork))
+        await god.request({"type": "resume"}, "speed")
+        self.assertEqual(self.sim.speed, 1)
+        self.assertEqual(self.sim.fork_message(self.sim.agents["tom"], fork)["minutes_per_second"], 2.4)
+        self.assertEqual(GameServer(Simulation(seed=1), speed=4).sim.speed, 4)
 
     async def test_state_frames_arrive_when_running(self):
         god, _ = await self.god()
@@ -431,7 +452,7 @@ class TestRobustness(ServerCase):
         # A frame declaring more than MAX_MESSAGE is refused and the socket is dropped.
         reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.port), TIMEOUT)
         try:
-            writer.write(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            writer.write(b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
             writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.MAX_MESSAGE + 1) + os.urandom(4))
             await writer.drain()
@@ -471,11 +492,14 @@ class TestRobustness(ServerCase):
 
     async def test_large_message_extended_length(self):
         god, _ = await self.god()
-        pad = "x" * 100_000  # > 64KB: needs the 8-byte extended payload length
+        # The most the server takes, 64 KiB (> 65535 bytes: needs the 8-byte extended payload length).
+        # request() adds an 8-digit req_id.
+        size = len(json.dumps({"type": "get_agent", "agent_id": "tom", "pad": "", "req_id": "0" * 8}))
+        pad = "x" * (ws.SERVER_MAX_MESSAGE - size)
         r = await god.request({"type": "get_agent", "agent_id": "tom", "pad": pad}, "agent")
         self.assertEqual(r["agent"]["id"], "tom")
         # A long prompt round-trips through set_profile (truncated by the sim to 1000 chars).
-        r = await god.request({"type": "set_profile", "agent_id": "tom", "prompt": "y" * 70_000}, "agent")
+        r = await god.request({"type": "set_profile", "agent_id": "tom", "prompt": "y" * 60_000}, "agent")
         self.assertEqual(len(r["agent"]["profile"]["prompt"]), 1000)
 
     async def test_ping_gets_pong(self):
@@ -512,7 +536,8 @@ class TestWsFraming(unittest.IsolatedAsyncioTestCase):
                     break
                 k, _, v = line.partition(":")
                 headers[k.strip().lower()] = v.strip()
-            sock = await ws.server_handshake(reader, writer, headers)
+            # An echo server for every length class, so it takes what a client takes, not the game's 64 KiB.
+            sock = await ws.server_handshake(reader, writer, headers, max_message=ws.MAX_MESSAGE)
             self.server_sockets.append(sock)
             try:
                 while True:

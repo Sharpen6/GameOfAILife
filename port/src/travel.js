@@ -1,5 +1,5 @@
 // Port of gameofailife/travel.py: getting around: travel times, the usual way to work and what it costs a week,
-// and the nearest open place.
+// the usual way for any one trip (trip_mode, with where the car is parked), and the nearest open place.
 //
 // Walking and running read the town's O(1) walk fields (`sim.town.walk_minutes(xy, place_id)`). Cars and taxis
 // follow the roads (`sim.town.drive_length`, memoized on the shared map) and lose about a minute at each
@@ -19,6 +19,10 @@
   const LIGHT_WAIT = 1; // minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
   const BUS_MIN_WALK = 25; // the bus is someone's usual way to work only when the walk is longer than this
   const TAXI_MIN_WALK = 40; // the work fork offers a taxi to an adult without a car only when the walk is longer than this
+  const USUAL = "usual"; // Option.vehicle and start_plan's vehicle meaning "the usual way, trip by trip" (trip_mode)
+  const SHORT_WALK = 8; // minutes: a walk this short from home leaves the car on the driveway
+  // --- region ---
+  const MAX_OUTING_MINUTES = 40; // region world: a place beyond Millbrook qualifies only within this walk (Rule R)
 
   // The bus trip the character would make to a place leaving now: [minutes door to door, line, board stop,
   // alight stop], or null when they are inside it or no bus saves transit.MIN_SAVING minutes over walking.
@@ -104,6 +108,53 @@
     return job.workdays.length * getd(TRIP_COST, mode, 0);
   }
 
+  // The place id where the character's car is parked: where it was last driven to (`agent.car_at`, set as a
+  // car sets off), or home (car_at null, so a car at home moves house with its household).
+  const car_place = (sim, agent) => agent.car_at || sim.home_of(agent);
+
+  // True when the character owns a car and it is with them: they are travelling in it, or it is parked at the
+  // place they are in, at its door, or (a park) anywhere inside it.
+  function car_here(sim, agent) {
+    if (!agent.owns_car) return false;
+    if (agent.vehicle === "car") return true;
+    const place = sim.town.places.get(car_place(sim, agent));
+    if (agent.inside !== null) return agent.inside === place.id;
+    if (agent.x === place.entry[0] && agent.y === place.entry[1]) return true;
+    return place.kind === "park" && place.x <= agent.x && agent.x < place.x + place.w
+      && place.y <= agent.y && agent.y < place.y + place.h;
+  }
+
+  // How the character makes one trip their usual way (an option's vehicle "usual"): "car" | "bus" | "walk".
+  //
+  // The car when they own one and it is with them (car_here), unless it stands on the driveway at home and the walk
+  // is SHORT_WALK minutes or less. Otherwise the bus when the walk is longer than BUS_MIN_WALK and a bus leaving
+  // now saves transit.MIN_SAVING minutes (bus_trip). Otherwise on foot, as for a trip to where they already are.
+  // On foot too when the car (with every light green) or the bus would get there before the place opens and the
+  // walk would not: `nearest` and the builders judge opening times by the walk.
+  function trip_mode(sim, agent, place_id) {
+    if (agent.inside === place_id) return "walk";
+    const walk = sim.walk_minutes(agent, place_id);
+    let mode = "walk", soonest = walk;
+    if (car_here(sim, agent)) {
+      const home = sim.home_of(agent);
+      if (!(walk <= SHORT_WALK && car_place(sim, agent) === home && agent.inside === home)) mode = "car";
+    }
+    if (mode === "walk" && BUS_MIN_WALK < walk && walk < UNREACHABLE) {
+      const trip = bus_trip(sim, agent, place_id);
+      if (trip !== null) {
+        mode = "bus";
+        soonest = trip[0];
+      }
+    }
+    const hours = sim.town.places.get(place_id).hours;
+    if (mode !== "walk" && hours) {
+      if (mode === "car") soonest = travel_minutes(sim, agent, place_id, "ambulance"); // the drive with no red lights
+      const now = sim.clock.minute_of_day, opens = hours[0] * 60;
+      if (now + soonest < opens && opens <= now + walk) return "walk";
+    }
+    return mode;
+  }
+
   // Where a walk starts: [tile, the id of the place it starts inside, or null].
   //
   // `where` is a Place or a place id (its entry tile, inside that place), a character (their tile, inside
@@ -130,16 +181,35 @@
   // open `stay` minutes later (the review fix's `_open_on_arrival`). The best one has the lowest
   // walk(origin, place) + walk(meet, place), ties by id. `origin` defaults to the character; `origin` and
   // `meet` may each be a character (another Agent), a Place, a place id or an [x, y] tile.
-  function nearest(sim, agent, kinds, origin = null, meet = null, stay = 0) {
+  //
+  // Rule R (region world, region.md 6.3): a character standing in the frozen rectangle (Millbrook) is offered
+  // only Millbrook's places; elsewhere a place beyond Millbrook also qualifies when it is within `max_minutes`
+  // on foot (default MAX_OUTING_MINUTES). In the millbrook world nothing changes.
+  function nearest(sim, agent, kinds, origin = null, meet = null, stay = 0, max_minutes = null) {
     if (typeof kinds === "string") kinds = [kinds];
     const here = _spot(sim, agent);
     const start = origin === null ? null : _spot(sim, origin);
     const end = meet === null ? null : _spot(sim, meet);
     let best = null, best_key = null;
+    // --- region ---
+    const town = sim.town;
+    const region = town.world === "region";
+    let local = false, cap = 0, ids = null;
+    if (region) {
+      local = town.in_frozen(here[0][0], here[0][1]);
+      cap = max_minutes === null ? MAX_OUTING_MINUTES : max_minutes;
+      ids = town.millbrook_ids;
+    }
+    // --- end region ---
     for (const place of sim.town.places.values()) {
       if (!kinds.includes(place.kind)) continue;
+      // --- region ---
+      const far = region && !ids.has(place.id);
+      if (far && (local || _manhattan(here[0], place.entry) > cap)) continue; // Rule R; no walk is shorter than Manhattan
+      // --- end region ---
       const walk = _walk(sim, here, place);
       if (walk >= UNREACHABLE) continue;
+      if (far && walk > cap) continue; // --- region ---
       const arrive = sim.clock.hour + walk / 60;
       if (!(place.is_open(arrive) && place.is_open(arrive + stay / 60))) continue;
       let score = start === null ? walk : _walk(sim, start, place);
@@ -154,8 +224,27 @@
     return best;
   }
 
+  // --- region ---
+  const _manhattan = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+
+  // Rule R for a builder that names a place directly (region.md 6.3, PLAN 2.9): true in the millbrook world
+  // and for Millbrook's places; a place beyond Millbrook only for a character outside the frozen rectangle and
+  // within `max_minutes` on foot (default MAX_OUTING_MINUTES). An unknown place id is never visitable.
+  function named_may_visit(sim, agent, place_id, max_minutes = null) {
+    const town = sim.town;
+    const place = town.places.get(place_id);
+    if (place === undefined) return false;
+    if (town.world !== "region" || town.millbrook_ids.has(place_id)) return true;
+    const here = _spot(sim, agent);
+    if (town.in_frozen(here[0][0], here[0][1])) return false;
+    const cap = max_minutes === null ? MAX_OUTING_MINUTES : max_minutes;
+    return _manhattan(here[0], place.entry) <= cap && _walk(sim, here, place) <= cap;
+  }
+  // --- end region ---
+
   G.travel = {
-    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, bus_trip,
-    travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, _spot, _walk, nearest,
+    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, USUAL, SHORT_WALK,
+    bus_trip, travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, car_place,
+    car_here, trip_mode, _spot, _walk, nearest, MAX_OUTING_MINUTES, _manhattan, named_may_visit,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -132,6 +132,11 @@
 .dash-chip .warn { color: var(--stage-3); }
 .dash-chip.muted { color: var(--muted); }
 .dash-chip.amber { background: var(--dash-amber-bg); border-color: var(--dash-amber-line); color: var(--dash-amber-text); }
+.dash-short { display: none; }
+.dash-thinkdot {
+  display: inline-block; width: 6px; height: 6px; margin: 0 2px 1px 0; border-radius: 50%; background: var(--blue);
+  vertical-align: middle; animation: dash-pulse 1.2s ease-in-out infinite;
+}
 
 #overlay-chips.dash-chips-map {
   position: absolute; top: 8px; right: 8px; z-index: 6; display: flex; flex-direction: column; align-items: flex-end;
@@ -462,6 +467,10 @@
 .dash-fork:hover { background: rgba(255, 255, 255, .03); }
 .dash-fork.open { border-radius: 6px; background: var(--panel-2); }
 .dash-forklist .dash-fork { cursor: default; }
+.dash-llmlist li.dash-llmday {
+  margin: 14px 0 0; padding: 4px 6px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; font-weight: 600;
+}
+.dash-llmlist li.dash-llmday:first-child { margin-top: 2px; }
 .dash-fhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .dash-fname { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dash-kind { padding: 0 7px; border: 1px solid var(--line); border-radius: 9px; background: var(--dash-well); color: var(--muted); font-size: 11px; }
@@ -586,6 +595,8 @@
 .dash-cond { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
 .dash-cond .dash-track { flex: 1 1 120px; }
 .dash-units { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.dash-units-tall { max-height: 420px; overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+.dash-resident { display: inline-block; padding: 3px 8px; color: var(--muted, #9aa3b2); }
 .dash-floor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .dash-unit {
   position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; min-height: 64px;
@@ -607,6 +618,7 @@
   #hud.dash-hud { left: 16px; right: 16px; max-width: none; flex-wrap: nowrap; }
   #hud .dash-chip { flex: 1 1 0; min-width: 0; padding: 0 4px; font-size: 12.5px; text-align: center; overflow: hidden; text-overflow: ellipsis; }
   #hud [data-k="homes"], #hud [data-k="neglect"], #hud .dash-long { display: none; }
+  #hud .dash-short { display: inline; }
   #hud .dash-md { margin-left: 2px; }
   #overlay-chips.dash-chips-map { display: none; }
   .dash-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -617,5 +629,5 @@
   .dash-fname { max-width: 120px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  #panel.dash.sheet, .dash-toast, .dash-dot, .dash-fill, .dash-tick, .dash-rank > li { transition: none !important; animation: none !important; }
+  #panel.dash.sheet, .dash-toast, .dash-dot, .dash-thinkdot, .dash-fill, .dash-tick, .dash-rank > li { transition: none !important; animation: none !important; }
 }

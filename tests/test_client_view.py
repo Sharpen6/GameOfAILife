@@ -2,10 +2,12 @@
 
 The view is a set of classic browser scripts that share one global, window.CityView. These tests keep
 it that way: every file is present, nothing uses ES module syntax, nothing reaches for the network or
-for image files (or data:image URIs), view.css styles only .cv-* classes, the dev fixture has the PLAN 3.2
-and 3.3 shapes, and (when Node is installed) every script parses and the scripts define only CityView.
+for image files (or data:image URIs), view.css styles only .cv-* classes, the page's ticker is marked for
+the view's labels to avoid, the view's stage palette is the dashboard's, the dev fixture has the PLAN 3.2
+and 3.3 shapes and the spots the browser smoke test is about, the timetable still has the bus meetings it
+draws, and (when Node is installed) every script parses and the scripts define only CityView.
 With Node and Playwright installed and GOAL_SLOW=1, tests/browser/view_smoke.cjs runs the view in headless
-Chromium (about 80 s).
+Chromium (about 2 minutes).
 """
 
 import json
@@ -20,8 +22,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 VIEW = ROOT / "client" / "view"
 DEV = ROOT / "client" / "dev"
 
-VIEW_SCRIPTS = ["proj.js", "art.js", "buildings.js", "actors.js", "scene.js", "movers.js",
-                "camera.js", "minimap.js", "view.js"]
+VIEW_SCRIPTS = ["proj.js", "art.js", "buildings.js", "towers.js", "rail_art.js", "actors.js", "region.js", "lod.js",
+                "lowart.js", "scene.js", "movers.js", "crowd.js", "trains.js", "pings.js", "camera.js", "minimap.js",
+                "view.js"]  # view.md 3.1 without the deferred dash_* files (PLAN 3, v3-skel-view)
 DEV_SCRIPTS = ["fixture_town.js", "fake_state.js"]
 FACADE = ["create", "setTown", "setState", "select", "focus", "highlight", "setOverlay", "ping",
           "setInset", "camera", "setMode", "start", "stop"]
@@ -33,10 +36,11 @@ TOWN_KEYS = {"w", "h", "tiles", "places", "homes", "housing", "districts", "stre
 PLACE_KEYS = {"id", "name", "kind", "x", "y", "w", "h", "entry", "face", "hours", "district", "style", "floors",
               "tier", "units"}
 HOME_KEYS = {"id", "place", "unit", "name", "tier", "bedrooms", "base_value", "rent"}
+# v3 (PLAN 2.10) adds trains, crowd, folk_n, talks and thinking to the state and ill, stage to agent rows, in both worlds.
 STATE_KEYS = {"tick", "time", "minute", "day", "season", "weather", "lights", "plane", "buses", "lots", "homes",
-              "agents"}
+              "agents", "trains", "crowd", "folk_n", "talks", "thinking"}
 AGENT_KEYS = {"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood", "luck", "controller",
-              "alive", "age", "home", "car", "riding"}
+              "alive", "age", "home", "car", "riding", "ill", "stage"}
 BUS_KEYS = {"id", "line", "x", "y", "dir", "at_stop", "riders"}
 LOT_KEYS = {"condition", "stage", "works", "moving"}
 HOME_ROW_KEYS = {"hh", "owner", "listing", "price", "value", "emergency"}
@@ -99,6 +103,25 @@ class ClientViewFiles(unittest.TestCase):
         text = (VIEW / "view.js").read_text()
         for name in FACADE:
             self.assertRegex(text, rf"\b{name}\b", f"view.js has no {name}")
+
+    def test_ticker_is_kept_clear_of_labels(self):
+        # name plates and badges keep off every element marked data-cv-avoid (review ART-4)
+        html = (ROOT / "client" / "index.html").read_text()
+        tag = re.search(r"<div\s+id=\"ticker\"[^>]*>", html)
+        self.assertIsNotNone(tag, "client/index.html has no #ticker")
+        self.assertRegex(tag.group(0), r"\sdata-cv-avoid\b", "the ticker is not marked data-cv-avoid")
+
+    def test_stage_palette_is_the_dashboards(self):
+        # one Condition palette for the map overlay, the minimap and the dashboard's legends (review H6)
+        palette = re.compile(r"const STAGE_COLOR = (\[[^\]]*\])")
+        dash = palette.search((ROOT / "client" / "dashboard.js").read_text())
+        own = re.search(r"CV\.STAGE_COLORS = (\[[^\]]*\])", (VIEW / "art.js").read_text())
+        self.assertIsNotNone(dash, "dashboard.js has no STAGE_COLOR")
+        self.assertIsNotNone(own, "art.js has no CV.STAGE_COLORS")
+        self.assertEqual(json.loads(own.group(1)), json.loads(dash.group(1)))
+        for name in VIEW_SCRIPTS:
+            if name != "art.js":
+                self.assertNotRegex((VIEW / name).read_text(), r"STAGE_COLS?\s*=", f"{name} keeps a stage palette of its own")
 
     def test_dev_page_loads_every_script(self):
         html = (DEV / "view.html").read_text()
@@ -187,8 +210,62 @@ class ClientViewFixture(unittest.TestCase):
             self.assertTrue(agent["inside"] is None or agent["inside"] in known, agent["id"])
 
 
+class ClientViewBusScenes(unittest.TestCase):
+    # view_smoke.cjs's buses run draws the real timetable (transit.bus_rows) for ticks 360-400 and 0-2; these
+    # are the meetings it is about (review ART-3), so a timetable change that drops them shows here.
+    def setUp(self):
+        from gameofailife import transit
+        self.rows = lambda t: {b["id"]: b for b in transit.bus_rows(t)}
+
+    def test_line_1_and_2_turn_across_each_other_at_willow_and_main(self):
+        # 06:04: 1a heading south and 2a heading west both reach (3, 25); 06:05: 1a goes east, 2a north
+        before, at, after = self.rows(363), self.rows(364), self.rows(365)
+        self.assertEqual((before["1a"]["dir"], before["2a"]["dir"]), ("s", "w"))
+        self.assertEqual(((at["1a"]["x"], at["1a"]["y"]), (at["2a"]["x"], at["2a"]["y"])), ((3, 25), (3, 25)))
+        self.assertEqual((at["1a"]["dir"], at["2a"]["dir"]), ("e", "n"))
+        self.assertGreater(after["1a"]["x"], 3)
+        self.assertLess(after["2a"]["y"], 25)
+
+    def test_two_buses_share_a_tile_at_tick_0(self):
+        # the first frame of the fresh view in the smoke test
+        at = self.rows(0)
+        self.assertEqual(sorted(b for b in at if (at[b]["x"], at[b]["y"]) == (3, 25)), ["1a", "2a"])
+
+
+class ClientViewFixtureScenes(unittest.TestCase):
+    # view_smoke.cjs's stages and movers runs are about these spots of the seed-1 fixture (review H5 and ART-5),
+    # so a fixture change that moves them shows here.
+    @classmethod
+    def setUpClass(cls):
+        ClientViewFixture.setUpClass.__func__(cls)
+
+    def test_bus_shelters_stand_before_66_and_92_park_avenue(self):
+        # the City Hall and Hilltop stops stand on the road row just south of each house's south-east lot tile,
+        # the camera-nearest one, so a board there would be behind the shelter
+        stops = {s["id"]: (s["x"], s["y"]) for s in self.town["stops"]}
+        places = {p["id"]: p for p in self.town["places"]}
+        for home, stop in (("park_66", "city_hall"), ("park_92", "hilltop_east")):
+            p, (sx, sy) = places[home], stops[stop]
+            self.assertEqual(p["face"], "s")
+            self.assertIn(sy, self.town["road_rows"])
+            self.assertEqual((sx, sy - 1), (p["x"] + p["w"], p["y"] + p["h"]), (home, stop))
+            self.assertEqual(self.town["tiles"][sy - 1][sx], ".")
+
+    def test_three_walkers_from_three_homes_on_one_kerb(self):
+        # ari, lea and efrat live in three homes and, by the view's hash (game.js's FNV-1a), keep to the same kerb
+        def fnv(s):
+            h = 2166136261
+            for c in s:
+                h = ((h ^ ord(c)) * 16777619) & 0xFFFFFFFF
+            return h
+        agents = {a["id"]: a for a in self.state["agents"]}
+        homes = [agents[i]["home"] for i in ("ari", "lea", "efrat")]
+        self.assertEqual(len(set(homes)), 3, homes)
+        self.assertEqual(len({fnv(i) % 2 for i in ("ari", "lea", "efrat")}), 1)
+
+
 class ClientViewBrowser(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the browser run of the city view (about 80 s) runs with GOAL_SLOW=1")
+    @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the browser run of the city view (about 2 minutes) runs with GOAL_SLOW=1")
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_view_smoke(self):
         # tests/browser/view_smoke.cjs prints SKIP and exits 0 without Playwright or a browser to launch

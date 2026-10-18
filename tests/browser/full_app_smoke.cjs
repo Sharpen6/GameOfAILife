@@ -40,8 +40,8 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..", "..");
 const SHOTS = process.env.FULL_SHOTS ? path.resolve(process.cwd(), process.env.FULL_SHOTS) : "";
 const SIZES = [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 390, height: 844 }, true]];
-const SCRIPTS = ["view/proj.js", "view/art.js", "view/buildings.js", "view/actors.js", "view/scene.js", "view/movers.js",
-  "view/camera.js", "view/minimap.js", "view/view.js", "dashboard.js", "game.js"];
+const SCRIPTS = ["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart", "scene", "movers",
+  "crowd", "trains", "pings", "camera", "minimap", "view"].map(n => `view/${n}.js`).concat(["dashboard.js", "game.js"]);
 const CONTROLLER = "smoke-bot", MODEL = "fake-model-1";
 const LATE_MS = 6500; // the late answer: after the 5 s window, inside the 10 s one
 const MAJOR_WAIT_MS = 150000; // at 16x a game day is 37.5 s, and the seed-1 city has a few major events a day
@@ -88,7 +88,8 @@ async function until(cond, ms) {
 // --- the real server ---------------------------------------------------------------------------------------
 
 function startServer() {
-  const args = ["-u", "-m", "gameofailife", "--seed", "1", "--host", "127.0.0.1", "--port", "0", "--speed", "4"];
+  const args = ["-u", "-m", "gameofailife", "--seed", "1", "--host", "127.0.0.1", "--port", "0", "--speed", "4",
+    "--world", "millbrook", "--folk", "0"];
   const proc = spawn(process.env.PYTHON || "python3", args, { cwd: REPO, stdio: ["ignore", "pipe", "inherit"] });
   return new Promise((resolve, reject) => {
     let out = "";
@@ -341,10 +342,14 @@ async function run(browser, name, size, touch) {
     // God speeds the city up, and the HUD counts the controller's characters.
     await page.click('#speed button[data-speed="16"]');
     await waitFor(page, () => document.querySelector('#speed button[data-speed="16"]').classList.contains("on"), null, 3000, "speed 16x");
-    await waitFor(page, () => { const b = document.querySelector('#hud [data-k="ai"]'); return b && /\d+ thinking/.test(b.innerText); },
-      null, 10000, "the AI chip");
-    const ai = await page.evaluate(() => document.querySelector('#hud [data-k="ai"]').innerText.trim());
-    check(touch ? /^AI \d+ thinking$/.test(ai) : /^AI: 60 playing, \d+ thinking$/.test(ai), "the AI chip counts the controller's characters", ai);
+    // The chip shows a thinking count only while someone thinks: "AI: 60 playing, 2 thinking", on a phone "AI 60 2".
+    // The check reads the text the wait matched, so a fork closing between two reads cannot fail it.
+    const chipRe = touch ? /^AI (\d+) [1-9]\d*$/ : /^AI: (\d+) playing, [1-9]\d* thinking$/;
+    const ai = await page.waitForFunction(re => {
+      const b = document.querySelector('#hud [data-k="ai"]'), t = b ? b.innerText.trim().replace(/\s+/g, " ") : "";
+      return new RegExp(re).test(t) ? t : false;
+    }, chipRe.source, { timeout: 10000 }).then(h => h.jsonValue()).catch(() => null);
+    check(!!ai && chipRe.exec(ai)[1] === "60", "the AI chip counts the controller's characters", ai || "timed out");
     await page.waitForTimeout(1500);
     const cam0 = await page.evaluate(() => window.__view.camera());
     if (!touch) await shot(page, "city-iso");

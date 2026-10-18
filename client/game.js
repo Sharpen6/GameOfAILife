@@ -96,6 +96,7 @@
         state = msg.state;
         speed = msg.speed;
         if (view) view.setState(msg.state, msg.speed);
+        if (view && view.events) view.events(msg.events || []); // V1b: a frame's events become pings
         Dash.frame(msg);
         renderHeader();
         break;

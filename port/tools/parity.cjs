@@ -54,6 +54,12 @@ function messages(seed, days) {
     host.receive(god, JSON.stringify(msg));
     return god.got.pop();
   };
+  const speeds = [sim.speed]; // sim.speed as the host set it at start and after each speed message
+  const askSpeed = msg => {
+    const reply = ask(msg);
+    speeds.push(sim.speed);
+    return reply;
+  };
   return {
     welcome, state, stats,
     get_stats: ask({ type: "get_stats" }),
@@ -69,9 +75,10 @@ function messages(seed, days) {
       unknown_type: ask({ type: "fly" }),
     },
     luck: ask({ type: "set_luck", agent_id: "dana", luck: 80, req_id: "r1" }),
-    speed: ask({ type: "set_speed", speed: 4 }),
-    pause: ask({ type: "pause" }),
-    resume: ask({ type: "resume" }),
+    speed: askSpeed({ type: "set_speed", speed: 4 }),
+    pause: askSpeed({ type: "pause" }),
+    resume: askSpeed({ type: "resume" }),
+    sim_speeds: speeds,
     profile: ask({ type: "set_profile", agent_id: "dana", traits: { thrift: 0.9 } }),
     protocol: protocol(host),
     agent_ids: Array.from(sim.agents.keys()),

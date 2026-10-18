@@ -29,8 +29,18 @@ UPKEEP_COOLDOWN = 5 * DAY  # once a weekend
 REPAIR_COOLDOWN = 60  # one adult answers the emergency
 TROUBLE_COOLDOWN = {"arrears": 3 * DAY, "cant_fix": 7 * DAY}
 RENT_CUT = 40  # a renter downsizes only to a home at least this much cheaper a week
-DOWNSIZE_SHARE = 0.8  # an owner downsizes to a home worth at most this share of today's
-DOWNSIZE_CONDITION = 50  # ... in at least this condition
+DOWNSIZE_AFTER_DAYS = 90  # the households that start in their homes think of downsizing from this game day ...
+DOWNSIZE_AFTER_MOVE_DAYS = 120  # ... and a household that moved in only after this long in the home it chose
+DOWNSIZE_BASE = 0.1  # house_hunt's downsizing variant: the base of selling up and buying smaller (renting: less) ...
+DOWNSIZE_RETIRED = 0.35  # ... and how much more inviting it is once every adult is retired
+DOWNSIZE_DRIFT = 0.05  # ... and this much more for every 30 days the household has been thinking of it ...
+DOWNSIZE_DRIFT_MAX = 0.4  # ... up to this: the spare rooms weigh more as the months go by
+DOWNSIZE_SCARCE = 0.3  # ... and this much more while no house has been for sale for a while (house_drought)
+DOWNSIZE_SETTLE = 120 * DAY  # after downsizing, a household doesn't look at the market again for this long ...
+DOWNSIZE_SETTLED = 360 * DAY  # ... nor, for this long, downsize again or take more bedrooms unless crowded
+DOWNSIZE_STAY = 30 * DAY  # a household that decides to stay put isn't asked about downsizing again for this long
+NOTICE_RETRY = DAY  # tenants under notice are asked where to go again after this long when nothing came of it ...
+NOTICE_LATER = 3 * DAY  # ... and after this long when they asked for more time or kept looking
 HELP_MARGIN = 300  # asking a friend for the deficit plus this ...
 HELP_RICH = 3  # ... of a friend with at least this many times that put by
 REPAIR_FRIEND = 30  # affinity of a friend who would come and help fix it
@@ -40,6 +50,8 @@ PIZZA = 20
 BUILDERS_WORKS = 240  # minutes the builders' van stands at the lot
 EMERGENCY_WORKS = 120
 UPKEEP_BELOW = 75  # upkeep comes up below this condition
+FRESH_DAYS = 7  # for this long after moving into a home ...
+FRESH_BELOW = 40  # ... below this condition, upkeep comes up on weekday evenings too
 
 TRADE = {"leak": "plumber", "boiler": "heating engineer", "roof": "roofer", "electrics": "electrician"}
 WAIT = {"leak": "Put a bucket under it and deal with it later", "roof": "Put a bucket under it and deal with it later",
@@ -117,17 +129,28 @@ def _move_outcomes(sim: Simulation, hh: Household, agent: Agent, home_id: str, b
 
 def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     """A better home the household can afford is on the market: buy (or rent) the best, haggle for it, take the
-    cheaper one (or keep looking), or stay put."""
+    cheaper one (when one really costs less, else keep looking), or stay put. A run-down home is bought with its
+    renovation, done the day it is bought (the affordability gate already counts it), so it is never derelict in
+    use. With nothing better on the market, an owner household that has outgrown its home gets the downsizing
+    variant instead, when a smaller home will do (`_downsize_hunt`); tenants the landlord has given notice get the
+    notice variant (`_notice_hunt`)."""
     hh = sim.households[agent.household_id]
     now = sim.clock.tick
+    home = housing.under_notice(sim, hh)
+    if home is not None:
+        return _notice_hunt(sim, agent, hh, home)
     if (not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or hh.arrears
             or (hh.moved_tick is not None and now - hh.moved_tick < housing.MOVE_GAP_DAYS * DAY)
             or sim.on_shift_now(agent)):
         return None
     cands = housing.hunt_candidates(sim, hh)
     if not cands:
-        hh.cooldowns["house_hunt"] = now + NO_CANDIDATE_RETRY
-        return None
+        months = _downsize_months(sim, hh)
+        fork = (_downsize_hunt(sim, agent, hh, months) if months is not None and hh.cooldowns.get("downsized", 0) <= now
+                and housing.outgrown(sim, hh) else None)
+        if fork is None:
+            hh.cooldowns["house_hunt"] = now + NO_CANDIDATE_RETRY
+        return fork
     hh.cooldowns["house_hunt"] = now + HUNT_COOLDOWN
     cur = sim.homes[hh.home_id]
     renting = cur.owner != hh.id
@@ -136,9 +159,19 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     outgo = housing.weekly_outgo(sim, hh)
     cond = {h.id: housing.condition_of(sim, h.id) for h in cands}
     worth = {h.id: housing.value(sim, h.id) for h in cands}
+    reno = {h.id: housing.reno_cost(sim, h.id) if housing.buys(h) else 0 for h in cands}
     a = max(cands, key=lambda h: (TIERS[h.tier]["rank"], worth[h.id], cond[h.id], h.id))
     rest = [h for h in cands if h is not a]
-    b = min(rest, key=lambda h: (housing.net_cost(sim, hh, h.id), cond[h.id], h.id)) if rest else None
+
+    def spend(h) -> tuple[float, float]:
+        """What moving to `h` costs: the cash (its renovation included), then a week there."""
+        return housing.net_cost(sim, hh, h.id) + reno[h.id], housing.weekly_outgo(sim, hh, h.id)
+
+    # B, "the cheaper" home, is the cheapest of the others (ties: the fixer-upper first), offered only when it costs
+    # less than A to move into, or as much and less a week; else that slot keeps looking.
+    b = min(rest, key=lambda h: (*spend(h), cond[h.id], h.id)) if rest else None
+    if b is not None and spend(b) >= spend(a):
+        b = None
 
     def rises(h) -> bool:
         return housing.weekly_outgo(sim, hh, h.id) > outgo
@@ -150,7 +183,8 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
         the = "the cheaper " if cheaper else ""
         tier = TIERS[h.tier]["label"]
         if housing.buys(h):
-            return f"Buy {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${worth[h.id]:,}"
+            done_up = f" and do it up (${reno[h.id]:,})" if reno[h.id] else ""
+            return f"Buy {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${worth[h.id]:,}{done_up}"
         return f"Move into {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${h.rent}/week"
 
     def move(h, cheaper: bool) -> Option:
@@ -161,16 +195,20 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
                 tags["diligence"] = 0.3
         else:
             tags = {"family": 0.6, "adventure": 0.4, "thrift": -0.6 if rises(h) else -0.2}
-        return Option(label(h, cheaper), [("move_house", h.place)], cost=max(0, housing.net_cost(sim, hh, h.id)),
+        extra = {"move": h.id, "how": how, "renovate": reno[h.id]} if reno[h.id] else {"move": h.id, "how": how}
+        return Option(label(h, cheaper), [("move_house", h.place)],
+                      cost=max(0, housing.net_cost(sim, hh, h.id)) + reno[h.id],
                       base=(0.30 if cheaper else 0.35) + bonus(h), tags=tags, gains={"fun": 15 if cheaper else 20},
                       outcomes=_move_outcomes(sim, hh, agent, h.id, cheaper, rises(h) and not cheaper),
-                      extra={"move": h.id, "how": how}, household_pays=True, charge=False)
+                      extra=extra, household_pays=True, charge=False)
 
     best = move(a, False)
+    deal = {"renovate": reno[a.id]} if reno[a.id] else {}  # the deal's renovation, a companion of "buy"
     if housing.buys(a):
         offer = housing._int(worth[a.id] * 0.9)
-        haggle_label = f"Offer ${offer:,} for {a.name} and see what the seller says"
-        cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id]
+        done_up = f" (and ${reno[a.id]:,} to do it up)" if reno[a.id] else ""
+        haggle_label = f"Offer ${offer:,} for {a.name}{done_up} and see what the seller says"
+        cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id] + reno[a.id]
         says = ("The seller accepts the offer", "The seller meets them halfway", "Another buyer snaps it up first",
                 "The seller turns the offer down")
     else:
@@ -183,18 +221,14 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     # answer is never about a home somebody else took meanwhile; a refusal hands it back to the market.
     haggle = Option(haggle_label, [("viewing", a.place)], cost=max(0, _whole(cost)), base=0.30 + bonus(a),
                     tags={"thrift": 0.5, "adventure": 0.4, "diligence": -0.1}, gains={"fun": 10},
-                    outcomes=[Outcome("offer_accepted", says[0], 0.40, +1, {"factor": 0.9, "buy": a.id}, group="deal"),
-                              Outcome("meet_halfway", says[1], 0.35, +1, {"factor": 0.95, "buy": a.id}, group="deal"),
+                    outcomes=[Outcome("offer_accepted", says[0], 0.40, +1, {"factor": 0.9, **deal, "buy": a.id},
+                                      group="deal"),
+                              Outcome("meet_halfway", says[1], 0.35, +1, {"factor": 0.95, **deal, "buy": a.id},
+                                      group="deal"),
                               Outcome("outbid", says[2], 0.25, -1, {"withdraw": a.id, "fun": -10}, group="deal"),
                               Outcome("refused", says[3], 1.0, 0, {"fun": -4, "release": a.id}, group="deal")],
                     extra={"hold": a.id}, household_pays=True, charge=False)
-    if b:
-        cheaper = move(b, True)
-    else:
-        cheaper = Option("Keep looking for the right place", [("read", "home")], base=0.15,
-                         tags={"thrift": 0.3, "diligence": 0.2, "adventure": -0.2}, gains={"fun": 10},
-                         outcomes=[Outcome("new_listing", "Spots a promising new listing", 0.3, +1, {"fun": 4})],
-                         extra={"hh_cooldown": 3 * DAY})
+    cheaper = move(b, True) if b else _keep_looking("Keep looking for the right place", 0.15, 3 * DAY)
     saves = renting and any(housing.buys(h) and not rises(h) for h in cands)
     stay_tags = {"thrift": 0.0 if saves else 0.5, "adventure": -0.5}
     if crowded:
@@ -211,6 +245,131 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     return Fork(agent.id, "house_hunt", question, [best, haggle, cheaper, stay], now, major=True)
 
 
+def _keep_looking(label: str, base: float, cooldown: int) -> Option:
+    return Option(label, [("read", "home")], base=base, tags={"thrift": 0.3, "diligence": 0.2, "adventure": -0.2},
+                  gains={"fun": 10},
+                  outcomes=[Outcome("new_listing", "Spots a promising new listing", 0.3, +1, {"fun": 4})],
+                  extra={"hh_cooldown": cooldown})
+
+
+def _downsize_months(sim: Simulation, hh: Household) -> int | None:
+    """The whole months (of 30 days) a household has had downsizing on its mind, or None while it hasn't: a household
+    that started in its home thinks of it from day DOWNSIZE_AFTER_DAYS of the game, one that moved in once it has
+    lived DOWNSIZE_AFTER_MOVE_DAYS in the home it chose."""
+    wait = DOWNSIZE_AFTER_DAYS if hh.moved_tick is None else DOWNSIZE_AFTER_MOVE_DAYS
+    over = sim.clock.tick - (hh.moved_tick or 0) - wait * DAY
+    return over // (30 * DAY) if over >= 0 else None
+
+
+def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household, months: int) -> Fork | None:
+    """house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and has had downsizing on
+    its mind for `months` (`_downsize_months`), when nothing better is on the market: sell up and buy the smaller home
+    `housing_trouble` would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not
+    asked again for DOWNSIZE_STAY). Either move, once it goes through, settles the household: no market for
+    DOWNSIZE_SETTLE, and for DOWNSIZE_SETTLED no second downsizing and no home with more bedrooms unless it gets
+    crowded. A move that isn't available (no smaller home for sale, or no rental the household can carry) gives its
+    slot to "decide another time"; with neither there is no fork. Selling up is the thrifty choice. It is more
+    inviting once everyone is retired, a little more with every month (DOWNSIZE_DRIFT), and more while no house has
+    been for sale for a while (DOWNSIZE_SCARCE), so households come to it one by one, now and then, and most often
+    when the town is short of houses."""
+    now = sim.clock.tick
+    cur = sim.homes[hh.home_id]
+    people = housing.adults(sim, hh)
+    retired = all(housing.retired(a) for a in people)
+    smaller = housing.downsize_candidates(sim, hh)
+    rental = housing.cheapest_rental(sim, hh)
+    if rental is not None and not housing.affordable(sim, hh, rental.id):
+        rental = None
+    if not smaller and rental is None:
+        return None
+    hh.cooldowns["house_hunt"] = now + HUNT_COOLDOWN
+    scarce = housing.house_drought(sim)
+    lift = ((DOWNSIZE_RETIRED if retired else 0.0) + min(DOWNSIZE_DRIFT_MAX, DOWNSIZE_DRIFT * months)
+            + (DOWNSIZE_SCARCE if scarce else 0.0))
+    moves = [_sell_and_buy(sim, hh, _smallest(sim, smaller), DOWNSIZE_BASE + lift) if smaller else None,
+             _sell_and_rent(sim, hh, rental, DOWNSIZE_BASE - 0.05 + lift) if rental else None]
+    later = Option("Talk it over and decide another time", [("relax_home", "home")], base=0.05,
+                   tags={"family": 0.2, "diligence": -0.2}, gains={"fun": 5},
+                   outcomes=[Outcome("talk", "A long talk about the future", 0.4, +1, {"fun": 4})] if len(people) > 1
+                   else [], extra={"hh_cooldown": 7 * DAY})
+    for opt in moves:
+        if opt:
+            opt.extra["settle"] = {"house_hunt": DOWNSIZE_SETTLE, "downsized": DOWNSIZE_SETTLED}
+    look = _keep_looking("Keep looking for the right smaller place", 0.1, 14 * DAY)
+    stay = Option(f"Stay in {cur.name}: it's home", [("relax_home", "home")], base=0.15,
+                  tags={"family": 0.3, "thrift": -0.3, "adventure": -0.4}, gains={"fun": 10},
+                  outcomes=[Outcome("content", "Feels content at home", 0.5, +1, {"fun": 5}),
+                            Outcome("too_quiet", "The place feels big and quiet", 0.3, -1, {"fun": -5})],
+                  extra={"hh_cooldown": DOWNSIZE_STAY})
+    n = housing.residents(sim, hh)
+    whom = "just you" if n == 1 else f"the {n} of you"
+    why = "in retirement" if retired else f"with {cur.bedrooms} bedrooms for {whom}"
+    weeks = housing.LANDLORD_SELLS_DAYS // 7
+    short = f", and no house has been for sale in Millbrook for {weeks} weeks" if scarce else ""
+    question = (f"Your household has ${_whole(housing.funds(sim, hh)):,} put by. You own {cur.name}, worth about "
+                f"${housing.value(sim, cur.id):,}: more home than you need {why}. Nothing better is on the market, "
+                f"but a smaller place is{short}. Do you downsize?")
+    return Fork(agent.id, "house_hunt", question, [m or later for m in moves] + [look, stay], now, major=True)
+
+
+def _notice_hunt(sim: Simulation, agent: Agent, hh: Household, home) -> Fork | None:
+    """house_hunt for tenants whose let house the landlord is selling (`housing.give_notice`), asked in the household
+    window until they have moved: rent the best fitting home to let they can carry, rent the cheapest one they can
+    carry when that costs less a week, buy the house from the landlord when they can afford it, or ask the landlord
+    for more time (it waits no longer than the notice, after which it moves them itself). A move that isn't
+    available gives its slot to keep looking (two kinds) or "decide another time". The rentals offered pass the
+    affordability gate of every house_hunt move (PLAN decision 57); a household that can carry none is moved into the
+    cheapest fitting one by the landlord when the notice runs out (`housing.landlord_notices`)."""
+    now = sim.clock.tick
+    if not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or sim.on_shift_now(agent):
+        return None
+    hh.cooldowns["house_hunt"] = now + NOTICE_RETRY
+    carried = [h for h in housing.vacancies(sim, "for_rent")
+               if housing.fits(sim, hh, h) and housing.affordable(sim, hh, h.id)]
+    best = (max(carried, key=lambda h: (TIERS[h.tier]["rank"], h.bedrooms, housing.condition_of(sim, h.id), -h.rent,
+                                        h.id)) if carried else None)
+    cheap = min(carried, key=lambda h: (h.rent, -housing.condition_of(sim, h.id), h.id)) if carried else None
+    if cheap is not None and cheap.rent >= best.rent:
+        cheap = None
+
+    def rent(h, the: str, base: float, tags: dict) -> Option:
+        text = f"Rent {the}{h.name} ({TIERS[h.tier]['label']}{_stage_note(sim, h.id)}) for ${h.rent}/week"
+        return Option(text, [("move_house", h.place)], cost=MOVING_COST, base=base, tags=tags, gains={"fun": 10},
+                      outcomes=_downsize_outcomes(sim, hh), extra={"move": h.id, "how": "rent"},
+                      household_pays=True, charge=False)
+
+    first = (rent(best, "", 0.45, {"family": 0.3, "diligence": 0.3, "thrift": -0.1}) if best
+             else _keep_looking("Look for somewhere else to rent", 0.3, NOTICE_RETRY))
+    second = (rent(cheap, "the cheaper ", 0.3, {"thrift": 0.7, "family": -0.2, "adventure": 0.1}) if cheap
+              else _keep_looking("Keep looking for the right place", 0.15, NOTICE_LATER))
+    worth = housing.value(sim, home.id)
+    if housing.can_buy_let_home(sim, hh):
+        third = Option(f"Buy {home.name} from {LANDLORD} for ${worth:,}", [("relax_home", "home")], cost=worth,
+                       base=0.3, tags={"family": 0.5, "adventure": 0.2, "thrift": -0.3}, gains={"fun": 15},
+                       outcomes=[Outcome("glad_to_stay", "Glad to have stayed put", 0.5, +1,
+                                         {"fun": 10, "family_bond": 2}),
+                                 Outcome("stretched", "Buying it stretches them thin", 0.25, -1, {"fun": -6})],
+                       extra={"buy_let": home.id}, household_pays=True, charge=False)
+    else:
+        third = Option("Talk it over and decide another time", [("relax_home", "home")], base=0.05,
+                       tags={"family": 0.2, "diligence": -0.2}, gains={"fun": 5},
+                       outcomes=[Outcome("talk", "A long talk about where to go", 0.4, +1, {"fun": 4})]
+                       if len(housing.adults(sim, hh)) > 1 else [], extra={"hh_cooldown": NOTICE_RETRY})
+    wait = Option(f"Ask {LANDLORD} for more time", [("phone_call", None)], base=0.0,
+                  tags={"social": 0.3, "thrift": 0.2, "diligence": -0.3}, gains={"fun": 5},
+                  outcomes=[Outcome("more_time", f"{LANDLORD} says it can wait until the notice runs out", 0.5, +1,
+                                    {"fun": 4}, group="time"),
+                            Outcome("no_more_time", f"{LANDLORD} wants the house empty as soon as it can", 1.0, -1,
+                                    {"fun": -6}, group="time")],
+                  extra={"hh_cooldown": NOTICE_LATER})
+    due = housing.stamp_of(home.notice["due"])
+    rent_now = housing._int(hh.weekly_rent)
+    question = (f"{LANDLORD} is selling {home.name}, the house you rent (${rent_now}/week), and has given your "
+                f"household notice: you have to move out by {due}. Your household has "
+                f"${_whole(housing.funds(sim, hh)):,} put by. What do you do?")
+    return Fork(agent.id, "house_hunt", question, [first, second, third, wait], now, major=True)
+
+
 def _whole(x: float) -> int:
     return housing._int(x)
 
@@ -218,15 +377,19 @@ def _whole(x: float) -> int:
 # --- upkeep -----------------------------------------------------------------------
 
 def upkeep_fork(sim: Simulation, agent: Agent) -> Fork | None:
-    """An owned home is wearing: builders, DIY, a tidy-up, or leave it. Weekends 09-17, below condition 75."""
+    """An owned home is wearing: builders, DIY, a tidy-up, or leave it. Weekends 09-17, below condition 75; and in
+    the household's usual window on any day of its first FRESH_DAYS in a home bought below condition FRESH_BELOW,
+    so a fixer-upper can be renovated before its first nights in use take it below neglected."""
     hh = sim.households[agent.household_id]
     home = sim.homes[hh.home_id]
     hour = sim.clock.hour
-    if (sim.clock.weekday < 5 or not 9 <= hour < 17 or home.owner != hh.id or home.tier not in ("house", "big_house")
-            or home.emergency or not _ready(sim, agent, hh, "upkeep")):
+    weekend = sim.clock.weekday >= 5 and 9 <= hour < 17
+    fresh = hh.moved_tick is not None and sim.clock.tick - hh.moved_tick < FRESH_DAYS * DAY
+    if (not (weekend or (fresh and _hh_window(sim))) or home.owner != hh.id
+            or home.tier not in ("house", "big_house") or home.emergency or not _ready(sim, agent, hh, "upkeep")):
         return None
     c = housing.condition_of(sim, home.id)
-    if c >= UPKEEP_BELOW or sim.on_shift_now(agent):
+    if c >= UPKEEP_BELOW or (not weekend and c >= FRESH_BELOW) or sim.on_shift_now(agent):
         return None
     hh.cooldowns["upkeep"] = sim.clock.tick + UPKEEP_COOLDOWN
     t = TIERS[home.tier]
@@ -234,6 +397,7 @@ def upkeep_fork(sim: Simulation, agent: Agent) -> Fork | None:
     reno = c < 50
     pts = _whole(100 - c) if reno else min(40, _whole(100 - c))
     quote = round10(pts * t["pro_rate"] * (RENO_FACTOR if reno else 1.0)) + housing.CALLOUT
+    when = "this weekend" if weekend else "this evening"
     pro_base = 0.3 + (0.4 if c < 40 else 0.0) + (0.3 if c < 20 else 0.0)
     leave_base = 0.0 - (0.3 if c < 40 else 0.0) - (0.3 if c < 20 else 0.0)
     opts = [
@@ -246,7 +410,7 @@ def upkeep_fork(sim: Simulation, agent: Agent) -> Fork | None:
                          Outcome("hidden_damp", "They find hidden damp: the bill goes up", 0.15, -1,
                                  {"hh_money": -_whole(0.4 * quote)})],
                extra={"repair": pts, "works": BUILDERS_WORKS}, household_pays=True),
-        Option(f"Do it yourself this weekend (${t['diy_cost']} in materials)", [("diy", "home")], cost=t["diy_cost"],
+        Option(f"Do it yourself {when} (${t['diy_cost']} in materials)", [("diy", "home")], cost=t["diy_cost"],
                base=0.3 - (0.1 if c < 40 else 0.0),
                tags={"thrift": 0.6, "diligence": 0.5, "adventure": 0.3, "health": -0.2}, gains={"fun": 10},
                outcomes=[Outcome("proud", "Proud of the work", 0.5, +1, {"fun": 10}),
@@ -267,10 +431,12 @@ def upkeep_fork(sim: Simulation, agent: Agent) -> Fork | None:
                outcomes=[Outcome("gossip", "The neighbours gossip about the state of the place", GOSSIP[st], -1,
                                  {"reputation": -2}),
                          Outcome("damage_spreads", "A small problem gets worse", 0.2, -1, {"home_condition": -5}),
-                         Outcome("lazy_weekend", "A lovely lazy weekend", 0.4, +1, {"fun": 8})]),
+                         Outcome("lazy_weekend", f"A lovely lazy {'weekend' if weekend else 'evening'}", 0.4, +1,
+                                 {"fun": 8})]),
     ]
     question = (f"{home.name} is looking {LOOKS[st]} (condition {math.floor(c)}/100). "
-                f"What do you do about it this weekend?")
+                + ("What do you do about it this weekend?" if weekend else
+                   "You have only just moved in. What do you do about it?"))
     return Fork(agent.id, "upkeep", question, opts, sim.clock.tick)
 
 
@@ -357,38 +523,52 @@ def _downsize_outcomes(sim: Simulation, hh: Household) -> list[Outcome]:
     return outs
 
 
+def _move_down(sim: Simulation, hh: Household, home, how: str, text: str, cost: float, base: float) -> Option:
+    """A move to a smaller or cheaper home (housing.md 9.4's downsize-buy and downsize-rent)."""
+    tags = ({"thrift": 0.6, "family": -0.1, "adventure": 0.2} if how == "buy"
+            else {"thrift": 0.7, "family": -0.3, "adventure": 0.2})
+    return Option(text, [("move_house", home.place)], cost=cost, base=base, tags=tags,
+                  outcomes=_downsize_outcomes(sim, hh), extra={"move": home.id, "how": how}, household_pays=True,
+                  charge=False)
+
+
+def _smallest(sim: Simulation, homes: list):
+    """The one to downsize to: the cheapest (ties: better condition, then id)."""
+    return min(homes, key=lambda h: (housing.value(sim, h.id), -housing.condition_of(sim, h.id), h.id))
+
+
+def _sell_and_buy(sim: Simulation, hh: Household, home, base: float) -> Option:
+    cur = sim.homes[hh.home_id]
+    return _move_down(sim, hh, home, "buy", f"Sell {cur.name} (about ${housing.sale_proceeds(sim, cur.id):,}) and "
+                      f"buy the smaller {home.name} for ${housing.value(sim, home.id):,}",
+                      max(0, housing.net_cost(sim, hh, home.id)), base)
+
+
+def _sell_and_rent(sim: Simulation, hh: Household, home, base: float) -> Option:
+    cur = sim.homes[hh.home_id]
+    return _move_down(sim, hh, home, "rent", f"Sell {cur.name} (about ${housing.sale_proceeds(sim, cur.id):,}) and "
+                      f"rent {home.name} for ${home.rent}/week", 0, base)
+
+
 def _chain(sim: Simulation, agent: Agent, hh: Household, reason: str, deficit: float, esc: int) -> list[Option]:
     """The trouble options that are available now, in order: downsize-buy, downsize-rent, ask for help, sell the
     car, sell belongings (housing.md 9.4, PLAN 5.4)."""
     now = sim.clock.tick
-    cur = sim.homes[hh.home_id]
-    owner = cur.owner == hh.id
-    sale = housing.sale_proceeds(sim, cur.id) if owner else 0
+    owner = sim.homes[hh.home_id].owner == hh.id
     chain = []
     if owner:
-        worth = housing.value(sim, cur.id)
-        smaller = [h for h in housing.vacancies(sim, "for_sale")
-                   if housing.fits(sim, hh, h) and housing.condition_of(sim, h.id) >= DOWNSIZE_CONDITION
-                   and housing.value(sim, h.id) <= DOWNSIZE_SHARE * worth and housing.affordable(sim, hh, h.id)]
+        smaller = housing.downsize_candidates(sim, hh)
         if smaller:
-            s = min(smaller, key=lambda h: (housing.value(sim, h.id), -housing.condition_of(sim, h.id), h.id))
-            chain.append(Option(f"Sell {cur.name} (about ${sale:,}) and buy the smaller {s.name} for "
-                                f"${housing.value(sim, s.id):,}", [("move_house", s.place)],
-                                cost=max(0, housing.net_cost(sim, hh, s.id)), base=0.35 + 0.25 * esc,
-                                tags={"thrift": 0.6, "family": -0.1, "adventure": 0.2},
-                                outcomes=_downsize_outcomes(sim, hh), extra={"move": s.id, "how": "buy"},
-                                household_pays=True, charge=False))
+            chain.append(_sell_and_buy(sim, hh, _smallest(sim, smaller), 0.35 + 0.25 * esc))
     # Rents are whole tens, so "under rent - RENT_CUT + 1" is "at least RENT_CUT cheaper".
     r = housing.cheapest_rental(sim, hh, below=None if owner else hh.weekly_rent - RENT_CUT + 1)
     if r:
         if owner:
-            text, cost = f"Sell {cur.name} (about ${sale:,}) and rent {r.name} for ${r.rent}/week", 0
+            chain.append(_sell_and_rent(sim, hh, r, 0.35 + 0.25 * esc))
         else:
-            text = f"Move to the cheaper {r.name} (${r.rent}/week instead of ${housing._int(hh.weekly_rent)})"
             cost = 0 if reason == "arrears" and hh.arrears > 0 else MOVING_COST  # the landlord moves them free
-        chain.append(Option(text, [("move_house", r.place)], cost=cost, base=0.35 + 0.25 * esc,
-                            tags={"thrift": 0.7, "family": -0.3, "adventure": 0.2}, outcomes=_downsize_outcomes(sim, hh),
-                            extra={"move": r.id, "how": "rent"}, household_pays=True, charge=False))
+            chain.append(_move_down(sim, hh, r, "rent", f"Move to the cheaper {r.name} (${r.rent}/week instead of "
+                                    f"${housing._int(hh.weekly_rent)})", cost, 0.35 + 0.25 * esc))
     friend = _friend(sim, agent, hh, HELP_FRIEND, rich=HELP_RICH * (deficit + HELP_MARGIN))
     if friend:
         amount = int(math.ceil((deficit + HELP_MARGIN) / 100) * 100)

@@ -36,8 +36,9 @@ CLIENT = ROOT / "client"
 TIMEOUT = 3.0
 SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_log", "scores", "valence",
                "due", "pending_emergency", "roll", "base_p", "hit"}
-SCRIPTS = ["view/proj.js", "view/art.js", "view/buildings.js", "view/actors.js", "view/scene.js", "view/movers.js",
-           "view/camera.js", "view/minimap.js", "view/view.js", "dashboard.js", "game.js"]  # PLAN 3.12, in order
+SCRIPTS = [f"view/{n}.js" for n in ("proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart",
+                                    "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view")] + \
+    ["dashboard.js", "game.js"]  # view.md 3.1 (v3), in order
 STYLES = ["style.css", "view/view.css", "dashboard.css"]
 STATS_BYTES = 20 * 1024
 
@@ -65,7 +66,7 @@ def plain_fork(agent_id: str, tick: int) -> Fork:
 
 # --- the real-time scenario (run in a child process) ------------------------------------------------------------
 
-UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 
@@ -518,6 +519,8 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         for _ in range(10 * 60):  # to 16:00: news, a headline or two, hourly samples
             sim.step()
         dana = sim.agents["dana"]
+        if not sim.news:  # seed 1's first news now comes at 18:00 (v3 D: meetings only nearby, fewer routine lines)
+            sim.event("Dana: Makes a breakthrough (+$50).", dana, tag="money_swing")
         for by in ("model", "timeout", "habit"):
             sim._decide(dana, plain_fork("dana", sim.clock.tick), 1, by, "because")
         cls.city = sim

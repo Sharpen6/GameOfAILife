@@ -15,7 +15,7 @@ TICKS_PER_REAL_SECOND = MINUTES_PER_DAY / 600
 
 @dataclass
 class Clock:
-    tick: int = 6 * 60  # the world starts on Monday at 06:00
+    tick: int = 5 * 60  # the world starts on Monday at 05:00, an hour before the earliest shifts
 
     def advance(self) -> None:
         self.tick += 1

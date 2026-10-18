@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>CityView region dev</title>
+<link rel="stylesheet" href="../view/view.css">
+<style>
+  :root { color-scheme: dark; --bg: #11151d; --panel: rgba(16, 20, 30, 0.9); --line: rgba(255, 255, 255, 0.12); --fg: #e8edf5; --dim: #9aa6b8; --acc: #ffe27a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #world { position: fixed; inset: 0; }
+  #map { width: 100%; height: 100%; }
+  #debug { position: absolute; left: 12px; top: 12px; z-index: 6; margin: 0; padding: 8px 10px; border-radius: 8px; background: rgba(8, 10, 16, 0.88);
+    border: 1px solid var(--line); color: #b9f5c8; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="world">
+  <canvas id="map"></canvas>
+  <pre id="debug" hidden></pre>
+</div>
+<script src="../view/proj.js"></script>
+<script src="../view/art.js"></script>
+<script src="../view/buildings.js"></script>
+<script src="../view/towers.js"></script>
+<script src="../view/rail_art.js"></script>
+<script src="../view/actors.js"></script>
+<script src="../view/region.js"></script>
+<script src="../view/lod.js"></script>
+<script src="../view/lowart.js"></script>
+<script src="../view/scene.js"></script>
+<script src="../view/movers.js"></script>
+<script src="../view/crowd.js"></script>
+<script src="../view/trains.js"></script>
+<script src="../view/pings.js"></script>
+<script src="../view/camera.js"></script>
+<script src="../view/minimap.js"></script>
+<script src="../view/view.js"></script>
+<script src="region_data.js"></script>
+<script>
+"use strict";
+// The region view's dev page (V1a): the 256 x 192 region of region_data.js (welcome.town's shape, region.md 8)
+// on the real view, opening at the default view (zoom 1/4 over Millbrook and Riverton Central). V1b's fake host
+// (region_stub.js, v3-region-stub) adds movers when it is present; until then the state is a quiet morning.
+// URL: zoom, at=x,y (tile), minute, season, weather, flat=1, minimap=0, manual=1 (no setTown: the smoke test
+// times it), debug=1 (the HUD), stub=0 (never load region_stub.js).
+(function () {
+  const q = new URLSearchParams(location.search);
+  const RG = window.REGION;
+  const town = Object.assign({ homes: [], housing: { tiers: [], stages: [], landlord: null }, streets: [], stops: [],
+    timetable: { bus: { lines: [] } } }, RG);
+  window.__town = town;
+  const minute = q.has("minute") ? +q.get("minute") : 8 * 60;
+  const state = window.__state = { tick: 1440 + minute, time: "Day 2 Tue", minute, day: 2, season: q.get("season") || "summer",
+    weather: q.get("weather") || "clear", lights: { ns: "green", ew: "red" }, plane: null, buses: [], agents: [], lots: {}, homes: {},
+    crowd: [], occ: [], folk_n: 0, trains: [], talks: [] };
+  // the region opens at its default view: stored as the view's camera so the first frame is drawn there
+  const dv = window.CityView.DEFAULT_VIEW || { zoom: 0.25, x: 85, y: 48 };
+  const at = q.has("at") ? q.get("at").split(",").map(Number) : [dv.x, dv.y];
+  try { localStorage.setItem("goal.view", JSON.stringify({ projection: q.get("flat") === "1" ? "flat" : "iso", zoom: +(q.get("zoom") || dv.zoom), x: at[0], y: at[1], minimap: false })); } catch (e) { /* storage is optional */ }
+  const view = window.__view = CityView.create(document.getElementById("map"), {}, { dynamicResolution: q.get("dyn") === "1", minimap: q.get("minimap") === "1" });
+  window.__setTown = function () {
+    const t0 = performance.now();
+    view.setTown(town);
+    view.setState(state, 1);
+    view.frame();
+    return performance.now() - t0;
+  };
+  const debug = document.getElementById("debug");
+  if (q.get("debug") === "1") {
+    debug.hidden = false;
+    setInterval(() => {
+      const s = view.scene && view.scene();
+      if (!s) return;
+      const c = view.camera(), d = s.debug();
+      debug.textContent = [`zoom ${c.zoom.toFixed(3)} at ${c.x.toFixed(1)}, ${c.y.toFixed(1)}  lod ${d.lod} level ${d.level || "-"}${d.phone ? "  phone" : ""}`,
+        `draw ${d.drawMs.toFixed(1)} ms  builds ${d.buildMs.toFixed(1)} ms  chunks ${d.chunks} (${d.chunkMP.toFixed(1)} + ${d.nearMP.toFixed(1)} of ${d.chunkCapMP} MP) pending ${d.pending}`,
+        `sprites ${d.sprites} (${d.spriteMP.toFixed(1)} of ${d.spriteCapMP} MP) queue ${d.queue}  boxes ${d.boxes}  items ${d.items}  statics ${d.statics_builds}`].join("\n");
+    }, 250);
+  }
+  // V1b's fake host (RegionStub) drives the frames when loaded: its town and welcome state, then one frame per
+  // game minute (speed: minutes per second); __step(n) advances n ticks by hand (the smoke tests)
+  let stub = null, tick = state.tick;
+  window.__step = n => {
+    if (!stub) return null;
+    let fr = null;
+    for (let k = 0; k < (n || 1); k++) {
+      tick++; fr = stub.frame(tick); view.setState(fr.state, fr.speed || 1);
+      if (view.events) view.events(fr.events || []); // as client/game.js: a frame's events become pings
+    }
+    return fr;
+  };
+  const start = () => {
+    if (window.RegionStub) {
+      try {
+        stub = window.__stubHost = window.RegionStub(RG, { season: state.season, weather: state.weather, speed: 1 });
+        const w = stub.welcome(tick);
+        Object.assign(town, w.town);
+        Object.assign(state, w.state);
+      } catch (e) { stub = null; console.warn("region_stub.js did not start:", e && e.message); }
+    }
+    if (q.get("manual") === "1") return;
+    window.__setTown(); view.start();
+    const speed = +(q.get("speed") || 1);
+    if (stub && q.get("freeze") !== "1") setInterval(() => window.__step(1), Math.max(16, 1000 / speed));
+  };
+  // V1b's fake host, when it exists, drives the state (crowd, trains, talks); without it the page still runs
+  if (q.get("stub") !== "0") {
+    const s = document.createElement("script");
+    s.src = "region_stub.js";
+    s.onload = () => { window.__stub = true; start(); };
+    s.onerror = () => { window.__stub = false; start(); };
+    document.body.appendChild(s);
+  } else { window.__stub = false; start(); }
+})();
+</script>
+</body>
+</html>
