@@ -1136,6 +1136,12 @@ class GenSim:
         hh = self.households.get(hid)
         return hh if hh is not None else self.folk.household(hid)
 
+    def event(self, text, agent=None, kind=None, *, tag="news", importance=None, agents=None, **_kw):
+        ev = {"text": text, "tag": tag, "agents": [getattr(a, "id", a) for a in (agents or ())],
+              "tick": self.clock.tick}
+        self.events.append(ev)
+        return ev
+
 
 def build_lots(town, homes: dict) -> dict:
     """housing.build_lots, or (before R1b) v2's lots plus the region's from `town.lot_conditions`."""

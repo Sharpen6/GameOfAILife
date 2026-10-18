@@ -1049,6 +1049,13 @@
       const hh = this.households.get(hid);
       return hh !== undefined ? hh : this.folk.household(hid);
     }
+
+    event(text, agent = null, kind = null, opts = {}) {
+      const ev = { text, tag: opts.tag || "news", agents: (opts.agents || []).map(a => (a && a.id) || a),
+        tick: this.clock.tick };
+      this.events.push(ev);
+      return ev;
+    }
   }
 
   // housing.build_lots, then the region's lots from `town.lot_conditions` where it left them without a condition.

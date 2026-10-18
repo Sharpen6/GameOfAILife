@@ -5,11 +5,19 @@ everyone in exactly one household and never put two households in one home; birt
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
 
 from gameofailife import folk_gen, folk_life, housing
 from gameofailife.clock import MINUTES_PER_DAY
+from gameofailife.rng import r2
 from tests.support.folk_stub import SimStub
+
+ROOT = Path(__file__).resolve().parent.parent
+NODE = shutil.which("node")
 
 
 def cents(x: float) -> int:
@@ -51,6 +59,61 @@ def check_households(test, sim):
     for h in sim.homes.values():
         if h.household is not None and h.household.startswith("fh"):
             test.assertEqual(homes.get(h.id), h.household, h.id)
+
+
+def rehearse(sim, days: int = 22) -> dict:
+    """Three scripted weeks of folk_life on generated townsfolk: joins, splits and leavers on day 3, broke households
+    (some laid off, so the third Sunday moves them somewhere cheaper) on day 5, birthdays on day 10, every workday's
+    shift pay, Friday pensions and Sunday books. Line by line with rehearse in port/tools/parity_folk_gen.cjs."""
+    folk = sim.folk
+    for day in range(days):
+        weekday = day % 7
+        sim.clock.tick = day * MINUTES_PER_DAY + 8 * 60
+        if day == 3:
+            adults = [p for p in folk.people if p.age >= 25 and not p.gone]
+            hosts = adults[::9]
+            for k, p in enumerate(adults[::37][:15]):
+                if p.gone:
+                    continue
+                if k % 3 == 0:
+                    host = hosts[(k * 7) % len(hosts)]
+                    if not host.gone:
+                        folk_life.join(sim, p, host)
+                elif k % 3 == 1:
+                    folk_life.split(sim, p)
+                else:
+                    folk_life.release(sim, p)
+        if day == 5:
+            for k, hh in enumerate(folk.households):
+                if k % 30 == 0 or k % 50 == 7:
+                    for p in folk_life.adults(folk, hh):
+                        p.money = r2(p.money - 4000)
+                        p.savings = 0.0
+                        if k % 50 == 7 and p.job is not None and p.job.hourly_wage > 0:
+                            folk_gen.board(sim).free(p.job.slot)  # laid off: no pay to climb back with
+                            p.job = None
+        if day == 10:
+            for p in folk.people[::40]:
+                if p.alive and not p.gone:
+                    p.age += 1
+                    folk_life.on_birthday(sim, p)
+        for p in folk.people:
+            job = p.job
+            if p.gone or job is None or job.hourly_wage <= 0 or weekday not in job.workdays:
+                continue
+            folk_life.pay_shift(sim, p)
+        if weekday == 4:
+            sim.clock.tick = day * MINUTES_PER_DAY + 9 * 60
+            folk_life.pensions(sim)
+        if weekday == 6:
+            sim.clock.tick = day * MINUTES_PER_DAY + 23 * 60
+            folk_life.weekly(sim)
+    out = folk_gen.dump(sim)
+    out["gone"] = [p.id for p in folk.people if p.gone]
+    out["books"] = [[hh.id, hh.arrears, hh.clean_sundays, hh.gone, hh.last_funds] for hh in folk.households]
+    out["homes"] = [[h.id, h.household, h.owner, h.listing, h.rent] for h in sim.homes.values()]
+    out["events"] = [ev["text"] for ev in sim.events]
+    return out
 
 
 class BooksTest(unittest.TestCase):
@@ -237,6 +300,29 @@ class HouseholdTest(unittest.TestCase):
         folk_life.on_birthday(sim, kid)
         self.assertEqual(kid.job.place_id, folk_gen.HIGH_SCHOOL)
         self.assertEqual(kid.job.end_hour, folk_gen.student_job(11, folk_gen.HIGH_SCHOOL).end_hour)
+
+
+class NodeParityTest(unittest.TestCase):
+    """folk_life.js keeps the same books as folk_life.py over the scripted three weeks."""
+
+    def test_rehearsal(self):
+        sim = folk_gen.generate(1)
+        got = rehearse(sim)
+        self.assertGreater(len(got["gone"]), 0)
+        self.assertTrue(any(b[1] > 0 for b in got["books"]))
+        self.assertTrue(any(hh["kind"] == "split" for hh in got["households"]))
+        if not NODE or not (ROOT / "port" / "src" / "folk_life.js").is_file():
+            self.skipTest("node or folk_life.js missing")
+        tool = ROOT / "port" / "tools" / "parity_folk_gen.cjs"
+        out = subprocess.run([NODE, str(tool), "--money", "1"], capture_output=True, text=True, timeout=600)
+        self.assertEqual(out.returncode, 0, out.stdout[-2000:] + out.stderr[-2000:])
+        node = json.loads(out.stdout.strip().splitlines()[-1])
+        py = json.loads(json.dumps(got))
+        for key in ("gone", "books", "homes", "events", "households"):
+            self.assertEqual(node[key], py[key], key)
+        for a, b in zip(node["people"], py["people"]):
+            self.assertEqual(a, b, a["id"])
+        self.assertEqual(len(node["people"]), len(py["people"]))
 
 
 if __name__ == "__main__":
