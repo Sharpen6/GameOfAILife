@@ -111,8 +111,9 @@
 
     // --- vehicles -----------------------------------------------------------------------------------------
     // Drawn through the projection around tile-local (0.5, 0.5). d: 0 heading +x, 1 +y, 2 -x, 3 -y.
-    function vehicle(key, d, L, Wd, draw) {
-      return oriented(key, 112, 84, 56, 58, g => {
+    // h: canvas height (v2's 84; long vehicles take 92 so the flat view's shadow fits below the anchor)
+    function vehicle(key, d, L, Wd, draw, h) {
+      return oriented(key, 112, h || 84, 56, 58, g => {
         const ax = d % 2 === 0, hl = (ax ? L : Wd) / 2, hw = (ax ? Wd : L) / 2;
         draw(g, 0.5 - hl, 0.5 - hw, 0.5 + hl, 0.5 + hw, ax);
       });
@@ -224,7 +225,7 @@
           if (F.len > 0.4) poly(g, quad(F, 0.04, F.len - 0.04, truck ? 12 : 9, truck ? 16 : 11), truck ? color : shade(color, 0.8));
         }
         lights(g, x0, y0, x1, y1, d, 4, 6);
-      });
+      }, 92);
     }
     art.van = function (d) {
       return vehicle(`van:${d}`, d, 0.9, 0.38, (g, x0, y0, x1, y1, ax) => {
