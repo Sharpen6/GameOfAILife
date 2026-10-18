@@ -290,8 +290,27 @@
     p.reputation = 50.0;
     _event(sim, p, `${p.name} starts a new job as ${p.job.title} at ${_place_name(sim, p.job)}.`, "job_new",
       named ? null : 0);
+    coworkers(sim, p, rr);
     if (!named) G.folk.on_job_change(sim, p);
     return true;
+  }
+
+  // A new hire meets up to 4 coworkers at the same place they have no tie with yet (slot order): coworkers at 15-25
+  // both ways. With isolated townsfolk only within the tier.
+  function coworkers(sim, p, rr) {
+    const b = board(sim);
+    const place = p.job.place_id;
+    const named = sim.agents.has(p.id);
+    const isolated = Boolean(sim.folk && sim.folk.isolated);
+    let met = 0;
+    for (let slot = 0; slot < b.holder.length; slot++) {
+      if (met >= NEW_COWORKERS) break;
+      const holder = b.holder[slot];
+      if (holder === null || holder === p.id || p.relationships.has(holder) || b.jobs[slot].place_id !== place) continue;
+      if (isolated && sim.agents.has(holder) !== named) continue;
+      G.people.set_rel(sim, p.id, holder, "coworker", rr.int(COWORKER_AFFINITY[0], COWORKER_AFFINITY[1]));
+      met += 1;
+    }
   }
 
   // This week's unemployment benefit for `p`: see career.py.
@@ -307,6 +326,6 @@
     STANDING_GOOD, STANDING_BAD, STANDING_PLAIN, STANDING_DRIFT, NETWORK_AT, COWORKER_AFFINITY, NEW_COWORKERS,
     PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY, PROMOTE_TITLES, OFFER_AT, OFFER_YEAR, OFFER_RAISE, RETIRE_AGE,
     RETIRE_ODDS, JobBoard, board, _hit, _place_name, _event, worker, on_shift_end, daily, review, promote, retire,
-    lose_job, _pick, network_slot, _cap, hire, offer, benefit,
+    lose_job, _pick, network_slot, _cap, hire, coworkers, offer, benefit,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

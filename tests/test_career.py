@@ -74,7 +74,8 @@ class BoardTest(unittest.TestCase):
         fake = mock.Mock()
         fake.commute_minutes = lambda person, place: minutes[place]
         fake.isolated = False
-        with mock.patch.object(sim, "folk", fake), mock.patch.object(folk, "on_job_change") as changed:
+        with mock.patch.object(sim, "folk", fake), mock.patch.object(folk, "on_job_change") as changed, \
+                mock.patch.object(career, "coworkers"):  # the mock folk has no people to meet
             self.assertTrue(career.hire(sim, p, dice.stream(1, 0)))
         self.assertEqual(p.job.slot, s_near)
         changed.assert_called_once()
@@ -120,6 +121,33 @@ class StandingTest(unittest.TestCase):
 
 
 class ReviewTest(unittest.TestCase):
+    def test_a_city_owns_its_jobs(self):
+        a, b = Simulation(1), Simulation(1)
+        x = next(p for p in a.agents.values() if career.worker(p))
+        career.promote(a, x)
+        self.assertIsNot(x.job, b.agents[x.id].job)
+        self.assertFalse(b.agents[x.id].job.title.startswith("senior senior"))
+        self.assertNotEqual(x.job.title, b.agents[x.id].job.title)
+
+    def test_a_new_hire_meets_up_to_4_coworkers(self):
+        sim = life_sim()
+        b = career.board(sim)
+        place = max({j.place_id for j in b.jobs}, key=lambda pl: sum(1 for j in b.jobs if j.place_id == pl))
+        seeker = next(a for a in sim.agents.values() if career.worker(a) and a.job.place_id != place)
+        career.lose_job(sim, seeker, dice.stream(1, 0), "laid_off")
+        b.reopen.clear()
+        seeker.life.last_wage = 1000.0
+        slot = b.add(Job("clerk", place, 5.0, 9, 17, (0, 1, 2, 3, 4)), None)
+        before = set(seeker.relationships)
+        self.assertTrue(career.hire(sim, seeker, dice.stream(1, 0), slot))
+        met = [oid for oid in seeker.relationships if oid not in before]
+        self.assertTrue(1 <= len(met) <= career.NEW_COWORKERS, met)
+        for oid in met:
+            r = seeker.relationships[oid]
+            self.assertEqual(getattr(r.kind, "value", r.kind), "coworker")
+            self.assertTrue(15 <= r.affinity <= 25)
+            self.assertIn(seeker.id, sim.agents[oid].relationships)
+
     def test_promotion_senior_then_head(self):
         sim = life_sim()
         a = next(a for a in sim.agents.values() if career.worker(a) and not a.job.title.startswith(("senior ", "head ")))

@@ -326,11 +326,33 @@ def hire(sim, p, rr, slot: int | None = None) -> bool:
     p.reputation = 50.0
     _event(sim, p, f"{p.name} starts a new job as {p.job.title} at {_place_name(sim, p.job)}.", "job_new",
            None if named else 0)
+    coworkers(sim, p, rr)
     if not named:
         from . import folk
 
         folk.on_job_change(sim, p)
     return True
+
+
+def coworkers(sim, p, rr) -> None:
+    """A new hire meets up to 4 coworkers at the same place they have no tie with yet (slot order): coworkers at
+    15-25 both ways. With isolated townsfolk only within the tier."""
+    from . import people
+
+    b = board(sim)
+    place = p.job.place_id
+    named = p.id in sim.agents
+    isolated = bool(getattr(getattr(sim, "folk", None), "isolated", False))
+    met = 0
+    for slot, holder in enumerate(b.holder):
+        if met >= NEW_COWORKERS:
+            break
+        if holder is None or holder == p.id or holder in p.relationships or b.jobs[slot].place_id != place:
+            continue
+        if isolated and (holder in sim.agents) != named:
+            continue
+        people.set_rel(sim, p.id, holder, "coworker", rr.int(COWORKER_AFFINITY[0], COWORKER_AFFINITY[1]))
+        met += 1
 
 
 def benefit(sim, p) -> float:

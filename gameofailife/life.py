@@ -10,6 +10,7 @@ roll goes through `people.log_roll`. Folk are reached only through `folk.py`'s f
 
 from __future__ import annotations
 
+import copy
 from collections import Counter, deque
 from dataclasses import dataclass, field
 
@@ -241,7 +242,8 @@ def pre_init(sim) -> None:
     board = career.JobBoard()
     for a in sim.agents.values():
         if a.job is not None and a.job.hourly_wage > 0:
-            board.add(a.job, a.id)
+            a.job = copy.copy(a.job)  # the cast's Job objects are shared by every Simulation (JS builds fresh ones);
+            board.add(a.job, a.id)  # the board, raises and promotions write to this city's own copy
     board.named = len(board.jobs)
     sim.life = LifeCity(board)
 
