@@ -72,10 +72,12 @@ class _Spec(dict):
     inside = property(lambda s: s["inside"])
 
 
+TODDLE_MINUTES = 120  # an under-5 is looked after in 2-hour spells: toddle tops their needs back up to 75
+
 ACTIVITIES_EXTRA = {
     "ward": _Spec(minutes=1440, gains={"hunger": 40}, inside=True),  # a hospital stay: lasts until ward_until
     "doctor": _Spec(minutes=45, gains={}, inside=True),
-    "baby": _Spec(minutes=1440, gains={}, inside=True),  # an under-5's day at home (toddle)
+    "baby": _Spec(minutes=TODDLE_MINUTES, gains={}, inside=True),  # an under-5 at home (toddle tops needs up)
 }
 
 
@@ -413,7 +415,7 @@ def birthday(sim, p) -> None:
 
 
 def toddle(sim, p) -> None:
-    """An under-5's next step (no forks): a day at home doing `baby`, needs held at 75."""
+    """An under-5's next step (no forks): two hours at home doing `baby`, needs topped back up to 75."""
     for n in p.needs:
         p.needs[n] = max(p.needs[n], 75.0)
     sim.start_plan(p, [("baby", "home")])

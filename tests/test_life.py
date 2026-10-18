@@ -153,7 +153,7 @@ class SkeletonTest(unittest.TestCase):
             self.assertEqual(life.stage(a), want)
 
     def test_activities_extra(self):
-        for name, minutes in (("ward", 1440), ("doctor", 45), ("baby", 1440)):
+        for name, minutes in (("ward", 1440), ("doctor", 45), ("baby", life.TODDLE_MINUTES)):
             spec = life.ACTIVITIES_EXTRA[name]
             self.assertEqual(spec["minutes"], minutes)
             self.assertEqual(spec.minutes, minutes)

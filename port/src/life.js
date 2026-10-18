@@ -55,11 +55,13 @@
   const ARI_BILL = [1, 10 * 60]; // Ari Ben-David's bill: day index 1 ("Day 2"), 10:00
   const SEED_PREGNANT = 0.03; // of partnered townswomen 20-44 at the start, due days 5-90
 
+  const TODDLE_MINUTES = 120; // an under-5 is looked after in 2-hour spells: toddle tops their needs back up to 75
+
   // An activity spec: spec.minutes and spec["minutes"] are the same in JS.
   const ACTIVITIES_EXTRA = {
     ward: { minutes: 1440, gains: { hunger: 40 }, inside: true }, // a hospital stay: lasts until ward_until
     doctor: { minutes: 45, gains: {}, inside: true },
-    baby: { minutes: 1440, gains: {}, inside: true }, // an under-5's day at home (toddle)
+    baby: { minutes: TODDLE_MINUTES, gains: {}, inside: true }, // an under-5 at home (toddle tops needs up)
   };
 
   class Condition {
@@ -358,7 +360,7 @@
     }
   }
 
-  // An under-5's next step (no forks): a day at home doing `baby`, needs held at 75.
+  // An under-5's next step (no forks): two hours at home doing `baby`, needs topped back up to 75.
   function toddle(sim, p) {
     for (const n of Object.keys(p.needs)) p.needs[n] = Math.max(p.needs[n], 75.0);
     sim.start_plan(p, [["baby", "home"]]);
@@ -881,7 +883,8 @@
     HEART_FATAL, BACK_PAIN_MANUAL, CHRONIC, LABELS, SPRAIN, DOCTOR_FEE, DOCTOR_DAYS, DOCTOR_COMPLICATIONS, WARD_FEE,
     ILL_CAP, WARD_HEAL, LOW_HEALTH, FRAIL_AGE, FRAIL_RATE, CHRONIC_HEALTH, GRIEF_DAYS, CONCEPTION, CHILDREN_MULT,
     PREGNANCY_DAYS, BIRTH_MINUTE, WANT_EVERY, NEW_BABY_DAYS, BABY_ENERGY, FAMILY_AFFINITY, SCHOOL_AGE, ADULT_AGE,
-    SHIRA_DUE, ARI_BILL, SEED_PREGNANT, ACTIVITIES_EXTRA, Condition, LifeState, LifeCity, cget, cadd, _stream, _sid,
+    SHIRA_DUE, ARI_BILL, SEED_PREGNANT, TODDLE_MINUTES, ACTIVITIES_EXTRA, Condition, LifeState, LifeCity, cget, cadd,
+    _stream, _sid,
     _hit, _named, _person, _event, _agenda, _hospital_id, _partner, _children, pre_init, init, init_person,
     seed_story, _conceive, tick, _ward_care, _run_agenda, legacy_ageing, daily, birthday, toddle, _health, _cause,
     _fall_ill, _heart, _see_doctor, _payer, note_injury, hospitalise, _discharge, max_health, can_work, in_hospital,
