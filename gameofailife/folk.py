@@ -150,7 +150,8 @@ class Folk:
         self.strollers: dict[int, str] = {}  # people strolling in a park -> the park
         self.luck_log = deque(maxlen=5000)
         self.counters = {"steps": 0, "choices": 0, "habit": 0, "shifts": 0, "school_days": 0, "trips": 0,
-                         "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0}
+                         "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0,
+                         "school_runs": 0}
         self.today = {"boardings": 0, "train_trips": 0, "lines": {}}  # since midnight
         self._lines = None  # train id -> line id
         self.cpu = deque(maxlen=CPU_KEEP)  # process_time per tick, seconds
@@ -171,6 +172,7 @@ class Folk:
         self._bed: dict[int, int] = {}
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
+        self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
         Person.clock = sim.clock
         Person.town = town
         Person.locate = self._locate
@@ -499,6 +501,8 @@ class Folk:
                     self._go_home(sim, p, now, "sick_home", self._wake_tick(p, now))
                     return
                 work = "school" if job.title == "student" or p.age < 18 else "work"
+                if work == "school" and mode == "car":
+                    self._school_run(p, now, job.place_id)
                 self._go(sim, p, now, job.place_id, work, until=day * DAY + job.end_hour * 60, prefer=mode)
                 return
         if night:
@@ -600,9 +604,47 @@ class Folk:
         self.stay[p.i] = (now, arrive)
         self.schedule(p, arrive)
 
+    def _school_run(self, child, now: int, school: str) -> None:
+        """A parent with a car drives a pupil to school and straight back home (folk.md 4's school runs), so the
+        car is on the street both ways and the pupil rides as its passenger. Only a member relaxing or eating at
+        home, and only when they are back before they set off for their own shift."""
+        hh = self.hh_of(child)
+        home = self.home_place(child)
+        if hh is None or home is None or child.inside != home or child.trip is not None:
+            return
+        day = now // DAY
+        for mid in hh.member_ids:
+            d = self.person(mid)
+            if d is None or d.age < 18 or not d.alive or d.gone or not d.owns_car or d.trip is not None:
+                continue
+            if d.inside != home or d.activity not in ("relax_home", "eat_home"):
+                continue
+            out = folk_transit.road_leg(self.town, DRIVE, home, school, now)
+            back = folk_transit.road_leg(self.town, DRIVE, school, home, out[2])
+            job = d.job
+            if job is not None and day % 7 in job.workdays and d.worked_day != day and \
+                    back[2] - day * DAY > self._set_off(d):
+                continue
+            self._gain(d, now)
+            self.settle(d, now)
+            self.ends.pop(d.i, None)
+            self._leave(d)
+            d.trip = Trip([out, back], home, "relax_home", back[2] + 1, "car")
+            d.state = "travelling"
+            d.activity = "school_run"
+            d.activity_place = school
+            self.out[d.i] = None
+            self.counters["trips"] += 1
+            self.counters["school_runs"] += 1
+            self.stay[d.i] = (now, back[2])
+            self.schedule(d, back[2])
+            self._driven[child.i] = (d.i, now)
+            return
+
     def _arrive(self, sim, p, now: int) -> None:
         t = p.trip
         p.trip = None
+        self._driven.pop(p.i, None)
         self.out.pop(p.i, None)
         p.activity = t.then
         p.state = "busy"
@@ -986,17 +1028,24 @@ class Folk:
         return None  # RIDE: aboard
 
     def _passenger(self, p, leg) -> bool:
-        """A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one."""
+        """A child in a car rides in a parent's school run, or is drawn as the car itself unless a sibling it shares
+        the car with is the passenger of a school run or has a lower index."""
+        t0 = p.trip.legs[0][1]
+        run = self._driven.get(p.i)
+        if run is not None and run[1] == t0:
+            return True
         hh = self.hh_of(p)
         if hh is None:
             return False
         for mid in hh.member_ids:
             q = self.people[int(mid[1:])]
-            if q.i >= p.i:
+            if q is p:
                 continue
             if q.trip is not None and q.trip.dest == p.trip.dest and q.age < 18 and q.trip.mode == p.trip.mode:
-                if q.trip.legs and q.trip.legs[0][1] == p.trip.legs[0][1] and q.trip.legs[0][0] == leg[0]:
-                    return True
+                if q.trip.legs and q.trip.legs[0][1] == t0 and q.trip.legs[0][0] == leg[0]:
+                    qr = self._driven.get(q.i)
+                    if q.i < p.i or (qr is not None and qr[1] == t0):
+                        return True
         return False
 
     def crowd(self, sim) -> list[int]:

@@ -122,7 +122,8 @@
       this.strollers = new Map(); // people strolling in a park -> the park
       this.luck_log = []; // the last 5000 luck changes (folk_life appends and trims)
       this.counters = { steps: 0, choices: 0, habit: 0, shifts: 0, school_days: 0, trips: 0, boardings: 0,
-        train_trips: 0, late: 0, sick_days: 0, starved: 0 };
+        train_trips: 0, late: 0, sick_days: 0, starved: 0,
+        school_runs: 0 };
       this.today = { boardings: 0, train_trips: 0, lines: {} }; // since midnight
       this._lines = null; // train id -> line id
       this.cpu = []; // ms per tick, the last CPU_KEEP
@@ -143,6 +144,7 @@
       this._bed = new Map();
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
+      this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
       const { Person } = fm();
       Person.clock = sim.clock;
       Person.town = town;
@@ -500,6 +502,7 @@
             return;
           }
           const work = job.title === "student" || p.age < 18 ? "school" : "work";
+          if (work === "school" && mode === "car") this._school_run(p, now, job.place_id);
           this._go(sim, p, now, job.place_id, work, day * DAY + job.end_hour * 60, 30, mode);
           return;
         }
@@ -607,9 +610,46 @@
       this.schedule(p, arrive);
     }
 
+    // A parent with a car drives a pupil to school and straight back home (folk.md 4's school runs), so the car
+    // is on the street both ways and the pupil rides as its passenger. Only a member relaxing or eating at home,
+    // and only when they are back before they set off for their own shift.
+    _school_run(child, now, school) {
+      const hh = this.hh_of(child);
+      const home = this.home_place(child);
+      if (hh === null || home === null || child.inside !== home || child.trip !== null) return;
+      const day = Math.floor(now / DAY);
+      const { DRIVE, Trip } = fm();
+      for (const mid of hh.member_ids) {
+        const d = this.person(mid);
+        if (d === null || d.age < 18 || !d.alive || d.gone || !d.owns_car || d.trip !== null) continue;
+        if (d.inside !== home || (d.activity !== "relax_home" && d.activity !== "eat_home")) continue;
+        const out = ft().road_leg(this.town, DRIVE, home, school, now);
+        const back = ft().road_leg(this.town, DRIVE, school, home, out[2]);
+        const job = d.job;
+        if (job !== null && job.workdays.includes(day % 7) && d.worked_day !== day &&
+            back[2] - day * DAY > this._set_off(d)) continue;
+        this._gain(d, now);
+        this.settle(d, now);
+        this.ends.delete(d.i);
+        this._leave(d);
+        d.trip = new Trip([out, back], home, "relax_home", back[2] + 1, "car");
+        d.state = "travelling";
+        d.activity = "school_run";
+        d.activity_place = school;
+        this.out.set(d.i, null);
+        this.counters.trips += 1;
+        this.counters.school_runs += 1;
+        this.stay.set(d.i, [now, back[2]]);
+        this.schedule(d, back[2]);
+        this._driven.set(child.i, [d.i, now]);
+        return;
+      }
+    }
+
     _arrive(sim, p, now) {
       const t = p.trip;
       p.trip = null;
+      this._driven.delete(p.i);
       this.out.delete(p.i);
       p.activity = t.then;
       p.state = "busy";
@@ -996,21 +1036,28 @@
       return [place.entry[0], place.entry[1]];
     }
 
-    // [x, y, mode] of a traveller at tick, or null while aboard a train or a passenger.
-    // A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one.
+    // A child in a car rides in a parent's school run, or is drawn as the car itself unless a sibling it shares the
+    // car with is the passenger of a school run or has a lower index.
     _passenger(p, leg) {
+      const t0 = p.trip.legs[0][1];
+      const run = this._driven.get(p.i);
+      if (run !== undefined && run[1] === t0) return true;
       const hh = this.hh_of(p);
       if (hh === null) return false;
       for (const mid of hh.member_ids) {
         const q = this.people[Number(mid.slice(1))];
-        if (q.i >= p.i) continue;
+        if (q === p) continue;
         if (q.trip !== null && q.trip.dest === p.trip.dest && q.age < 18 && q.trip.mode === p.trip.mode) {
-          if (q.trip.legs.length && q.trip.legs[0][1] === p.trip.legs[0][1] && q.trip.legs[0][0] === leg[0]) return true;
+          if (q.trip.legs.length && q.trip.legs[0][1] === t0 && q.trip.legs[0][0] === leg[0]) {
+            const qr = this._driven.get(q.i);
+            if (q.i < p.i || (qr !== undefined && qr[1] === t0)) return true;
+          }
         }
       }
       return false;
     }
 
+    // [x, y, mode] of a traveller at tick, or null while aboard a train or a passenger.
     _leg_xy(p, tick) {
       const { WALK, DRIVE, WAIT, K_WALK, K_CAR, K_AMBULANCE, K_WAIT } = fm();
       const trip = p.trip;
