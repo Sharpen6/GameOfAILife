@@ -11,19 +11,17 @@
 5. The cast is offered only the 37: candidate lists, `market_json` and `house_drought` ignore region homes (and the
    60-day house-hunt soak, GOAL_SLOW=1).
 
-Until R1a's `region.py` and F3's hooks land, the region town comes from the prototype loader in the design
-scratchpad and is swapped into a millbrook `Simulation` (its `town`, `homes` and `lots`).
+Until F3's hooks land, the region town (region.build_region) is swapped into a millbrook `Simulation` (its `town`,
+`homes` and `lots`); R1B_PATCHED=1 runs the identity test that way too.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import inspect
 import os
 import sys
 import time
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 from gameofailife import housing, travel
@@ -33,9 +31,6 @@ from gameofailife.sim import Simulation
 
 SLOW = os.environ.get("GOAL_SLOW") == "1"
 WORLD_KW = "world" in inspect.signature(Simulation).parameters
-SCRATCH_LOADER = Path(os.environ.get(
-    "R1B_REGION_LOADER", "/tmp/claude-0/-home-claude-GameOfAILife/9ad2953c-87eb-5f6a-9a0d-38b331d8d532/scratchpad/"
-                         "design-v3/scratch-region/region_load.py"))
 TICK_CPU_CAP = 0.050  # seconds of process_time a region tick may take
 REGION_HOMES = 575
 
@@ -48,42 +43,13 @@ def _days(default: int) -> int:
     return int(os.environ.get("SOAK_DAYS", default))
 
 
-_TOWNS: dict[int, object] = {}
-
-
 def region_town(seed: int):
-    """The region map for a seed: region.build_region, else the scratch prototype loader, else None."""
-    if seed in _TOWNS:
-        return _TOWNS[seed]
-    town = None
+    """The region map for a seed (R1a's region.build_region), or None on a branch without it."""
     try:
-        from gameofailife import region  # R1a's module
-        town = region.build_region(seed)
+        from gameofailife import region
     except ImportError:
-        if SCRATCH_LOADER.exists():
-            saved = list(sys.path)
-            spec = importlib.util.spec_from_file_location("_r1b_region_load", SCRATCH_LOADER)
-            mod = importlib.util.module_from_spec(spec)
-            try:
-                spec.loader.exec_module(mod)
-            finally:
-                sys.path[:] = saved
-            town = mod.build_region(seed)
-            if not hasattr(type(town), "in_frozen"):
-                type(town).in_frozen = lambda self, x, y: x < 69 and y < 50
-    _TOWNS[seed] = town
-    return town
-
-
-def warm_millbrook(town) -> None:
-    """Every field the 60 need in the region (region.md 6.2): Millbrook's places and the bus stops."""
-    from gameofailife.transit import STOP_XY
-
-    for pid in sorted(town.millbrook_ids):
-        town.walk_field(town.places[pid].entry)
-        town.road_field(town.places[pid].entry)
-    for xy in STOP_XY.values():
-        town.walk_field(xy)
+        return None
+    return region.build_region(seed)
 
 
 def region_sim(seed: int, patched: bool = False) -> Simulation:
@@ -103,7 +69,7 @@ def region_sim(seed: int, patched: bool = False) -> Simulation:
 
 
 def needs_region(test):
-    return unittest.skipUnless(region_town(1) is not None, "no region map (region.py or the scratch loader)")(test)
+    return unittest.skipUnless(region_town(1) is not None, "no region map (R1a's region.py)")(test)
 
 
 def trace(sim: Simulation, days: int, cpu: list | None = None) -> dict:
@@ -159,11 +125,7 @@ class IdentityTest(unittest.TestCase):
             with self.subTest(seed=seed):
                 base = trace(Simulation(seed), days)
                 sim = region_sim(seed, patched)
-                warm = getattr(sim.town, "warm", None)
-                if patched or warm is None:
-                    warm_millbrook(sim.town)
-                else:
-                    warm()
+                sim.town.warm()  # what the server does at start: Millbrook's fields (region.md 6.2)
                 cpu = []
                 got = trace(sim, days, cpu)
                 load = os.getloadavg()[0]
@@ -191,7 +153,7 @@ class RuleRTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sim = region_sim(1, patched=True)
-        warm_millbrook(cls.sim.town)
+        cls.sim.town.warm()
         cls.town = cls.sim.town
 
     def far_places(self, kind: str) -> list:
@@ -500,7 +462,7 @@ class CastMarketSoak(unittest.TestCase):
         for seed in _seeds("1"):
             with self.subTest(seed=seed):
                 sim = region_sim(seed)
-                warm_millbrook(sim.town)
+                sim.town.warm()
                 housing.list_vacancies(sim)
                 moves = 0
                 for _ in range(days):

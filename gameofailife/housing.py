@@ -292,10 +292,12 @@ def list_vacancies(sim) -> int:
     """List every empty region home (to let at `region.rent_at` when the landlord owns it, else for sale at its
     value) and unlist the occupied ones; returns how many region homes are listed. Only the townsfolk call it:
     after populating and after each folk move, the only ways region homes change hands. With no townsfolk nothing
-    is ever listed. The 37 are left alone."""
+    is ever listed. The 37 are left alone. The rent is always worked out from the base rent of `town.home_specs`,
+    never from the last listing."""
+    from . import region  # R1a's module; lazy (PLAN 2.16)
+
     town = sim.town
-    base = {spec[0]: spec[6] for spec in getattr(town, "home_specs", ())}
-    rent_at = _rent_at_fn()
+    specs = {row[0]: row for row in town.home_specs}
     n = 0
     for h in sim.homes.values():
         if h.id in _V2_HOME_SET:
@@ -305,37 +307,11 @@ def list_vacancies(sim) -> int:
             continue
         if h.owner == "landlord":
             h.listing = "for_rent"
-            h.rent = rent_at(town, _Rent(h, base.get(h.id, h.rent)), sim.lots[h.place].condition)
+            h.rent = region.rent_at(town, specs[h.id], sim.lots[h.place].condition)
         else:
             h.owner, h.listing = "market", "for_sale"
         n += 1
     return n
-
-
-def _rent_at_fn():
-    """region.rent_at (region.md 4, Prices: round5(rent x (0.6 + 0.4 x condition / 100))), or that rule until R1a's
-    module lands."""
-    try:
-        from . import region  # R1a's module; lazy (PLAN 2.16)
-    except ImportError:
-        region = None
-    f = getattr(region, "rent_at", None)
-    if f is not None:
-        return f
-
-    def rent_at(town, home, condition: float) -> int:
-        a, b = (getattr(town, "prices", None) or {}).get("condition_rent", (0.6, 0.4))
-        return math.floor(home.rent * (a + b * condition / 100) / 5 + 0.5) * 5
-    return rent_at
-
-
-class _Rent:
-    """A region home seen with its base rent (the one in `town.home_specs`), for rent_at: the listed rent is
-    always worked out from the base, never from the last listing."""
-
-    def __init__(self, home: Home, rent: int):
-        self.id, self.place, self.unit, self.tier, self.bedrooms, self.rent = (home.id, home.place, home.unit,
-                                                                              home.tier, home.bedrooms, rent)
 
 
 def _folk_commute_cost(p) -> int:
