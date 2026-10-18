@@ -261,7 +261,7 @@ class ForkMessageTest(unittest.TestCase):
             checked += 1
             self.assertEqual(len(msg["options"]), 4)
             for i, opt in enumerate(msg["options"]):
-                self.assertLessEqual(set(opt), {"index", "label", "cost", "travel_minutes", "household"})
+                self.assertLessEqual(set(opt), {"index", "label", "cost", "travel_minutes", "household", "home"})
                 self.assertEqual(opt["index"], i)
                 self.assertEqual("household" in opt, fork.options[i].household_pays)
                 if "travel_minutes" in opt:
@@ -390,7 +390,7 @@ class SummaryTest(unittest.TestCase):
 class EventsTest(unittest.TestCase):
     def test_event_fields_and_places(self):
         sim, events = RUN["sim"], RUN["events"]
-        self.assertGreater(len(events), 300)
+        self.assertGreater(len(events), 150)  # was 300: routine good nights, meals and rest are no lines (v3 D 14)
         for ev in events:
             with self.subTest(seq=ev["seq"]):
                 self.assertEqual(set(ev), EVENT_KEYS)
@@ -1146,6 +1146,8 @@ class CafeClosingTest(unittest.TestCase):
                 expected.append(minute)
             for kind, builder in (("free_time", forks.free_time_fork), ("lonely", forks.lonely_fork)):
                 fork = builder(self.sim, far)
+                if fork is None and forks.in_work_window(self.sim, far):  # package D item 11: none in that window
+                    continue
                 labels = [o.label for o in fork.options]
                 self.assertEqual(len(set(labels)), 4, labels)
                 going = [step[1] for o in fork.options for step in o.steps if step[0] == "hang_out"]

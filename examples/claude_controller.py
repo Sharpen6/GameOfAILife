@@ -165,15 +165,20 @@ def home_line(you: dict) -> str:
     return line + (f" and worth about {_dollars(home.get('value'))}." if owned else ".")
 
 
-def option_line(opt: dict, letter: str, hint: str = "") -> str:
-    """One option, with its cost: paid by the character, or from the household's pooled money (`household`)."""
+def option_line(opt: dict, letter: str, hint: str = "", you: dict | None = None) -> str:
+    """One option, with its cost: paid by the character, from the household's pooled money (`household`), or for a
+    child who can't cover it, by the family (`you.payer`). An option at home gives the way home, or nothing."""
     cost = opt.get("cost") or 0
     money = f"brings in ${-cost:,.2f}" if cost < 0 else f"costs ${cost:,.2f}"
+    payer = (you or {}).get("payer")
     if opt.get("household"):
         money += " from your household's money and savings"
+    elif isinstance(payer, dict) and cost > 0 and cost > ((you or {}).get("money") or 0):
+        money += f", which {str(payer.get('name', 'your family')).split()[0]} pays"
     line = f"{letter}) {opt['label']} ({money}"
     if opt.get("travel_minutes") is not None:
-        line += f", about {opt['travel_minutes']} min away"
+        line += (f", home in {opt['travel_minutes']} min" if opt.get("home")
+                 else f", about {opt['travel_minutes']} min away")
     return line + ")" + (f"  [{hint} for you]" if hint else "")
 
 
@@ -187,15 +192,23 @@ TRAIT_WORDS = {
 }
 
 
-def personality(traits: dict) -> str:
-    """Traits (0..1, 0.5 is neutral) in words, strongest first: "very careful with money; enjoys time alone"."""
+SCHOOL_WORDS = {"diligence": ("works hard at school", "takes school lightly")}
+ADJECTIVES = ("careful with money", "diligent at work")  # "very" before these; "really" before the verbs
+
+
+def personality(traits: dict, pupil: bool = False) -> str:
+    """Traits (0..1, 0.5 is neutral) in words, strongest first: "very careful with money; really enjoys time alone".
+    A pupil's diligence is about school, not work."""
     words = []
     for trait, value in sorted(traits.items(), key=lambda kv: -abs(kv[1] - 0.5)):
         if trait not in TRAIT_WORDS or abs(value - 0.5) < 0.05:
             continue
         lean = abs(value - 0.5)
-        strength = "very " if lean > 0.3 else ("" if lean > 0.12 else "somewhat ")
-        words.append(strength + TRAIT_WORDS[trait][0 if value >= 0.5 else 1])
+        phrase = (SCHOOL_WORDS.get(trait) if pupil else None) or TRAIT_WORDS[trait]
+        phrase = phrase[0 if value >= 0.5 else 1]
+        strong = "very " if phrase in ADJECTIVES else "really "
+        strength = strong if lean > 0.3 else ("" if lean > 0.12 else "somewhat ")
+        words.append(strength + phrase)
     return "; ".join(words)
 
 
@@ -212,6 +225,21 @@ def stamp_key(stamp: str) -> tuple[int, int] | None:
     """Order of a game time stamp like "Day 2 Tue 15:49" (or a memory line that starts with one)."""
     m = re.match(r"Day (\d+) \w+ (\d+):(\d+)", stamp or "")
     return (int(m.group(1)), int(m.group(2)) * 60 + int(m.group(3))) if m else None
+
+
+def recent_decisions(recent: list[dict]) -> list[str]:
+    """The character's recent decisions from the fork message's `you.recent` (the city's own record, each with what
+    came of it, keyed by fork id), habit's marked. Decisions that led to something come first in line for the page;
+    the three most recent always stay."""
+    keep = {id(d) for d in recent[-3:]} | {id(d) for d in recent if d.get("happened")}
+    rows = [d for d in recent if id(d) in keep][-HISTORY:]
+    out = []
+    for d in rows:
+        then = "; ".join(h.rstrip(".") for h in d.get("happened") or []) or "nothing notable"
+        habit = " (out of habit)" if d.get("by") == "habit" else ""
+        out.append(f"- {str(d.get('time', '')).removeprefix('Day ')}: {str(d.get('question', '')).rstrip('?. ')} -> "
+                   f"{d.get('label')}{habit}. Then: {then}.")
+    return out
 
 
 def past_decisions(history: list[dict], memory: list[str]) -> list[str]:
@@ -250,14 +278,18 @@ def decision_page(msg: dict, about: dict | None = None, history: list[dict] | No
 
     who = []
     job = attrs.get("job")
-    if isinstance(job, dict):
+    pupil = isinstance(job, dict) and not job.get("hourly_wage")
+    if pupil:  # a child's page reads like school, not a job (FIXLISTS 11)
+        hours = job.get("hours") or ["?", "?"]
+        who.append(f"School {hours[0]}:00-{hours[1]}:00, doing well {attrs.get('reputation', '?')}/100.")
+    elif isinstance(job, dict):
         hours = job.get("hours") or ["?", "?"]
         who.append(f"Job: {job.get('title')}, ${job.get('hourly_wage')}/hour, {hours[0]}:00 to {hours[1]}:00. "
                    f"Standing at work {attrs.get('reputation', '?')}/100.")
     elif attrs:
         who.append("No job right now.")
     if attrs.get("traits"):
-        who.append(f"Personality: {personality(attrs['traits'])}.")
+        who.append(f"Personality: {personality(attrs['traits'], pupil)}.")
     if home_line(you):
         who.append(home_line(you))
     rels = about.get("relationships") or {}
@@ -278,23 +310,31 @@ def decision_page(msg: dict, about: dict | None = None, history: list[dict] | No
     money = f"Money {_cents(you.get('money', 0))} on you, {_cents(you.get('savings') or 0)} in savings"
     if you.get("household_funds") is not None:
         money += f", household {_dollars(you['household_funds'])} between you"
+    if isinstance(you.get("payer"), dict):  # a child: the family pays for what they can't
+        payer = you["payer"]
+        money += f"; your family pays for the rest ({str(payer.get('name', '?')).split()[0]} has {_dollars(payer.get('money'))})"
     now = [f"{msg.get('time')}, {msg.get('season')}, {msg.get('weather')}. You are at: {where}.",
+           *([f"Today: {you['today']}."] if you.get("today") else []),
            f"{money}. {goal_line}",
            f"Health {you.get('health')}; {needs} (100 means fully satisfied). Groceries at home: {you.get('groceries_at_home')}."]
 
     memory = list(about.get("memory") or [])
     memory += [m for m in you.get("recent_memory") or [] if m not in memory]  # the fork's lines are the freshest
     memory.sort(key=lambda m: stamp_key(m) or (0, 0))
-    decisions = past_decisions(history or [], memory)
+    decisions = (recent_decisions(you["recent"]) if isinstance(you.get("recent"), list)
+                 else past_decisions(history or [], memory))
     mind = [f"- {m}" for m in memory[-4:]] or ["- nothing much"]
 
     tags = hints(msg.get("profile_scores")) if show_hints else []
-    lines = [option_line(options[i], LETTERS[k], tags[i] if i < len(tags) else "") for k, i in enumerate(order)]
+    lines = [option_line(options[i], LETTERS[k], tags[i] if i < len(tags) else "", you) for k, i in enumerate(order)]
     sections = [("WHO YOU ARE", who), ("RIGHT NOW", now), ("YOUR RECENT DECISIONS", decisions or ["- none yet"]),
                 ("ON YOUR MIND", mind)]
     body = "\n\n".join(f"{title}\n" + "\n".join(rows) for title, rows in sections if rows)
+    pace = msg.get("minutes_per_second")
+    hurry = (f"Decide quickly: every second you take, about {round(pace)} minutes go by. " if isinstance(pace, (int, float))
+             and pace >= 1 else "Decide quickly. ")
     return (f"{body}\n\nDECISION: {msg.get('question')}\n" + "\n".join(lines) + "\n\n"
-            f"Decide quickly. Reply on one line: the letter ({', '.join(LETTERS[:len(order)])}), "
+            f"{hurry}Reply on one line: the letter ({', '.join(LETTERS[:len(order)])}), "
             "then a few words in your own voice saying why. Example: b - I'm saving every dollar this month.")
 
 

@@ -518,6 +518,8 @@ class ServerCase(unittest.IsolatedAsyncioTestCase):
         for _ in range(10 * 60):  # to 16:00: news, a headline or two, hourly samples
             sim.step()
         dana = sim.agents["dana"]
+        if not sim.news:  # seed 1's first news now comes at 18:00 (v3 D: meetings only nearby, fewer routine lines)
+            sim.event("Dana: Makes a breakthrough (+$50).", dana, tag="money_swing")
         for by in ("model", "timeout", "habit"):
             sim._decide(dana, plain_fork("dana", sim.clock.tick), 1, by, "because")
         cls.city = sim

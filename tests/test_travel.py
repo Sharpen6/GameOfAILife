@@ -65,7 +65,7 @@ class Run:
             fork = build(sim, agent)
             if fork is not None:
                 self.record(fork)
-                if fork.kind == "work":
+                if fork.kind == "work" and (agent.is_adult or agent.job.hourly_wage):  # pupils: no coffee (v3 D 12)
                     self.coffee.append(coffee_slot(sim, agent, fork))
             return fork
 
@@ -445,7 +445,7 @@ class CoffeeFirstTest(unittest.TestCase):
         cls.sim = sim = Simulation(seed=SEED)
         cls.coffees = []  # (agent, minutes left, the coffee option, the cafe adding least) each minute of each window
         for agent in sim.living():
-            if not agent.job:
+            if not agent.job or cls.pupil(agent):  # pupils have breakfast, never a coffee (v3 D item 12)
                 continue
             start = agent.job.start_hour * 60
             for minute in range(start - max(forks.WORK_LEAD, cls.home_walk(agent) + 15), start + 1):
@@ -453,6 +453,10 @@ class CoffeeFirstTest(unittest.TestCase):
                 cafe = sim.nearest(agent, ("cafe",), meet=sim.town.places[agent.job.place_id],
                                    stay=forks.COFFEE_MINUTES)
                 cls.coffees.append((agent, start - minute, coffee, cafe))
+
+    @staticmethod
+    def pupil(agent) -> bool:
+        return agent.job.hourly_wage == 0 and not agent.is_adult
 
     @classmethod
     def home_walk(cls, agent) -> int:
@@ -519,7 +523,7 @@ class CoffeeFirstTest(unittest.TestCase):
         bakery's coffee. (Earlier than that, now that a cup comes only when it fits before the shift.)"""
         sim, seen = self.sim, 0
         for agent in sim.living():
-            if not agent.job:
+            if not agent.job or self.pupil(agent):  # pupils have breakfast, never a coffee (v3 D item 12)
                 continue
             for cafe in [p for p in sim.town.places.values() if p.kind == "cafe"]:
                 minute = agent.job.start_hour * 60 - forks.WORK_LEAD
@@ -540,7 +544,7 @@ class CoffeeFirstTest(unittest.TestCase):
                 if agent.id == "tom" and cafe.id == "bakery":
                     self.assertEqual(coffee.label, "Grab a coffee at Maple Bakery first")
                 seen += 1
-        self.assertGreater(seen, 100)
+        self.assertGreater(seen, 50)  # was 100 with the pupils' cups counted (v3 D item 12: no coffee for pupils)
 
     def test_the_coffee_at_home_has_the_cafes_tags_and_lateness_by_timing(self):
         tags = {tuple(sorted(c.tags.items())) for _, _, c, _ in self.coffees if c.steps[0][0] == "coffee"}

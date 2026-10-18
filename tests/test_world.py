@@ -16,7 +16,7 @@ from gameofailife.sim import Simulation
 from gameofailife.town import H, W, build_map
 
 SEED = 1
-PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes", "household"}
+PUBLIC_KEYS = {"index", "label", "cost", "travel_minutes", "household", "home"}  # home: v3 D item 15
 
 
 class TownMapTest(unittest.TestCase):
