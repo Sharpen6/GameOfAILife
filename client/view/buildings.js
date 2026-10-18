@@ -573,25 +573,37 @@
             L.push({ ds: (Rn() - 0.5) * 0.3 * big / ln, dt: (Rn() - 0.5) * 0.8 / rows, ra: (0.09 + Rn() * 0.08) * big / ln, rb: (0.32 + Rn() * 0.3) * big / rows, cr, rot, K,
               lo2: (Math.min(...cr) * (1 - 1e-9)) ** 2, hi2: (Math.max(...cr) * (1 + 1e-9)) ** 2 });
           }
-          const inside = (s, t) => L.some(l => {
-            const a = (s - sc - l.ds) / l.ra, b = (t - tc - l.dt) / l.rb, r2 = a * a + b * b;
+          // is (s, t) inside lump l (a: the sample's s offset in the lump's radii)
+          const inLump = (l, a, t) => {
+            const b = (t - tc - l.dt) / l.rb, r2 = a * a + b * b;
             if (r2 >= l.hi2) return false; // outside every radius of this lump (Math.hypot is slow)
             if (r2 < l.lo2) return true;
             const th = Math.atan2(b, a) + l.rot;
             const q = ((th / 6.2832) % 1 + 1) % 1 * l.K, k0 = Math.floor(q), fr = q - k0;
             return Math.hypot(a, b) < l.cr[k0 % l.K] * (1 - fr) + l.cr[(k0 + 1) % l.K] * fr;
-          });
+          };
           // v2 sampled every 0.35 px; a keyed (region) place samples every 0.5 px, still at least once a pixel
           const step = ctx.variant == null ? 0.35 : 0.5;
           const dS = step / Math.min(eavePx, rowPx), dT = step / upPx, sR = 0.3 * big / ln, tR = 1.8 * big / rows;
-          for (let s = sc - sR; s <= sc + sR; s += dS) for (let t = tc - tR; t <= tc + tR; t += dT) {
-            if (s < 0.03 || s > 0.97 || t < 0.06 || t > 0.94) continue;
+          // (the lump test is pure, so it is asked first: a sample outside every lump changes nothing either way;
+          // and a lump with a * a >= hi2 has no sample inside it in this column, since a * a + b * b >= a * a)
+          const cl = [], ca = [];
+          for (let s = sc - sR; s <= sc + sR; s += dS) {
+            if (s < 0.03 || s > 0.97) continue;
+            cl.length = 0; ca.length = 0;
+            for (const l of L) { const a = (s - sc - l.ds) / l.ra; if (a * a < l.hi2) { cl.push(l); ca.push(a); } }
+            if (!cl.length) continue;
+            for (let t = tc - tR; t <= tc + tR; t += dT) {
+            if (t < 0.06 || t > 0.94) continue;
+            let inside = false;
+            for (let k = 0; k < cl.length; k++) if (inLump(cl[k], ca[k], t)) { inside = true; break; }
+            if (!inside) continue;
             const p = slopeAt(f, s, t), key = Math.round(p[1] - 0.5) * 8192 + Math.round(p[0] - 0.5);
             const along = s * ln, raf = !snow && Math.abs(along / 0.36 - Math.round(along / 0.36)) * 0.36 * rowPx / ln < 0.5;
             const was = hole.get(key);
-            if (was === 2 || (was === 1 && !raf)) continue; // nothing to change here, whatever inside() says
-            if (!inside(s, t)) continue;
+            if (was === 2 || (was === 1 && !raf)) continue; // nothing to change here
             hole.set(key, raf ? 2 : 1);
+            }
           }
         }
         // 1-2 px notches: bite a few edge pixels away and chip a few more out of the shingles around

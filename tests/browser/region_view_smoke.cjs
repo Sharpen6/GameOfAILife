@@ -9,8 +9,8 @@
 // 2 sweep: from cold, zoom 1 -> fit -> 1 over Riverton Downtown in 120 frames: max <= 50 ms, p95 <= 25 ms,
 //   sprites <= 16 MP (8 on the phone), chunks <= 24 MP (10 on the phone)
 // 3 steady: at zoom 0.5 the median frame <= 12 ms; lod() is near at >= 0.5 and mid / far below
-// 4 same: five views drawn on two fresh pages are equal pixel for pixel (slice runs are cut, so this compares the
-//   v2 painter with itself), and CV.spriteBox equals art.building's bounds for every sprite key
+// 4 same: five views drawn on two fresh pages are equal pixel for pixel (both pages draw the same slice runs: this compares the
+//   painter with itself), and CV.spriteBox equals art.building's bounds for every sprite key
 // 5 night: at 22:00 twenty look changes (lot stages) keep every frame <= 33 ms and statics_builds flat
 // 6 season: summer -> winter: no frame over 50 ms and everything updated (no stale sprite or chunk) within 3 s
 // 7 fit: at night at fit zoom more than 2,000 lit-window pixels; the flat view passes 2, 3 and 6

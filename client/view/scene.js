@@ -675,7 +675,7 @@
       statics = list;
       dirty = false;
       occlusion = null; lampOcc.clear(); lampMasks = 0;
-      staticsVersion++;
+      staticsVersion++; runsVer++;
       scene.stats.statics_builds++;
       scene.stats.staticsMs = performance.now() - t0;
     }
@@ -717,7 +717,14 @@
     const sprites = new Map(), spriteQueue = new Map();
     let spriteMP = 0;
     scene.spriteCap = 16e6;
-    const recKey = rec => CV.spriteKey(rec.B.kp, rec.decor ? null : scene.looks[rec.p.id], scene.season);
+    // (within a frame the looks and the season stand still: the key is worked out once per building a frame)
+    let drawing = -1;
+    const recKey = rec => {
+      if (drawing === frameNo && rec.keyF === frameNo) return rec.key;
+      const k = CV.spriteKey(rec.B.kp, rec.decor ? null : scene.looks[rec.p.id], scene.season);
+      if (drawing === frameNo) { rec.keyF = frameNo; rec.key = k; }
+      return k;
+    };
     // the browser records canvas draws and rasterises them when the canvas is first read: a one-pixel read makes
     // that happen inside the build (and its budget) instead of in the first frame that draws it
     const flush = c => { try { c.getContext("2d").getImageData(0, 0, 1, 1); } catch (e) { /* a tainted or lost canvas */ } };
@@ -784,6 +791,88 @@
     }
     scene.sprites = { map: sprites, queue: spriteQueue, mp: () => spriteMP, has: rec => sprites.has(recKey(rec)), build: (rec) => buildSprite(rec, recKey(rec)), keyOf: recKey, spriteOf };
     let staticsVersion = 0;
+
+    // --- slice runs (view.md 3.3.2) -----------------------------------------------------------------------
+    // A region building's consecutive 32 px columns form a run while no other static whose rect overlaps the run
+    // has a depth inside the run's [min, max] (ties conflict): one blit at the run's max depth then gives exactly
+    // the painter's result of its slices. A mover that overlaps a run with min <= depth < max splits it for the
+    // frame (its slices are drawn one by one), as do an x-ray and a missing sprite. A building's runs are worked
+    // out when it is drawn with a sprite (within 2 ms a frame; that frame draws its slices, since the frame's
+    // movers have not been checked against them), and again after buildStatics, a season or a lot change near it.
+    let runsVer = 0, runsLeft = 0;
+    function runsOf(rec) {
+      rec.runsV = runsVer; rec.runsF = frameNo; rec.runs = null;
+      const sl = rec.slices; // (in column order, left to right)
+      for (const q of sl) q.run = null;
+      if (sl.length < 2) return null;
+      let dmin = Infinity, dmax = -Infinity, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const q of sl) {
+        if (q.depth < dmin) dmin = q.depth;
+        if (q.depth > dmax) dmax = q.depth;
+        if (q.wx < x0) x0 = q.wx;
+        if (q.wy < y0) y0 = q.wy;
+        if (q.wx + q.sw > x1) x1 = q.wx + q.sw;
+        if (q.wy + q.sh > y1) y1 = q.wy + q.sh;
+      }
+      // the other statics that overlap the building and lie in its depth range: [depth, x0, y0, x1, y1]
+      const cand = [];
+      for (let k = lowerBound(statics, dmin); k < statics.length; k++) {
+        const it = statics[k];
+        if (it.depth > dmax) break;
+        if (it.rec === rec) continue;
+        const ix1 = it.draw ? it.wx1 : it.wx + it.sw, iy1 = it.draw ? it.wy1 : it.wy + it.sh;
+        if (it.wx < x1 && ix1 > x0 && it.wy < y1 && iy1 > y0) cand.push(it.depth, it.wx, it.wy, ix1, iy1);
+      }
+      const runs = [];
+      let cur = null;
+      for (const q of sl) {
+        if (cur && cur.wx1 === q.wx && cur.sy === q.sy && cur.sh === q.sh) {
+          const mn = Math.min(cur.min, q.depth), mx = Math.max(cur.max, q.depth), rx0 = cur.wx, rx1 = q.wx + q.sw, ry0 = cur.wy, ry1 = cur.wy + cur.sh;
+          let clash = false;
+          for (let c = 0; c < cand.length; c += 5) {
+            const d = cand[c];
+            if (d >= mn && d <= mx && cand[c + 1] < rx1 && cand[c + 3] > rx0 && cand[c + 2] < ry1 && cand[c + 4] > ry0) { clash = true; break; }
+          }
+          if (!clash) {
+            cur.slices.push(q); cur.wx1 = rx1; cur.sw = rx1 - cur.wx; cur.min = mn;
+            if (q.depth >= cur.max) { cur.max = q.depth; cur.lead = q; }
+            continue;
+          }
+        }
+        cur = { slices: [q], wx: q.wx, wy: q.wy, wx1: q.wx + q.sw, sx: q.sx, sy: q.sy, sw: q.sw, sh: q.sh, min: q.depth, max: q.depth, lead: q, split: -1, seen: -1, merged: false };
+        runs.push(cur);
+      }
+      for (const r of runs) if (r.slices.length > 1) for (const q of r.slices) q.run = r;
+      rec.runs = runs;
+      return runs;
+    }
+    // a lot change: the runs of the buildings over the changed items' rects are worked out again
+    function staleRuns(items) {
+      if (!bGrid) return;
+      for (const it of items) {
+        const x1 = it.draw ? it.wx1 : it.wx + it.sw, y1 = it.draw ? it.wy1 : it.wy + it.sh;
+        for (const rec of gridGet(bGrid, it.wx, it.wy, x1, y1)) rec.runsV = -1;
+      }
+    }
+    // the frame's movers in view split the runs (worked out in an earlier frame) that they overlap inside the
+    // runs' depth ranges (a mover's rect is grown by a few px: marks are drawn in device px round their point)
+    function splitRuns(movers, v) {
+      if (!bGrid) return 0;
+      const pad = Math.max(4, 4 / v.S);
+      let n = 0;
+      for (const m of movers) {
+        const mx0 = m.wx - pad, my0 = m.wy - pad, mx1 = (m.draw ? m.wx1 : m.wx + m.sw) + pad, my1 = (m.draw ? m.wy1 : m.wy + m.sh) + pad, d = m.depth;
+        if (mx0 > v.x1 || my0 > v.y1 || mx1 < v.x0 || my1 < v.y0) continue;
+        for (const rec of gridGet(bGrid, mx0, my0, mx1, my1)) {
+          if (rec.runsV !== runsVer || !rec.runs) continue;
+          for (const run of rec.runs) {
+            if (run.slices.length < 2 || run.split === frameNo || d < run.min || d >= run.max) continue;
+            if (mx0 < run.wx1 && mx1 > run.wx && my0 < run.wy + run.sh && my1 > run.wy) { run.split = frameNo; n++; }
+          }
+        }
+      }
+      return n;
+    }
 
     // --- opaque-pixel masks of building sprites: exact x-ray and "is this person hidden" tests -------------
     function maskOf(rec) {
@@ -1284,13 +1373,13 @@
 
     scene.draw = function (now) {
       const t0 = performance.now();
-      frameNo++; scene.stats.frames = frameNo;
+      frameNo++; scene.stats.frames = frameNo; drawing = frameNo;
       if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; scene.stats.mipMiss = 0; lampMs = 0; scene.spriteCap = scene.spriteCapSet || (isPhone() ? 8e6 : 16e6); }
       if (dirty || !statics.length) BIG ? budget.run(buildStatics) : buildStatics();
       if (!lampGlow) { lampGlow = makeGlow(54, 27, "#ffd890", 0.5); porchGlow = makeGlow(22, 12, "#ffd890", 0.6); }
       const v = scene.view(), S = v.S;
       const lod = scene.lodNow = lodOf(scene.cam.zoom);
-      if (lod !== "near") { drawLow(v, lod, now); scene.stats.draw = performance.now() - t0; return; }
+      if (lod !== "near") { drawLow(v, lod, now); scene.stats.draw = performance.now() - t0; drawing = -1; return; }
       g.setTransform(1, 0, 0, 1, 0, 0);
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
@@ -1340,10 +1429,36 @@
         i = lowerBound(statics, dlo); iEnd = lowerBound(statics, dhi + 1e-9);
       }
       const boxed = new Set();
+      // slice runs (view.md 3.3.2): split where this frame's movers fall inside them; a run whose lead (its max
+      // depth slice) lies past the depth band is drawn slice by slice (the slices before the band cannot show)
+      const dTop = BIG ? proj.depthOfWorldY(v.y1 + 640 * (proj.zk || 1)) + 2 : Infinity;
+      scene.stats.splitRuns = BIG ? splitRuns(merged, v) : 0;
+      let nRuns = 0;
+      runsLeft = 2;
       while (i < iEnd || j < merged.length) {
         const s = i < iEnd ? statics[i] : null, m = j < merged.length ? merged[j] : null;
         const it = m && (!s || m.depth < s.depth) ? (j++, m) : (i++, s);
         if (it.rec && it.rec.big) { // a region building: its cached sprite, else a box at near scale while it builds
+          const rec = it.rec;
+          if (rec.runsV !== runsVer && runsLeft > 0 && rec.slices.length > 1 && (sprites.has(recKey(rec)) || (rec.lastKey && sprites.has(rec.lastKey)))) {
+            const a = performance.now(); runsOf(rec); runsLeft -= performance.now() - a;
+          }
+          const run = rec.runsV === runsVer && rec.runsF !== frameNo ? it.run : null;
+          if (run) {
+            if (run.seen !== frameNo) { // the first of its slices this frame: merged, or slice by slice
+              run.seen = frameNo;
+              run.merged = run.split !== frameNo && run.max <= dTop && !(ghost && ghost.has(rec)) && !!(sprites.has(recKey(rec)) || (rec.lastKey && sprites.has(rec.lastKey)));
+            }
+            if (run.merged) {
+              if (it !== run.lead) continue;
+              if (run.wx > v.x1 + pad || run.wy > v.y1 + pad || run.wx1 < v.x0 - pad || run.wy + run.sh < v.y0 - pad) continue;
+              const e = spriteOf(it.rec);
+              for (const q of run.slices) q.img = e.c;
+              blit(e.c, run.sx, run.sy, run.sw, run.sh, run.wx, run.wy, v);
+              n++; nRuns++;
+              continue;
+            }
+          }
           if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx + it.sw < v.x0 - pad || it.wy + it.sh < v.y0 - pad) continue;
           const e = spriteOf(it.rec);
           if (!e) {
@@ -1362,7 +1477,7 @@
         if (it.extra) it.extra(g, v);
         n++;
       }
-      scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
+      scene.stats.items = n; scene.stats.runs = nRuns; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
       if (BIG && chunks) { chunks.begin(); chunks.trim(lowCap() - nearPx()); } // (returns at once when under the cap)
       if (BIG) {
         const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy];
@@ -1380,7 +1495,9 @@
           if (!spriteQueue.size) pfView = v.S + ":" + v.ox + ":" + v.oy;
           else { const b = performance.now(); buildQueued(budget, 4, false); spriteQueue.clear(); scene.stats.spriteMs += performance.now() - b; } // (by estimate: no big one overruns)
         }
-        if (st && !spriteQueue.size && !scene.stats.boxes) prefetch();
+        // the idle far-chunk bakes (3.2's prewarm) run on every 4th frame, two frames off the sprite prefetch's, so
+        // a resting view is charged for them on a quarter of its frames, never two kinds on one
+        if (st && !spriteQueue.size && !scene.stats.boxes && frameNo % 4 === 2) prefetch();
       }
       smoke(v, now);
       // rain: an overcast wash, so a still frame reads as wet weather too
@@ -1400,7 +1517,7 @@
       labels(v, now);
       scene.stats.labelsMs = performance.now() - tL;
       if (BIG) scene.stats.buildMs = budget.spent;
-      scene.stats.draw = performance.now() - t0;
+      scene.stats.draw = performance.now() - t0; drawing = -1;
     };
 
     // --- low zoom (view.md 3.2): mid = ground chunks, movers' marks, upright chunks, tint, lights; far = combined
@@ -2098,6 +2215,7 @@
         for (const m of levels.values()) for (const ch of m.values()) ch.stale = true;
         prewarmTiles();
         for (const it of statics) if (it.remake) { const spr = it.remake(s); it.img = spr.c; it.sw = spr.c.width; it.sh = spr.c.height; }
+        runsVer++; // (the trees' rects changed)
         return;
       }
       scene.season = s; art.clearTiles(); art.clearItems(); bCache.clear(); levels.clear(); dirty = true;
@@ -2117,8 +2235,9 @@
         const B = R.buildingAt(p.x, p.y);
         if (B && B.rec) B.rec.b.glows = null; // (low chunks: setLooks invalidates them when the stage, and so the ground, changes)
       }
-      const keep = statics.filter(it => !(idx.has(it.ref) && LOT_KINDS.has(it.kind)));
+      const gone = [], keep = statics.filter(it => { const out = idx.has(it.ref) && LOT_KINDS.has(it.kind); if (out) gone.push(it); return !out; });
       const fresh = add.filter(it => LOT_KINDS.has(it.kind));
+      staleRuns(gone); staleRuns(fresh);
       if (fresh.length > 64) statics = keep.concat(fresh).sort((a, b) => a.depth - b.depth || a.wx - b.wx);
       else { statics = keep; for (const it of fresh) statics.splice(lowerBound(statics, it.depth + 1e-9), 0, it); }
       scene.stats.placeUpdates = (scene.stats.placeUpdates | 0) + idx.size;
