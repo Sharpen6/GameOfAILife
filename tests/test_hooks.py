@@ -91,17 +91,28 @@ class TestConstructor(unittest.TestCase):
         state = sim.state_json()
         self.assertTrue(state["trains"], "the region's trains run from the first minute")
         self.assertTrue(all(calls[f"folk.{n}"] for n in REGION_ONLY))
-        self.assertEqual((state["crowd"], state["folk_n"], state["talks"]), ([], 0, []))
+        self.assertEqual((state["crowd"], state["folk_n"]), ([], 0))
+        self.check_talks(state["talks"], sim)
         s = sim.stats_json(full=True)
         self.assertIn("region", s)
         self.assertNotIn("folk", s)  # stats.folk only with townsfolk
         self.assertEqual(s["region"]["named"], 60)
         self.assertEqual(json.loads(json.dumps(s)), s)
 
+    def check_talks(self, talks, sim):
+        """PLAN 2.10's rows: [place_index | -1, a_id, b_id, tone, tick], at most 20 (empty while social is a stub)."""
+        self.assertIsInstance(talks, list)
+        self.assertLessEqual(len(talks), 20)
+        for row in talks:
+            self.assertEqual(len(row), 5, row)
+            self.assertTrue(-1 <= row[0] < len(sim.town.places), row)
+            self.assertIn(row[3], (-1, 0, 1), row)
+
     def test_millbrook_keeps_v2s_keys_plus_v3s(self):
         sim = Simulation(1)
         state = sim.state_json()
-        self.assertEqual((state["trains"], state["crowd"], state["folk_n"], state["talks"]), ([], [], 0, []))
+        self.assertEqual((state["trains"], state["crowd"], state["folk_n"]), ([], [], 0))
+        self.check_talks(state["talks"], sim)
         self.assertNotIn("train", sim.town_json()["timetable"])
         s = sim.stats_json()
         self.assertNotIn("region", s)
