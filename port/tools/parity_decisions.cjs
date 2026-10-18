@@ -2,7 +2,8 @@
 // controller that answers every fork SECONDS after it is asked at speed 8 (the profile's favourite, and every third
 // answer the next option round), with the Python engine's dice, so the two engines' think-time plans can be
 // compared: every event, decided fork (with its reason), hourly agent row and fork message (its `you.today`,
-// `you.payer`, `you.recent` and each option's `home` and minutes).
+// `you.payer`, `you.recent` and each option's `home` and minutes), and every 5 minutes stats llm.thinking with how many
+// of the played stand deciding.
 //
 //   node port/tools/parity_decisions.cjs SEED DAYS DICE SECONDS
 "use strict";
@@ -15,7 +16,7 @@ function played(seed, days, dice, seconds) {
   const per_tick = 1 / (G.clock.TICKS_PER_REAL_SECOND * 8);
   const due = [];
   let asked = 0;
-  const out = { events: [], forks: [], hours: [], asks: [] };
+  const out = { events: [], forks: [], hours: [], asks: [], thinking: [] };
   const end = sim.clock.tick + days * G.clock.MINUTES_PER_DAY;
   while (sim.clock.tick < end) {
     clock.t += per_tick;
@@ -42,6 +43,10 @@ function played(seed, days, dice, seconds) {
     if (sim.clock.minute_of_day % 60 === 0) {
       out.hours.push(JSON.stringify([sim.clock.tick, Array.from(sim.agents.values(), a => [a.id, a.x, a.y, a.state,
         a.activity, a.inside, G.py.pyRound(a.money, 2), a.vehicle])]));
+    }
+    if (sim.clock.minute_of_day % 5 === 0) { // the AI chip's count, and how many of them stand on the question
+      out.thinking.push([sim.clock.tick, G.stats._llm_block(sim).thinking,
+        sim.living().filter(a => a.state === "deciding").length]);
     }
   }
   return out;

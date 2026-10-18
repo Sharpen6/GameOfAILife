@@ -1338,7 +1338,7 @@ The welcome's `stats`, the `get_stats` reply and every [`stats` push](#stats-pus
 | Field | Meaning |
 |-------|---------|
 | `controllers` | The connected controllers: `[{"name", "model", "characters"}]`; `model` as declared in the hello, or `null`; `characters` the living characters it plays. |
-| `playing`, `thinking` | The living characters a controller plays, and those deciding a fork right now. |
+| `playing`, `thinking` | The living characters a controller plays, and those whose controller has a fork to answer right now: standing on it (`state` `"deciding"`), or already setting off for work the usual way while the work fork is still asked. |
 | `today`, `total` | Fork counts since midnight and since the city began: `{"asked", "in_time", "timeouts", "late", "withdrawn", "against_habit", "avg_seconds"}`: forks sent to a controller; answered in time; timed out; answered late (within 10 s); withdrawn; in-time answers that differ from `profile_choice`; and the mean seconds of the in-time answers, one decimal, or `null` when there were none. A fork still waiting for its answer at midnight counts as asked in the new day too, where it is decided, so `asked` = `in_time` + `timeouts` + `withdrawn` + the forks still waiting, in `today` as in `total`. A late answer to a fork that timed out before midnight still counts in the new day's `late`. |
 | `habit_today`, `default_today` | Forks today that nobody was asked about: decided by habit, and played from the profile of a character no controller plays. |
 

@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 from gameofailife.clock import MINUTES_PER_DAY, TICKS_PER_REAL_SECOND
-from gameofailife import forks
+from gameofailife import forks, stats
 from gameofailife.sim import Simulation
 
 SPEED = 8  # the 2-hour run's speed: a game day in about 79 seconds
@@ -748,7 +748,7 @@ def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
     for a in sim.agents.values():
         sim.claim(a.id, "fake")
     due, asked = [], 0
-    out = {"events": [], "forks": [], "hours": [], "asks": []}
+    out = {"events": [], "forks": [], "hours": [], "asks": [], "thinking": []}
     end = sim.clock.tick + days * MINUTES_PER_DAY
     while sim.clock.tick < end:
         clock.t += 1 / (TICKS_PER_REAL_SECOND * 8)
@@ -776,6 +776,9 @@ def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
         if sim.clock.minute_of_day % 60 == 0:
             out["hours"].append([sim.clock.tick, [[a.id, a.x, a.y, a.state, a.activity, a.inside, round(a.money, 2),
                                                    a.vehicle] for a in sim.agents.values()]])
+        if sim.clock.minute_of_day % 5 == 0:  # the AI chip's count, and how many of them stand on the question
+            out["thinking"].append([sim.clock.tick, stats._llm_block(sim)["thinking"],
+                                    sum(1 for a in sim.living() if a.state == "deciding")])
     return out
 
 
@@ -791,13 +794,16 @@ class DecisionsParity(unittest.TestCase):
         ids = lambda rows: [re.sub(r" f\d+ ", " f# ", r, count=1) for r in rows]  # noqa: E731
         for name, a, b in (("events", py["events"], js["events"]), ("forks", ids(py["forks"]), ids(js["forks"])),
                            ("hours", py["hours"], [json.loads(h) for h in js["hours"]]),
-                           ("asks", json.loads(json.dumps(py["asks"])), [json.loads(h) for h in js["asks"]])):
+                           ("asks", json.loads(json.dumps(py["asks"])), [json.loads(h) for h in js["asks"]]),
+                           ("thinking", py["thinking"], js["thinking"])):
             at = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             self.assertEqual(a[at:at + 1], b[at:at + 1], f"{name} differ first at #{at} (Python first)")
             self.assertEqual(len(a), len(b), name)
         self.assertTrue(any("instead" in f for f in py["forks"]))
         self.assertGreater(len(py["asks"]), 200)
         self.assertTrue(any(a[5] for a in py["asks"]))  # a child's payer
+        # stats llm.thinking counts a worker who set off while the work fork is still asked, not only those deciding
+        self.assertTrue(any(thinking > deciding for _, thinking, deciding in py["thinking"]))
 
 
 if __name__ == "__main__":

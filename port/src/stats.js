@@ -321,13 +321,21 @@
     return out;
   }
 
+  // A played character whose controller has not answered yet: standing on the question, or already setting off
+  // the usual way while the work fork is still asked (sim._set_off_thinking).
+  function _thinking(sim, a) {
+    if (a.state === "deciding") return true;
+    const fork = a.fork_id !== null && a.fork_id !== undefined ? sim.forks.get(a.fork_id) : undefined;
+    return fork !== undefined && fork.status === "asked";
+  }
+
   function _llm_block(sim) {
     const alive = sim.living();
     const playing = alive.filter(a => a.controller);
     return {
       controllers: Array.from(sim.controllers, ([name, entry]) => ({ name, model: entry.model ?? null,
         characters: count(playing, a => a.controller === name) })),
-      playing: playing.length, thinking: count(playing, a => a.state === "deciding"),
+      playing: playing.length, thinking: count(playing, a => _thinking(sim, a)),
       today: _counter_json(sim.stats.today), total: _counter_json(sim.stats.total),
       habit_today: sim.stats.today.habit, default_today: sim.stats.today.default,
     };

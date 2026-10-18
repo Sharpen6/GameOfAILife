@@ -340,6 +340,15 @@ def _counter_json(block: dict) -> dict:
     return {**{k: block[k] for k in SHOWN_COUNTERS}, "avg_seconds": avg_seconds(block)}
 
 
+def _thinking(sim: Simulation, a) -> bool:
+    """A played character whose controller has not answered yet: standing on the question, or already setting off
+    the usual way while the work fork is still asked (sim._set_off_thinking)."""
+    if a.state == "deciding":
+        return True
+    fork = sim.forks.get(a.fork_id) if a.fork_id is not None else None
+    return fork is not None and fork.status == "asked"
+
+
 def _llm_block(sim: Simulation) -> dict:
     alive = sim.living()
     playing = [a for a in alive if a.controller]
@@ -347,7 +356,7 @@ def _llm_block(sim: Simulation) -> dict:
         "controllers": [{"name": name, "model": entry.get("model"),
                          "characters": sum(1 for a in playing if a.controller == name)}
                         for name, entry in sim.controllers.items()],
-        "playing": len(playing), "thinking": sum(1 for a in playing if a.state == "deciding"),
+        "playing": len(playing), "thinking": sum(1 for a in playing if _thinking(sim, a)),
         "today": _counter_json(sim.stats.today), "total": _counter_json(sim.stats.total),
         "habit_today": sim.stats.today["habit"], "default_today": sim.stats.today["default"],
     }
