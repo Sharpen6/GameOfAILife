@@ -112,7 +112,7 @@ BUS_GIVE_UP = 26  # minutes at a stop (two headways, which the exact timetable n
 FLIGHT_MINUTES = 12  # the daily planes (transit.FLIGHTS) take this long to cross the sky
 WANDER = ("walk_park", "play")  # activities that stroll around their park
 WANDER_EVERY = 1  # minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
-MEET = ("hang_out", "play")  # activities an invite meets at: the host waits doing it, the guest comes to do it
+MEET = ("hang_out", "play", "walk_park")  # activities an invite meets at: the host waits doing it, the guest comes to do it
 MEET_TILES = 3  # how near two people outdoors must be for a first meeting (_meet_someone)
 IDLE_FUN = 1.6  # how much faster fun drains while sitting idle (FIXLISTS 8)
 RECENT_FORKS = 8  # decisions the fork message's `you.recent` carries, with what came of each
@@ -910,13 +910,19 @@ class Simulation:
         """The option to play when an answer lands after the character set off for work (FIXLISTS 1), and why when
         it is not the one chosen. Any way to work: already at work, the way they went; the chosen way when it
         still gets them in on time from here; else the fastest way still on time (or simply the fastest). The
-        played option's hidden late odds are worked out again for when they get in. A choice to stay home stands."""
+        played option's hidden late odds are worked out again for when they get in. A choice to stay home stands;
+        made after they got in, it pays the minutes already worked. More than WORK_LATE late, the same rules hold:
+        someone already at work keeps working."""
         goes = [i for i, o in enumerate(fork.options) if any(s[0] == "work" for s in o.steps)]
-        start = self._shift_start_tick(agent)
-        if start is None or choice not in goes:
+        working = agent.state == "busy" and agent.activity == "work"
+        if choice not in goes or not agent.job:
+            if working:
+                self._end_activity(agent)  # the minutes already worked are paid
             return choice, ""
         tick = self.clock.tick
-        working = agent.state == "busy" and agent.activity == "work"
+        start = self._shift_start_tick(agent)
+        if start is None:  # past the late limit: today's start all the same (worked_today is set only in _decide)
+            start = tick - self.clock.minute_of_day + agent.job.start_hour * 60
         mins = {}
         prov = getattr(agent, "provisional", 0)
         for i in goes:
@@ -1375,7 +1381,8 @@ class Simulation:
             else:
                 self._host_hold[host.id] = hold
         elif self._interruptible(host):
-            host.plan = [("play" if self.town.places[place_id].kind == "park" else "hang_out", place_id)]
+            park = self.town.places[place_id].kind == "park"  # adults walk there, children play (invite_fork's meet)
+            host.plan = [(("walk_park" if host.is_adult else "play") if park else "hang_out", place_id)]
             host.usual_plan = True  # type: ignore[attr-defined]
             host.state = "idle"
             self._host_hold[host.id] = hold + self.walk_minutes(host, place_id)

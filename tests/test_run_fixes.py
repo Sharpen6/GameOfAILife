@@ -146,6 +146,47 @@ class ThinkFreeze(unittest.TestCase):
         city.run(MINUTES_PER_DAY)
         self.assertEqual(set(states), {"deciding"})
 
+    def watch_answers_at_work(self, pick):
+        """Plays two days with 4.9 s answers (about 78 game minutes at speed 8, often after the shift began) and
+        returns, for each work fork answered by someone already at work on the set-off plan, (option played, the
+        provisional option, whether it goes to work, money gained by the decision)."""
+        city = Played(seed=1, seconds=4.9, pick=pick)
+        sim = city.sim
+        seen = []
+        orig = sim._decide
+
+        def decide(agent, fork, choice, by, reason):
+            at_work = (getattr(agent, "thinking", None) == fork.id and agent.state == "busy"
+                       and agent.activity == "work")
+            before = agent.money
+            orig(agent, fork, choice, by, reason)
+            if at_work:
+                goes = any(s[0] == "work" for s in fork.options[fork.choice].steps)
+                seen.append((fork.choice, getattr(agent, "provisional", 0), goes, agent.money - before))
+        sim._decide = decide
+        city.run(2 * MINUTES_PER_DAY)
+        return seen
+
+    def test_an_answer_landing_after_arrival_keeps_the_shift_going(self):
+        # More than WORK_LATE after the shift's start the answer was once played as given: a coffee or breakfast
+        # at home took a worker off the job, unpaid, and a walk restarted the shift.
+        seen = self.watch_answers_at_work(lambda msg: 1 if msg["kind"] == "work" else
+                                          msg["profile_scores"].index(max(msg["profile_scores"])))
+        self.assertTrue(seen, "no answer landed after the worker got in")
+        for played, prov, goes, _ in seen:
+            if goes:
+                self.assertEqual(played, prov)
+
+    def test_calling_in_sick_after_arrival_pays_the_minutes_worked(self):
+        def sick(msg):
+            if msg["kind"] != "work":
+                return msg["profile_scores"].index(max(msg["profile_scores"]))
+            return next((i for i, o in enumerate(msg["options"]) if o["label"].startswith("Call in sick")), 0)
+        skips = [s for s in self.watch_answers_at_work(sick) if not s[2]]
+        self.assertTrue(skips, "nobody called in sick after getting in")
+        for _, _, _, gained in skips:
+            self.assertGreater(gained, 0)
+
 
 PAIRS = [("Sleeps deeply", "Lies awake for hours"), ("Makes a really tasty meal", "Burns the food"),
          ("Properly unwinds", "Gets restless and bored"), ("A peaceful evening", "Feels lonely"),
@@ -433,6 +474,27 @@ class Invites(unittest.TestCase):
         self.assertGreater(bases["decline"], 0)
         sim._decide(ari, fork, [o.extra["answer"] for o in fork.options].index("decline"), "model", "")
         self.assertIn("Ari declines my invite to", tom.memory[-1])
+
+    def test_a_friend_asked_on_a_walk_comes_along(self):
+        # The lonely fork's "Ask <friend> to walk in <park>": the invite once lapsed within a minute, as a walk was
+        # not an activity an invite meets at, so the friend never saw it.
+        sim = Simulation(1)
+        statuses = collections.Counter()
+        together = set()
+        for _ in range(14 * MINUTES_PER_DAY):
+            sim.step()
+            for inv in sim.invites.values():
+                host, guest = sim.agents[inv["from"]], sim.agents[inv["to"]]
+                if not host.is_adult or sim.town.places[inv["place"]].kind != "park":
+                    continue
+                statuses[inv["id"], inv["status"]] += 1
+                if (inv["status"] == "accept" and host.activity == guest.activity == "walk_park"
+                        and host.activity_place == guest.activity_place == inv["place"]
+                        and host.state == guest.state == "busy"):
+                    together.add(inv["id"])
+            if together:
+                break
+        self.assertTrue(together, sorted(statuses))
 
 
 class ScheduleLine(unittest.TestCase):
