@@ -183,8 +183,17 @@ def _fix(sim, folk, hh, home) -> bool:
         return False
     payer = richest(payers)
     _pay(payer, cost)
-    housing.fix_emergency(sim, hh, payer)  # the payer as agent keeps the news folk-only
+    live = home.emergency
+    home.emergency = None  # housing.fix_emergency's effect; its emergency_settled news is importance 0 (memory only)
+    _remember(sim, members(folk, hh), f"The {housing.EMERGENCY_NAME[live['kind']]} at {home.name} is fixed.")
     return True
+
+
+def _remember(sim, people: list, text: str) -> None:
+    """A townsfolk importance-0 happening (PLAN 2.8): each one's memory, never `sim.event`."""
+    stamp = sim.clock.stamp()
+    for p in people:
+        p.remember(stamp, text)
 
 
 def nightly(sim) -> None:
@@ -193,6 +202,7 @@ def nightly(sim) -> None:
     (doubled in winter) and may catch a chill; an owner-occupied folk home without an emergency rolls for one, which
     goes live at once. A live one is fixed first when affordable (`_fix`). Rolls on (NS_FOLK_HOME, home_id, day) of
     `sim.dice_seed`, drawn only where needed."""
+    from . import people  # people reaches folk_model, so not at the top
     from .forks import luck_odds  # forks reaches housing, so not at the top
     folk = _folk(sim)
     households = getattr(folk, "households", None)
@@ -213,8 +223,7 @@ def nightly(sim) -> None:
             live = None
         if live and now - live["since"] >= housing.EMERGENCY_DAYS * housing.DAY:
             home.emergency = None
-            sim.event(f"The {housing.EMERGENCY_NAME[live['kind']]} at {home.name} is never properly fixed.", None,
-                      tag="emergency_settled", agents=ids, place=home.place)
+            _remember(sim, mem, f"The {housing.EMERGENCY_NAME[live['kind']]} at {home.name} is never properly fixed.")
             housing._change_condition(sim, sim.lots[home.place], -housing.SETTLE_DAMAGE)
         if not mem:
             continue
@@ -229,7 +238,10 @@ def nightly(sim) -> None:
             k = 2 if winter else 1
             for p in mem:
                 p.health = max(0.0, p.health - housing.DAMP_HEALTH[st] * k)
-                if rr.random() < luck_odds(housing.DAMP_CHILL[st] * k, -1, p.luck):
+                prob = luck_odds(housing.DAMP_CHILL[st] * k, -1, p.luck)
+                roll = rr.random()
+                people.log_roll(sim, p, "damp_chill", prob, roll)
+                if roll < prob:
                     p.health = max(0.0, p.health + housing.CHILL["health"])
                     p.adjust("fun", housing.CHILL["fun"])
                     sim.event(f"{p.name} catches a chill in the damp house.", p, tag="damp_chill", place=home.place)
@@ -240,7 +252,10 @@ def nightly(sim) -> None:
             luck = 0.0
             for p in payers:
                 luck += p.luck
-            if rr.random() < luck_odds(p0, -1, luck / len(payers)):
+            prob = luck_odds(p0, -1, luck / len(payers))
+            roll = rr.random()
+            people.log_roll(sim, payers[0], "home_emergency", prob, roll)
+            if roll < prob:
                 kinds = ["leak", "electrics", "boiler"] + (["boiler", "boiler"] if winter else []) + \
                         (["roof"] if getattr(sim, "weather", "clear") == "rain" else [])
                 kind = rr.pick(kinds)
@@ -274,6 +289,7 @@ def fall_behind(sim, hh) -> None:
             best = h
     if best is not None:
         folk_move(sim, hh, best.id, "rent")
+        _refresh(sim, mem)  # commutes from the new home
         hh.arrears = 0
         hh.last_funds = None
         return
@@ -357,8 +373,9 @@ def _kids_of(folk, hh, p) -> list:
 
 
 def _move_people(folk, people: list, dst) -> None:
-    """Move people into household dst, emptying (and vacating) the households they leave."""
-    left = []
+    """Move people into household dst, emptying (and vacating) the households they leave. A home the movers owned
+    and left empty is sold: the richest adult mover from it (else the richest mover) gets the sale proceeds."""
+    left, movers = [], {}
     for p in people:
         src = folk.household(p.household_id)
         if src is dst:
@@ -367,12 +384,23 @@ def _move_people(folk, people: list, dst) -> None:
             src.member_ids.remove(p.id)
         if src is not None and src not in left:
             left.append(src)
+            movers[src.id] = []
+        if src is not None:
+            movers[src.id].append(p)
         p.household_id = dst.id
         p.hh = dst.j
         dst.member_ids.append(p.id)
+    sim = _sim_of(folk) if left else None
     for src in left:
-        if not members(folk, src):
-            on_household_empty(folk, src)
+        if members(folk, src):
+            continue
+        home = sim.homes.get(src.home_id)
+        if home is not None and home.household == src.id and home.owner == src.id:
+            grown = [q for q in movers[src.id] if q.age >= ADULT_AGE]
+            payer = richest(grown or movers[src.id])
+            if payer is not None:
+                payer.money = r2(payer.money + housing.sale_proceeds(sim, home.id))
+        on_household_empty(folk, src)
     _touch(folk)
 
 
