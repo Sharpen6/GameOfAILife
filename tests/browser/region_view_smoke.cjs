@@ -2,7 +2,7 @@
 // Headless smoke test for the region view (V1a, view.md 3): the 256 x 192 region of client/dev/region_data.js
 // on client/dev/region.html (manual=1: the test times setTown and drives every frame).
 //
-//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat)
+//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat camera)
 //
 // 1 open: the first default frame (setTown, setState, frame at zoom 1/4 over (85, 48)) is drawn within 600 ms
 //   at 1280x800 and 390x844 dpr 2 (a phone), 1000 ms at 1440x900 dpr 2, and settles (no chunk pending)
@@ -14,6 +14,7 @@
 // 5 night: at 22:00 twenty look changes (lot stages) keep every frame <= 33 ms and statics_builds flat
 // 6 season: summer -> winter: no frame over 50 ms and everything updated (no stale sprite or chunk) within 3 s
 // 7 fit: at night at fit zoom more than 2,000 lit-window pixels; the flat view passes 2, 3 and 6
+// camera: the steps, the default view, M = Millbrook at 0.5, a long fly as a 900 ms arc (view.md 3.7)
 //
 // Timing rule (PLAN): L = os.loadavg()[0] at the start; L > 8: timings are reported only; else each limit is
 // scaled by max(1, L / 4). Pixel, count and equality checks always gate. REGION_SHOTS=<folder> saves screenshots
@@ -321,8 +322,34 @@ async function runFlat(browser) {
   await season(browser, "flat", "flat=1");
 }
 
+// the camera contract (view.md 3.7): its steps, the default view, M = Millbrook at 0.5, long flies as a 900 ms arc
+async function runCamera(browser) {
+  const { ctx, page, errors } = await open(browser, SIZES.desk, "");
+  await page.evaluate(() => window.__setTown());
+  const r = await page.evaluate(() => {
+    const cam = window.__view.cam(), t0 = performance.now();
+    let t = t0;
+    const run = ms => { const out = []; for (let k = 0; k < ms / 16; k++) { t += 16; window.__view.frame(t); out.push(window.__view.camera()); } return out; };
+    run(32);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "m" })); window.dispatchEvent(new KeyboardEvent("keyup", { key: "m" }));
+    const m = run(1200).pop();
+    // a long fly: more than three screens (here about four at zoom 1)
+    window.__cam({ zoom: 1, x: 40, y: 25 });
+    const far = window.__view.worldOfTile(230, 170);
+    cam.flyTo(far[0], far[1], 1);
+    const path = run(1100), zs = path.map(c => c.zoom), at = path.findIndex(c => Math.abs(c.x - 230) < 0.5 && Math.abs(c.y - 170) < 0.5 && Math.abs(c.zoom - 1) < 1e-3);
+    return { steps: cam.steps, def: cam.defaultView(), m, minZ: Math.min(...zs), end: path[path.length - 1], at: at < 0 ? -1 : (at + 1) * 16 };
+  });
+  check(JSON.stringify(r.steps) === JSON.stringify([0.0625, 0.125, 0.25, 0.5, 1, 1.5, 2, 3]), "camera: the zoom steps", JSON.stringify(r.steps));
+  check(r.def && r.def.zoom === 0.25 && r.def.x === 85 && r.def.y === 48, "camera: the default view", JSON.stringify(r.def));
+  check(Math.abs(r.m.x - 40) < 0.5 && Math.abs(r.m.y - 25) < 0.5 && Math.abs(r.m.zoom - 0.5) < 1e-3, "camera: M flies to Millbrook at 0.5", JSON.stringify(r.m));
+  check(r.at >= 850 && r.at <= 1000 && r.minZ < 0.6, "camera: a long fly is a 900 ms arc", `arrives at ${r.at} ms, lowest zoom ${r.minZ.toFixed(3)}`);
+  check(!errors.length, "camera: no console errors", errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
 const RUNS = [["open", runOpen], ["sweep", runSweep], ["steady", runSteady], ["same", runSame], ["night", runNight], ["season", runSeason],
-  ["fit", runFit], ["flat", runFlat]];
+  ["fit", runFit], ["flat", runFlat], ["camera", runCamera]];
 async function main() {
   const pw = findPlaywright();
   if (!pw) { console.log("SKIP: Playwright is not installed"); return; }
