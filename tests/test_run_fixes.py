@@ -1,4 +1,13 @@
-"""Package D: the fixes from the 2-hour run of v2 (how the 60 named decide and spend their days), one class per item."""
+"""Package D: the fixes from the 2-hour run of v2 (how the 60 named decide and spend their days), one class per item.
+
+Measured on 14-day runs of seeds 1, 2 and 3 with all 60 played by a fake controller answering every fork in 3 s at
+speed 8 (before -> after package D):
+- routine share of the log (outcome lines / all lines): 0.770 / 0.776 / 0.745 -> 0.558 / 0.597 / 0.603
+- first meetings more than 3 tiles apart: 69 of 71 / 75 of 81 / 84 of 90 -> 2 of 35 / 1 of 39 / 3 of 31
+- workers at work at the first minute of their shift: 16 / 20 / 20 of 534 -> 519 / 518 / 518 of 534 (529 / 528 /
+  528 counting the park's outdoor jobs)
+- family dinners out outside Saturday 17:00-20:00: 24 of 24 / 23 of 23 / 9 of 9 -> 0 of 4 / 0 of 5 / 0 of 7
+"""
 
 from __future__ import annotations
 

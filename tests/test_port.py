@@ -540,7 +540,8 @@ class LockstepRun(unittest.TestCase):
     def test_eight_days_of_friendships_and_rifts(self):
         # Every acquaintance and coworker starts one point short of a friendship, every friend and partner one
         # point from a falling-out: chronicle.on_affinity's both rules, and its 7-day gap between rifts.
-        js, py = self.assertLockstep(1, 8, 2, "bonds")  # dice 2: rifts on this tree (dice 4 has none since the v2 review fixes)
+        js, py = self.assertLockstep(1, 8, 6, "bonds")  # dice 6: rifts on this tree (dice 2 has none since v3 D's calls
+        # outside the household and opposed outcome groups; dice 4 none since the v2 review fixes)
         tags = self.tags(py)
         self.assertGreater(tags["new_friend"], 0)
         self.assertGreater(tags["falling_out"], 0)
