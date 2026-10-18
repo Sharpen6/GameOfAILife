@@ -364,9 +364,18 @@ def _place_together(sim, a, b) -> bool:
     home = fn(sim, hh)
     if home is None:
         return False
-    new = housing.new_household(sim, [a, b], home.id, "rent")
+    olds = [people.household(sim, a), people.household(sim, b)]
+    try:
+        new = housing.new_household(sim, [a, b], home.id, "rent")
+    except NameError:  # housing.new_household before its Household import is fixed (see L1's handoff)
+        return False
     if new is None:
         return False
+    for old in olds:  # a household the two leave empty gives its home back
+        if old is not None and old is not new and old.id in sim.households and not any(
+                people.person(sim, x) is not None and people.person(sim, x).alive for x in old.member_ids):
+            housing.on_household_empty(sim, old)
+            sim.households.pop(old.id, None)
     for r in (a.relationships.get(b.id), b.relationships.get(a.id)):
         if r is not None:
             r.kind = social.PARTNER

@@ -327,8 +327,16 @@
     if (!H.cheapest_rental || nil(hh) || !H.new_household) return false;
     const home = H.cheapest_rental(sim, hh);
     if (nil(home)) return false;
+    const olds = [P().household(sim, a), P().household(sim, b)];
     const nw = H.new_household(sim, [a, b], home.id, "rent");
     if (nil(nw)) return false;
+    for (const old of olds) { // a household the two leave empty gives its home back
+      if (!nil(old) && old !== nw && sim.households.has(old.id)
+        && !old.member_ids.some(x => { const q = P().person(sim, x); return !nil(q) && q.alive; })) {
+        H.on_household_empty(sim, old);
+        sim.households.delete(old.id);
+      }
+    }
     for (const r of [a.relationships.get(b.id), b.relationships.get(a.id)]) {
       if (r !== undefined) {
         r.kind = G.agent.RelationKind.PARTNER;

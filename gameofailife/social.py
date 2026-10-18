@@ -752,7 +752,10 @@ def _leave_home(sim, p) -> None:
         return
     f = _folk_mod()
     if f is not None and hasattr(f, "split"):
-        f.split(sim, p)
+        try:
+            f.split(sim, p)
+        except ImportError:  # folk.split lives in folk_life (F2b): until it lands the leaver stays put
+            pass
 
 
 def move_in(sim, mover, host) -> bool:
@@ -763,7 +766,10 @@ def move_in(sim, mover, host) -> bool:
         f = _folk_mod()
         if f is None or not hasattr(f, "join"):
             return False
-        f.join(sim, mover, host)
+        try:
+            f.join(sim, mover, host)
+        except ImportError:  # folk.join lives in folk_life (F2b): until it lands townsfolk couples stay dating
+            return False
     else:
         old = people.household(sim, mover)
         new = people.household(sim, host)
