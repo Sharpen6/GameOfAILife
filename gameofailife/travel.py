@@ -1,4 +1,5 @@
-"""Getting around: travel times, the usual way to work and what it costs a week, and the nearest open place.
+"""Getting around: travel times, the usual way to work and what it costs a week, the usual way for any one trip
+(trip_mode, with where the car is parked), and the nearest open place.
 
 Walking and running read the town's O(1) walk fields (`sim.town.walk_minutes(xy, place_id)`). Cars and taxis
 follow the roads (`sim.town.drive_length`, memoized on the shared map) and lose about a minute at each
@@ -29,6 +30,8 @@ ROAD_MODES = ("car", "taxi", "ambulance")  # they follow the roads
 LIGHT_WAIT = 1  # minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
 BUS_MIN_WALK = 25  # the bus is someone's usual way to work only when the walk is longer than this
 TAXI_MIN_WALK = 40  # the work fork offers a taxi to an adult without a car only when the walk is longer than this
+USUAL = "usual"  # Option.vehicle and start_plan's vehicle meaning "the usual way, trip by trip" (trip_mode)
+SHORT_WALK = 8  # minutes: a walk this short from home leaves the car on the driveway
 
 
 def bus_trip(sim: Simulation, agent: Agent, place_id: str,
@@ -124,6 +127,58 @@ def weekly_commute_cost(sim: Simulation, agent: Agent) -> int:
     if mode == "bus" and not transit.fare(agent.age):
         return 0
     return len(job.workdays) * TRIP_COST.get(mode, 0)
+
+
+def car_place(sim: Simulation, agent: Agent) -> str:
+    """The place id where the character's car is parked: where it was last driven to (`agent.car_at`, set as a
+    car sets off), or home (car_at None, so a car at home moves house with its household)."""
+    return getattr(agent, "car_at", None) or sim.home_of(agent)
+
+
+def car_here(sim: Simulation, agent: Agent) -> bool:
+    """True when the character owns a car and it is with them: they are travelling in it, or it is parked at the
+    place they are in, at its door, or (a park) anywhere inside it."""
+    if not agent.owns_car:
+        return False
+    if agent.vehicle == "car":
+        return True
+    place = sim.town.places[car_place(sim, agent)]
+    if agent.inside is not None:
+        return agent.inside == place.id
+    if (agent.x, agent.y) == tuple(place.entry):
+        return True
+    return place.kind == "park" and place.x <= agent.x < place.x + place.w and place.y <= agent.y < place.y + place.h
+
+
+def trip_mode(sim: Simulation, agent: Agent, place_id: str) -> str:
+    """How the character makes one trip their usual way (an option's vehicle "usual"): "car" | "bus" | "walk".
+
+    The car when they own one and it is with them (car_here), unless it stands on the driveway at home and the walk
+    is SHORT_WALK minutes or less. Otherwise the bus when the walk is longer than BUS_MIN_WALK and a bus leaving
+    now saves transit.MIN_SAVING minutes (bus_trip). Otherwise on foot, as for a trip to where they already are.
+    On foot too when the car (with every light green) or the bus would get there before the place opens and the
+    walk would not: `nearest` and the builders judge opening times by the walk.
+    """
+    if agent.inside == place_id:
+        return "walk"
+    walk = sim.walk_minutes(agent, place_id)
+    mode, soonest = "walk", walk
+    if car_here(sim, agent):
+        home = sim.home_of(agent)
+        if not (walk <= SHORT_WALK and car_place(sim, agent) == home and agent.inside == home):
+            mode = "car"
+    if mode == "walk" and BUS_MIN_WALK < walk < UNREACHABLE:
+        trip = bus_trip(sim, agent, place_id)
+        if trip is not None:
+            mode, soonest = "bus", trip[0]
+    hours = sim.town.places[place_id].hours
+    if mode != "walk" and hours:
+        if mode == "car":
+            soonest = travel_minutes(sim, agent, place_id, "ambulance")  # the drive with no red lights
+        now, opens = sim.clock.minute_of_day, hours[0] * 60
+        if now + soonest < opens <= now + walk:
+            return "walk"
+    return mode
 
 
 def _spot(sim: Simulation, where) -> tuple[tuple[int, int], str | None]:

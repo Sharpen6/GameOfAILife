@@ -23,12 +23,23 @@
   const COFFEE_MINUTES = 15; // how long a coffee takes (sim.ACTIVITIES["coffee"])
   const COFFEE_DETOUR = 15; // minutes a cafe may add to the walk to work and still be on the way (PLAN decision 55)
   const COFFEE_LATE = 0.15; // the cafe's "Arrives late" odds when the cup still gets them in on time (a queue at the counter)
+  const SNACK_MINUTES = 5; // how long a snack takes (sim.ACTIVITIES["snack"])
   const EAT_OUT_MINUTES = 40; // how long a meal out takes (sim.ACTIVITIES["eat_out"])
   const GROCERY_MINUTES = 20; // how long the grocery shopping takes (sim.ACTIVITIES["buy_groceries"])
   const DINNER_MINUTES = 90; // how long a family dinner out takes (sim.ACTIVITIES["family_dinner"])
   const LATE_BASE_DROP = 20; // minutes late at which an option's common-sense value has dropped by 1 (the most it drops)
   const LATE_ODDS = 40; // minutes late per +1 of the option's "Arrives late" odds (at most +0.5)
   const TAXI_NO_HURRY = 0.4; // how much the taxi's common-sense value drops while the usual way still gets them in on time
+  const WOKE_GAP = 120; // minutes after waking up before the sleep fork can come up again
+  const SHIFT_SOON = 120; // ... and the minutes before a shift starts within which it never comes up
+  const MAX_OUTING_MINUTES = 40; // the longest trip (the way the character will go, the worst bus wait) to an outing's place
+  const TRAVEL_KINDS = ["invite", "hunger", "payday", "groceries", "lonely", "free_time"]; // forks whose scores weigh the trip
+  const TRAVEL_COST = 0.004; // common-sense value lost per minute an option adds to the day's travel, there and home again
+  const NIGHT_TRAVEL = 2; // ... times this from NIGHT_FROM in the evening until NIGHT_UNTIL in the morning
+  const NIGHT_FROM = 20, NIGHT_UNTIL = 7;
+  const COOPED_KINDS = ["invite", "lonely", "free_time"]; // forks whose options out of the house gain after a day indoors
+  const COOPED_UP = 0.3; // the most a day indoors adds to such an option ...
+  const COOPED_HOURS = 12; // ... rising from 0 after this many hours since the character was last out, to COOPED_UP 12 later
 
   class Outcome {
     constructor(id, label, p, valence, effects = {}, group = null) {
@@ -48,7 +59,7 @@
       this.label = label;
       this.steps = steps;
       this.cost = o.cost ?? 0.0;
-      this.vehicle = o.vehicle ?? "walk";
+      this.vehicle = o.vehicle ?? G.travel.USUAL; // "usual": each trip the usual way (travel.trip_mode); or a mode for every trip
       this.tags = o.tags ?? {}; // how it fits each play-style trait
       this.gains = o.gains ?? {}; // expected need gains, for default scoring
       this.outcomes = o.outcomes ?? [];
@@ -97,16 +108,76 @@
   const urgency = level => ((100 - level) / 100) ** 2;
 
   // How the character's play-style profile rates each option.
+  //
+  // In the outing forks (TRAVEL_KINDS) an option loses TRAVEL_COST for each minute it adds to the day's travel
+  // (extra_travel), twice that in the evening and at night; in COOPED_KINDS one out of the house gains up to
+  // COOPED_UP after a day indoors (cooped_up).
   function default_scores(agent, fork, sim) {
+    const weigh = TRAVEL_KINDS.includes(fork.kind);
+    const cooped = COOPED_KINDS.includes(fork.kind) ? cooped_up(sim, agent) : 0.0;
+    const rate = TRAVEL_COST * (sim.clock.hour >= NIGHT_FROM || sim.clock.hour < NIGHT_UNTIL ? NIGHT_TRAVEL : 1);
+    const home = weigh || cooped > 0 ? sim.home_of(agent) : null;
+    const direct = weigh ? _trip(sim, agent, home)[0] : 0;
     const scores = [];
     for (const opt of fork.options) {
       const style = sum(Object.entries(opt.tags).map(([t, v]) => (getd(agent.profile.traits, t, 0.5) - 0.5) * 2 * v));
       const need = sum(Object.entries(opt.gains).filter(([n]) => hasOwn(agent.needs, n))
         .map(([n, g]) => urgency(agent.needs[n]) * g / 25));
       const afford = G.housing.afford_score(sim, agent, opt);
-      scores.push(pyRound(opt.base + 0.6 * style + need + afford, 3));
+      let score = opt.base + 0.6 * style + need + afford;
+      if (weigh) {
+        const minutes = extra_travel(sim, agent, opt, direct);
+        if (minutes > 0) score -= minutes * rate;
+      }
+      if (cooped > 0 && _goes_out(sim, agent, opt, home)) score += cooped;
+      scores.push(pyRound(score, 3));
     }
     return scores;
+  }
+
+  // [minutes, mode] of the trip from here to a place the way the character will go (travel.trip_mode), counting
+  // the worst bus wait; [0, "walk"] when they are inside it.
+  function _trip(sim, agent, place_id) {
+    if (agent.inside === place_id) return [0, "walk"];
+    const mode = G.travel.trip_mode(sim, agent, place_id);
+    return [sim.travel_minutes(agent, place_id, mode, true), mode];
+  }
+
+  // Minutes an option adds to the character's travel today: to its first stop the way they will go, and home
+  // from its last (by car if they drove, else by bus when the walk is long), less the trip straight home
+  // (`direct`, worked out when not given). 0 for an option that stays here or goes straight home.
+  function extra_travel(sim, agent, opt, direct = null) {
+    const stops = opt.steps.map(s => sim._resolve_place(agent, s[1])).filter(p => p);
+    if (!stops.length) return 0;
+    const home = sim.home_of(agent);
+    const [there, mode] = _trip(sim, agent, stops[0]);
+    const last = stops[stops.length - 1];
+    let back = 0;
+    if (last !== home) {
+      const walk = sim.town.walk_minutes(sim.town.places.get(last).entry, home);
+      back = G.travel.leg_minutes(sim, last, home, mode === "car" ? "car"
+        : G.travel.BUS_MIN_WALK < walk && walk < G.travel.UNREACHABLE ? "bus" : "walk");
+    }
+    if (direct === null || direct === undefined) direct = _trip(sim, agent, home)[0];
+    return Math.max(0, there + back - direct);
+  }
+
+  // What a day indoors adds to an option out of the house: 0 until COOPED_HOURS since the character was last
+  // out (agent.out_tick, kept by the simulation; the world's first midnight before that), rising evenly to
+  // COOPED_UP over the next COOPED_HOURS. 0 while they are out.
+  function cooped_up(sim, agent) {
+    if (agent.inside !== sim.home_of(agent)) return 0.0;
+    const hours = (sim.clock.tick - (agent.out_tick ?? 0)) / 60;
+    return COOPED_UP * Math.min(1.0, Math.max(0.0, (hours - COOPED_HOURS) / COOPED_HOURS));
+  }
+
+  // True when one of the option's steps is somewhere other than home (a step "here" counts as where they are).
+  function _goes_out(sim, agent, opt, home) {
+    for (const [, where] of opt.steps) {
+      const place_id = sim._resolve_place(agent, where) || agent.inside;
+      if (place_id !== home) return true;
+    }
+    return false;
   }
 
   // --- helpers ------------------------------------------------------------------
@@ -144,11 +215,20 @@
 
   // The place of `kinds` an outing goes to: travel.nearest's pick (open when the character walks in and still
   // open `stay` minutes later; nearest them, or nearest both them and `meet`, or nearest `origin`), or null when
-  // there is none or the trip there would already make them late for today's shift. With every place of a kind
-  // shut, the nearest open one can be far across town, so it is not offered on the way to a shift.
+  // there is none, when the trip there the way they will go (by car, bus or on foot, the worst bus wait counted)
+  // is over MAX_OUTING_MINUTES, or when the trip, the stay and the way on to today's shift (by car if they drove,
+  // else the bus when it saves time) would not leave SHIFT_MARGIN minutes before it starts. With every place of
+  // a kind shut, the nearest open one can be far across town; the builder then offers its fixed home fallback.
   function _open_place(sim, agent, kinds, stay, meet = null, origin = null) {
     const place = sim.nearest(agent, kinds, origin, meet, stay);
-    if (place === null || sim._must_leave_for_work(agent, place.id)) return null;
+    if (place === null || place === undefined) return null;
+    const [trip, mode] = _trip(sim, agent, place.id);
+    if (trip > MAX_OUTING_MINUTES) return null;
+    const start = sim._shift_start_tick(agent);
+    if (start !== null) {
+      const on = G.travel.leg_minutes(sim, place.id, agent.job.place_id, mode === "car" ? "car" : "bus");
+      if (sim.clock.tick + trip + stay + on + G.sim.SHIFT_MARGIN > start) return null;
+    }
     return place;
   }
 
@@ -165,6 +245,40 @@
     if (!pool.length) return null;
     return sim.agents.get(maxBy(pool)[1]);
   }
+
+  // A child's best friend among the other children outside the household (affinity over 10), or null.
+  function _playmate(sim, agent) {
+    const hh = sim.household(agent).member_ids;
+    const pool = [];
+    for (const [oid, r] of agent.relationships) {
+      if (!hh.includes(oid) && r.affinity > 10 && sim.agents.get(oid).alive && !sim.agents.get(oid).is_adult) {
+        pool.push([r.affinity, oid]);
+      }
+    }
+    if (!pool.length) return null;
+    return sim.agents.get(maxBy(pool)[1]);
+  }
+
+  // A child's free outing in place of a paid one they can't pay for: playing in the park nearest them, with
+  // their best friend among the other children (an invite) or with whoever is there.
+  function _play(sim, agent) {
+    const park = _park(sim, agent);
+    const friend = _playmate(sim, agent);
+    const knee = new Outcome("scraped_knee", "Scrapes a knee", 0.08, -1, { health: -2, fun: -4 });
+    if (friend) {
+      const rel = relKey(friend.id);
+      return new Option(`Ask ${firstName(friend.name)} to play in ${park.name}`, [["play", park.id]],
+        { tags: { social: 0.8, adventure: 0.4, health: 0.3 }, gains: { fun: 30, social: 25 },
+          outcomes: [new Outcome("great_game", "A great game together", 0.6, +1, { [rel]: 5, fun: 6 }), knee],
+          extra: { invite_to: friend.id, place: park.id } });
+    }
+    return new Option(`Find some kids to play with in ${park.name}`, [["play", park.id]],
+      { tags: { social: 0.7, adventure: 0.5, health: 0.3 }, gains: { fun: 30, social: 20 },
+        outcomes: [_meet_new(0.3), knee] });
+  }
+
+  // True for a child who can't pay `cost` themselves (an adult would have to).
+  const _short_of = (agent, cost) => !agent.is_adult && agent.money + agent.savings < cost;
 
   function _closest_family(sim, agent) {
     const pool = [];
@@ -187,8 +301,9 @@
     const place = sim.town.places.get(invite.place);
     const rel = relKey(host.id);
     const first = firstName(host.name);
+    const meet = place.kind === "park" ? "play" : "hang_out"; // children ask each other to play in a park
     const opts = [
-      new Option(`Accept and meet ${first} at ${place.name}`, [["hang_out", place.id]],
+      new Option(`Accept and meet ${first} at ${place.name}`, [[meet, place.id]],
         { tags: { social: 1.0, adventure: 0.3 }, gains: { social: 40, fun: 20 },
           outcomes: [new Outcome("great_time", "Has a great time together", 0.6, +1, { [rel]: 6, fun: 8 }),
             new Outcome("awkward", "Conversation feels awkward", 0.12, -1, { [rel]: -3 }),
@@ -207,32 +322,49 @@
     return new Fork(agent.id, "invite", `${host.name} invites you to ${place.name}. What do you do?`, opts, sim.clock.tick);
   }
 
+  // The work fork's third option when no cup of coffee fits before the shift: a bite to eat where they are, then
+  // the usual way (its mode and fare; `late` is its own "Arrives late" odds).
+  function _bite_first(usual, late) {
+    return new Option("Grab a bite to eat, then go", [["snack", null], ...usual.steps.map((step) => [...step])], {
+      cost: usual.cost, vehicle: usual.vehicle, charge: usual.charge, base: 0.3,
+      tags: { health: 0.2, thrift: 0.2, diligence: -0.1 }, gains: { hunger: 25 },
+      outcomes: [_late(late), new Outcome("crumbs", "Gets crumbs all down their front", 0.1, -1, { fun: -3 })] });
+  }
+
+  // Minutes before the shift that the work fork opens, from where the character is: WORK_LEAD, or the walk and 15
+  // more when that is longer (walking is the slowest way: always in time to walk, or to have a cup at home first).
+  function work_lead(sim, agent) {
+    return Math.max(WORK_LEAD, sim.walk_minutes(agent, agent.job.place_id) + 15);
+  }
+
   function work_fork(sim, agent) {
     const job = agent.job;
     if (!job || agent.worked_today === sim.clock.day) return null;
     const minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day;
     if (!job.workdays.includes(sim.clock.weekday) || !(-WORK_LATE <= minutes_to_start && minutes_to_start <= 180)) return null;
     const walk_minutes = sim.walk_minutes(agent, job.place_id);
-    if (minutes_to_start > Math.max(WORK_LEAD, walk_minutes + 15)) return null; // walking is the slowest way: always in time to walk
+    if (minutes_to_start > work_lead(sim, agent)) return null;
     const place = sim.town.places.get(job.place_id);
     const school = job.hourly_wage === 0;
     const where = school ? "school" : "work";
     const rain = sim.weather === "rain" ? RAIN_CHANCE[sim.clock.season] : 0.0;
     // 1. The usual way: on foot, or the bus when the walk is long and a bus leaving now saves time.
     const bus = walk_minutes > G.travel.BUS_MIN_WALK ? G.travel.bus_trip(sim, agent, job.place_id) : null;
-    let usual, usual_trip;
+    let usual, usual_trip, usual_late;
     if (bus) {
+      usual_late = 0.06;
       usual = new Option(`Take the No. ${bus[1]} bus to ${where}`, [["work", "job"]], { cost: G.transit.fare(agent.age),
         vehicle: "bus", base: 0.6, charge: false, // the fare is paid on boarding
         tags: { diligence: 0.5, thrift: 0.3, social: 0.2 },
-        outcomes: [_late(0.06), new Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
+        outcomes: [_late(usual_late), new Outcome("bus_chat", "Chats with a neighbour on the bus", 0.12, +1,
           { social: 8 }),
         new Outcome("packed", "The bus is packed and stuffy", 0.15, -1, { fun: -5 })] });
       usual_trip = bus[0];
     } else {
+      usual_late = 0.12;
       usual = new Option(`Walk to ${where}`, [["work", "job"]], { vehicle: "walk", base: 0.6,
         tags: { diligence: 0.5, health: 0.4, thrift: 0.3 },
-        outcomes: [_late(0.12), new Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, { social: 8 }),
+        outcomes: [_late(usual_late), new Outcome("neighbour", "Chats with a neighbour on the way", 0.10, +1, { social: 8 }),
           new Outcome("soaked", "Gets soaked in the rain", rain * 0.8, -1, { fun: -8 })] });
       usual_trip = walk_minutes;
     }
@@ -258,28 +390,36 @@
     if (fast.vehicle === "taxi" && usual_trip <= minutes_to_start) { // decision 63 again: no need to pay for speed
       fast.base = pyRound(fast.base - TAXI_NO_HURRY, 3);
     }
-    // 3. Coffee first (PLAN decision 55, city.md 7.7): at the cafe open for the cup that adds least to the way to
-    // work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a cup there is still quicker than one
-    // at home; otherwise (an early shift, with the only open cafes across town) a cup at home first. Either way the
-    // timing sets the defaults and the late odds (_on_time below).
+    // 3. Coffee first (PLAN decision 55, city.md 7.7), only while the cup fits before the shift: at the cafe open for
+    // the cup that adds least to the way to work, when it is on the way (at most COFFEE_DETOUR minutes out of it) or a
+    // cup there is still quicker than one at home; at their own cafe a cafe worker has a coffee at work (the
+    // simulation ends it as the shift starts, so it holds nothing up). Otherwise (an early shift, with the only open
+    // cafes across town) a cup at home first, and with no time for either a bite to eat on the way out (_bite_first).
     const coffee_tags = { social: 0.4, diligence: -0.5, thrift: -0.3 };
     const spill = new Outcome("spill", "Spills coffee on their shirt", 0.05, -1, { fun: -5 });
     const home = sim.home_of(agent);
-    let coffee_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
+    const home_trip = (sim.walk_minutes(agent, home) + COFFEE_MINUTES
       + sim.town.walk_minutes(sim.town.places.get(home).entry, job.place_id));
     const cafe = sim.nearest(agent, ["cafe"], null, place, COFFEE_MINUTES);
-    const way = cafe ? (sim.walk_minutes(agent, cafe.id) + (cafe.id === job.place_id ? 0
+    const at_work = Boolean(cafe) && cafe.id === job.place_id;
+    const way = cafe ? (sim.walk_minutes(agent, cafe.id) + (at_work ? 0
       : sim.town.walk_minutes(cafe.entry, job.place_id))) : null;
-    let coffee;
-    if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= coffee_trip)) {
-      coffee = new Option(`Grab a coffee at ${cafe.name} first`, [["coffee", cafe.id], ["work", "job"]], { cost: 4,
-        base: 0.35, tags: coffee_tags, gains: { energy: 10, social: 5 },
-        outcomes: [_late(COFFEE_LATE), _meet_new(0.12),
-          new Outcome("barista", "Friendly chat at the counter", 0.3, +1, { social: 6 }), spill] });
-      coffee_trip = way + COFFEE_MINUTES;
+    let coffee, coffee_trip;
+    if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= home_trip)
+      && (at_work ? way : way + COFFEE_MINUTES) <= minutes_to_start) {
+      coffee = new Option(at_work ? "Have a coffee at work" : `Grab a coffee at ${cafe.name} first`,
+        [["coffee", cafe.id], ["work", "job"]], { cost: 4,
+          vehicle: "walk", base: 0.35, tags: coffee_tags, gains: { energy: 10, social: 5 },
+          outcomes: [_late(COFFEE_LATE), _meet_new(0.12),
+            new Outcome("barista", "Friendly chat at the counter", 0.3, +1, { social: 6 }), spill] });
+      coffee_trip = at_work ? way : way + COFFEE_MINUTES;
+    } else if (home_trip <= minutes_to_start) {
+      coffee = new Option("Make a coffee at home, then go", [["coffee", "home"], ["work", "job"]], { vehicle: "walk",
+        base: 0.35, tags: coffee_tags, gains: { energy: 10 }, outcomes: [_late(0.0), spill] });
+      coffee_trip = home_trip;
     } else {
-      coffee = new Option("Make a coffee at home, then go", [["coffee", "home"], ["work", "job"]], { base: 0.35,
-        tags: coffee_tags, gains: { energy: 10 }, outcomes: [_late(0.0), spill] });
+      coffee = _bite_first(usual, usual_late);
+      coffee_trip = usual_trip + SNACK_MINUTES;
     }
     // 4. Skip it.
     const skip = new Option(!school ? "Call in sick and stay home" : "Pretend to be sick and stay home",
@@ -294,9 +434,16 @@
       options, sim.clock.tick);
   }
 
+  // Late in the evening, after midnight for someone tired, or whenever exhausted; never within WOKE_GAP minutes
+  // of waking up (agent.woke_tick, kept by the simulation) nor SHIFT_SOON minutes of a shift (or once it began).
   function sleep_fork(sim, agent) {
-    const hour = sim.clock.hour;
-    if (!(hour >= 22 || hour < 5 || agent.needs.energy < 18)) return null;
+    const hour = sim.clock.hour, energy = agent.needs.energy;
+    if (!(hour >= 22 || (hour < 5 && energy < 70) || energy < 18)) return null;
+    const tick = sim.clock.tick;
+    const woke = agent.woke_tick ?? null;
+    if (woke !== null && tick - woke < WOKE_GAP) return null;
+    const start = sim._shift_start_tick(agent);
+    if (start !== null && start - tick <= SHIFT_SOON) return null;
     const friend = _best_friend(sim, agent);
     const rel = friend ? relKey(friend.id) : null;
     const text_outcomes = [new Outcome("warm_reply", "Gets a warm reply", 0.6, +1, Object.assign({ social: 8 }, rel ? { [rel]: 2 } : {})),
@@ -346,8 +493,8 @@
         outcomes: [_meet_new(0.08), new Outcome("friend_there", "Bumps into a friend", 0.15, +1, { social: 8 }),
           new Outcome("food_poisoning", "Gets food poisoning", 0.02, -1, { health: -10, fun: -10 })] });
     } else {
-      out = new Option("Raid the cupboard for leftovers", [["snack", "home"]],
-        { tags: { thrift: 0.5, health: -0.2 }, gains: { hunger: 25 },
+      out = new Option("Raid the cupboard for leftovers", [["leftovers", "home"]],
+        { tags: { thrift: 0.5, health: -0.2 }, gains: { hunger: 30 },
           outcomes: [new Outcome("stale", "Everything is stale", 0.3, -1, { fun: -4 })] });
     }
     const snack = new Option("Grab a quick snack", [["snack", null]], { cost: agent.money >= 3 ? 3 : 0,
@@ -441,11 +588,12 @@
         outcomes: [_meet_new(0.05), new Outcome("sale", "Finds a great sale", 0.15, +1, { money: 10 })] }),
       new Option("Order food for tonight", [["order_food", "home"]], { cost: 25, tags: { thrift: -0.5, family: 0.2 },
         gains: { hunger: 20 }, outcomes: [new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 })] }),
-      new Option(other ? `Ask ${firstName(other.name)} to do the shopping` : "Ask a neighbour for help",
-        [["relax_home", "home"]], { tags: { family: -0.3, thrift: 0.4 },
-          extra: other ? { ask_shop: other.id } : {},
-          outcomes: [new Outcome("annoyed_partner", "They're annoyed at being asked", 0.4, -1,
-            other ? { [relKey(other.id)]: -3 } : { social: -3 })] }),
+      other
+        ? new Option(`Ask ${firstName(other.name)} to do the shopping`, [["relax_home", "home"]],
+          { tags: { family: -0.3, thrift: 0.4 }, extra: { ask_shop: other.id },
+            outcomes: [new Outcome("annoyed_partner", "They're annoyed at being asked", 0.4, -1, { [relKey(other.id)]: -3 })] })
+        : new Option("Make do with what's in the cupboard", [["leftovers", "home"]], { tags: { thrift: 0.6, health: -0.2 },
+          gains: { hunger: 30 }, outcomes: [new Outcome("stale", "Everything is stale", 0.3, -1, { fun: -4 })] }), // nobody to send: eat what there is
       new Option("Leave it for tomorrow", [["relax_home", "home"]], { tags: { diligence: -0.6, thrift: 0.3 }, base: -0.2,
         outcomes: [new Outcome("empty_fridge", "Opens an empty fridge later", 0.6, -1, { fun: -5 })] }),
     ];
@@ -459,8 +607,11 @@
     const family = _closest_family(sim, agent);
     const opts = [];
     // The cafe nearest both (with a friend to invite) or nearest the character, open for the whole hang-out.
-    const cafe = _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES, friend);
-    if (friend && cafe) {
+    const short = _short_of(agent, 6);
+    const cafe = !short ? _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES, friend) : null;
+    if (short) { // a child without the $6: off to play instead
+      opts.push(_play(sim, agent));
+    } else if (friend && cafe) {
       opts.push(new Option(`Invite ${firstName(friend.name)} to ${cafe.name}`, [["hang_out", cafe.id]], { cost: 6,
         tags: { social: 1.0, adventure: 0.3 }, gains: { social: 45, fun: 20 },
         outcomes: [_meet_new(0.05)], extra: { invite_to: friend.id, place: cafe.id } }));
@@ -496,17 +647,22 @@
     return new Fork(agent.id, "lonely", "You haven't talked to anyone in a while. What do you do?", opts, sim.clock.tick);
   }
 
+  // When bored (fun under 40) or, for a child, cooped up at home (cooped_up), from 08:00 to 21:00 off shift.
   function free_time_fork(sim, agent) {
     const hour = sim.clock.hour;
-    if (agent.needs.fun >= 40 || !(8 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1)) return null;
+    if (!(8 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1)) return null;
+    if (agent.needs.fun >= 40 && (agent.is_adult || cooped_up(sim, agent) <= 0)) return null;
     const park = _park(sim, agent);
-    const cafe = _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES); // open for the whole hang-out
+    const short = _short_of(agent, 6);
+    const cafe = !short ? _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES) : null; // open for all of it
     let out;
-    if (cafe) {
+    if (short) { // a child without the $6: off to play instead
+      out = _play(sim, agent);
+    } else if (cafe) {
       out = new Option(`Hang out at ${cafe.name}`, [["hang_out", cafe.id]], { cost: 6, tags: { social: 0.8, thrift: -0.3 },
         gains: { fun: 25, social: 30 }, outcomes: [_meet_new(0.12)] });
     } else { // every cafe would shut before the hang-out is over
-      out = new Option("Play a board game at home", [["relax_home", "home"]], { tags: { family: 0.8 }, gains: { fun: 25, social: 10 },
+      out = new Option("Play a board game at home", [["board_game", "home"]], { tags: { family: 0.8 }, gains: { fun: 25, social: 10 },
         outcomes: [new Outcome("bonding", "Laughs with the family", 0.5, +1, { family_bond: 2 })] });
     }
     const opts = [
@@ -562,10 +718,12 @@
 
   G.forks = {
     RAIN_CHANCE, OBVIOUS_MARGIN, MAJOR_MARGIN, LUCK_STRENGTH, KID_CURFEW, WORK_LEAD, WORK_LATE, SHOP_MINUTES,
-    HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
-    LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, Outcome, Option, Fork, luck_odds, urgency, default_scores, _late,
-    _meet_new, _on_time, _curfew, _open_on_arrival, _open_place, _park, _best_friend, _closest_family, invite_fork,
-    work_fork, sleep_fork, hunger_fork,
+    HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, SNACK_MINUTES, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
+    LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, WOKE_GAP, SHIFT_SOON, MAX_OUTING_MINUTES, TRAVEL_KINDS, TRAVEL_COST,
+    NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, COOPED_KINDS, COOPED_UP, COOPED_HOURS, Outcome, Option, Fork, luck_odds,
+    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, _curfew,
+    _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,
+    work_lead, work_fork, sleep_fork, hunger_fork,
     payday_fork, groceries_fork, lonely_fork, free_time_fork, BUILDERS, COOLDOWN, builders, build_fork,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

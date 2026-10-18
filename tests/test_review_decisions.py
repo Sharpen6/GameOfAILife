@@ -83,7 +83,7 @@ class TestChoiceHappensAtLeaveTime(Case):
 
     def test_answer_after_leave_time_still_goes_shopping(self):
         sami = self.sim.agents["sami"]
-        self.at(5, 10)  # Saturday; his chef shift starts at 11:00
+        self.at(5, 9)  # Saturday; his chef shift starts at 11:00 (an hour later the shop would run into it)
         sami.controller = "bot"
         fork = payday_fork(self.sim, sami)
         with always_ask():

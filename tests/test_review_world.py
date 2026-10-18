@@ -190,7 +190,8 @@ class OpeningHoursForksTest(unittest.TestCase):
         eli = self.hungry("eli")
         self.assertNotIn(3, eli.job.workdays)  # Thursday: no shift to get to
         first, market = min((p.hours[0] * 60 - self.sim.walk_minutes(eli, p.id), p.id)
-                            for p in self.sim.town.places.values() if p.kind == "market")
+                            for p in self.sim.town.places.values() if p.kind == "market"
+                            and self.sim.walk_minutes(eli, p.id) <= forks.MAX_OUTING_MINUTES)  # within reach
         at(self.sim, 3, 0, first - 7)  # would arrive 7 minutes before any market opens
         self.assertIsNone(groceries_fork(self.sim, eli))
         at(self.sim, 3, 0, first + 3)  # arrives 3 minutes after the first one opens

@@ -284,14 +284,14 @@ class TestSamples(unittest.TestCase):
         sim = Simulation(seed=1)
         for _ in range(3 * 60):
             sim.step()
-        self.assertEqual([s["tick"] for s in sim.stats.samples], [7 * 60, 8 * 60, 9 * 60])
+        self.assertEqual([s["tick"] for s in sim.stats.samples], [6 * 60, 7 * 60, 8 * 60])  # from Monday 05:00
         self.assertEqual(len(sim.stats_json(full=False)["samples"]), 3)  # a push carries what is new ...
         self.assertEqual(sim.stats_json(full=False)["samples"], [])  # ... once
         self.assertEqual(len(sim.stats_json(full=True)["samples"]), 3)  # full carries everything, every time
         for _ in range(60):
             sim.step()
         push = sim.stats_json(full=False)
-        self.assertEqual([s["tick"] for s in push["samples"]], [10 * 60])
+        self.assertEqual([s["tick"] for s in push["samples"]], [9 * 60])
         self.assertFalse(push["full"])
 
     def test_a_sample_is_the_city_at_that_hour(self):
@@ -724,12 +724,12 @@ class TestClaudeController(unittest.TestCase):
     def fork_message(self) -> dict:
         sim = Simulation(seed=1)
         sim.claim("dana", "claude")
-        for _ in range(3 * 60):
+        for _ in range(4 * 60):  # from Monday 05:00: her work fork comes at about 08:20
             sim.step()
             forks = [m for _, m in sim.outbox if m["type"] == "fork"]
             if forks:
                 return forks[0]
-        self.fail("no fork for dana in three hours")
+        self.fail("no fork for dana in four hours")
 
     def test_the_page_shows_places_the_home_and_household_money(self):
         msg = self.fork_message()

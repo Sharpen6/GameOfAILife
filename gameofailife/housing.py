@@ -1374,8 +1374,11 @@ def afford_score(sim, agent: Agent, opt) -> float:
     """The money term of default_scores (housing.md 10.3).
 
     Free options score 0. A household-paid cost is weighed against the household's spare funds (funds less two
-    weeks of outgo): -1.5 above spare, else -thrift x (cost / spare)^2. Any other cost: -2 above the
-    character's money, else -thrift x cost / max(money, 50). Thrift counts triple while the household is
+    weeks of outgo): -1.5 above spare, else -thrift x (cost / spare)^2. Any other cost is weighed against what
+    the character can pay it with: their own money and savings, else the household's spare funds (the pool the
+    Sunday charges draw on; a child's costs fall to an adult), as -thrift x cost / max(that, 50), and -2 when
+    neither covers it. A cost not charged on deciding (the work fork's bus, whose fare is paid on boarding) is
+    never out of reach: then it is -thrift x cost / 50. Thrift counts triple while the household is
     belt-tightening.
     """
     cost = opt.cost
@@ -1386,6 +1389,12 @@ def afford_score(sim, agent: Agent, opt) -> float:
     if getattr(opt, "household_pays", False):
         spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh)
         return -1.5 if cost > spare else -thrift * (cost / spare) ** 2
-    if cost > agent.money:
-        return -2.0
-    return -cost / max(agent.money, 50) * thrift
+    own = agent.money + agent.savings
+    if cost <= own:
+        return -cost / max(own, 50) * thrift
+    spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh)
+    if cost <= spare:
+        return -cost / max(spare, 50) * thrift
+    if not getattr(opt, "charge", True):
+        return -cost / 50 * thrift
+    return -2.0

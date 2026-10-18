@@ -1,5 +1,5 @@
 // Port of gameofailife/travel.py: getting around: travel times, the usual way to work and what it costs a week,
-// and the nearest open place.
+// the usual way for any one trip (trip_mode, with where the car is parked), and the nearest open place.
 //
 // Walking and running read the town's O(1) walk fields (`sim.town.walk_minutes(xy, place_id)`). Cars and taxis
 // follow the roads (`sim.town.drive_length`, memoized on the shared map) and lose about a minute at each
@@ -19,6 +19,8 @@
   const LIGHT_WAIT = 1; // minutes a car or taxi loses at each junction on its way (about 0.75 on average, rounded up)
   const BUS_MIN_WALK = 25; // the bus is someone's usual way to work only when the walk is longer than this
   const TAXI_MIN_WALK = 40; // the work fork offers a taxi to an adult without a car only when the walk is longer than this
+  const USUAL = "usual"; // Option.vehicle and start_plan's vehicle meaning "the usual way, trip by trip" (trip_mode)
+  const SHORT_WALK = 8; // minutes: a walk this short from home leaves the car on the driveway
 
   // The bus trip the character would make to a place leaving now: [minutes door to door, line, board stop,
   // alight stop], or null when they are inside it or no bus saves transit.MIN_SAVING minutes over walking.
@@ -104,6 +106,53 @@
     return job.workdays.length * getd(TRIP_COST, mode, 0);
   }
 
+  // The place id where the character's car is parked: where it was last driven to (`agent.car_at`, set as a
+  // car sets off), or home (car_at null, so a car at home moves house with its household).
+  const car_place = (sim, agent) => agent.car_at || sim.home_of(agent);
+
+  // True when the character owns a car and it is with them: they are travelling in it, or it is parked at the
+  // place they are in, at its door, or (a park) anywhere inside it.
+  function car_here(sim, agent) {
+    if (!agent.owns_car) return false;
+    if (agent.vehicle === "car") return true;
+    const place = sim.town.places.get(car_place(sim, agent));
+    if (agent.inside !== null) return agent.inside === place.id;
+    if (agent.x === place.entry[0] && agent.y === place.entry[1]) return true;
+    return place.kind === "park" && place.x <= agent.x && agent.x < place.x + place.w
+      && place.y <= agent.y && agent.y < place.y + place.h;
+  }
+
+  // How the character makes one trip their usual way (an option's vehicle "usual"): "car" | "bus" | "walk".
+  //
+  // The car when they own one and it is with them (car_here), unless it stands on the driveway at home and the walk
+  // is SHORT_WALK minutes or less. Otherwise the bus when the walk is longer than BUS_MIN_WALK and a bus leaving
+  // now saves transit.MIN_SAVING minutes (bus_trip). Otherwise on foot, as for a trip to where they already are.
+  // On foot too when the car (with every light green) or the bus would get there before the place opens and the
+  // walk would not: `nearest` and the builders judge opening times by the walk.
+  function trip_mode(sim, agent, place_id) {
+    if (agent.inside === place_id) return "walk";
+    const walk = sim.walk_minutes(agent, place_id);
+    let mode = "walk", soonest = walk;
+    if (car_here(sim, agent)) {
+      const home = sim.home_of(agent);
+      if (!(walk <= SHORT_WALK && car_place(sim, agent) === home && agent.inside === home)) mode = "car";
+    }
+    if (mode === "walk" && BUS_MIN_WALK < walk && walk < UNREACHABLE) {
+      const trip = bus_trip(sim, agent, place_id);
+      if (trip !== null) {
+        mode = "bus";
+        soonest = trip[0];
+      }
+    }
+    const hours = sim.town.places.get(place_id).hours;
+    if (mode !== "walk" && hours) {
+      if (mode === "car") soonest = travel_minutes(sim, agent, place_id, "ambulance"); // the drive with no red lights
+      const now = sim.clock.minute_of_day, opens = hours[0] * 60;
+      if (now + soonest < opens && opens <= now + walk) return "walk";
+    }
+    return mode;
+  }
+
   // Where a walk starts: [tile, the id of the place it starts inside, or null].
   //
   // `where` is a Place or a place id (its entry tile, inside that place), a character (their tile, inside
@@ -155,7 +204,8 @@
   }
 
   G.travel = {
-    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, bus_trip,
-    travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, _spot, _walk, nearest,
+    SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, USUAL, SHORT_WALK,
+    bus_trip, travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, car_place,
+    car_here, trip_mode, _spot, _walk, nearest,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));
