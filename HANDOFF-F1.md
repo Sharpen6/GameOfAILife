@@ -2,9 +2,8 @@
 
 Branch `v3-f1`. Tags: `v3-skel-folkmodel` (folk_model), `v3-folk-gen` (generation, folk money, its JS twin).
 Merged: v3-skel-tags, v3-skel-people, v3-skel-life, v3-skel-region (latest fa53ec8), v3-region-homes (latest
-f6edd0d), v3-rail-trips, v3-rail-js, v3-skel-hooks. The integrator deletes this file. Full suite on this HEAD
-(`GOAL_SKIP_DEVFIXTURE=1`): 877 tests, 10 skipped, 3 failures, all in `tests.test_people` and already failing on
-`v3-skel-hooks` alone (item 4 below).
+f6edd0d), v3-rail-trips and v3-rail-js (latest 0cf916c; engine.json kept at PLAN 4's list), v3-skel-hooks. The
+integrator deletes this file. Full suite on this HEAD: see "Full suite" at the end.
 
 ## Done
 - `folk_model.py/.js`: Person (life.md 3.2 protocol, `__slots__`, lazy needs), FolkHousehold, Trip, namespaces
@@ -14,10 +13,16 @@ f6edd0d), v3-rail-trips, v3-rail-js, v3-skel-hooks. The integrator deletes this 
   --dump 1`; jobs from every `town.job_slots` row onto `career.board(sim)` (`p.job.slot`), ties only via
   `people.set_rel`; isolated mode; `housing.list_vacancies` after populating. Node generation parity exact.
 - `folk_life.py/.js`: `pay_shift`, `pensions`, `weekly` (books to the cent, v2 arrears rule, saving, emergency
-  fix), `nightly` (folk homes' damp, chills, emergencies on `(NS_FOLK_HOME, home_id, day)`), `on_birthday`, `join`,
-  `split`, `release`, `new_household`, `on_household_empty`, `vacancies`, `folk_move`, `folk_vacate`.
-- Tests: `tests.test_folk_gen` (20) and `tests.test_folk_money` (9, including a three-week Python/Node rehearsal
-  of folk_life compared person by person).
+  fix), `nightly` (folk homes' damp, chills, emergencies on `(NS_FOLK_HOME, home_id, day)`; both rolls go
+  through `people.log_roll` as `damp_chill` / `home_emergency`), `on_birthday`, `join`, `split`, `release`,
+  `new_household`, `on_household_empty`, `vacancies`, `folk_move`, `folk_vacate`. A forced move (three Sundays in
+  the red) refreshes the movers' commutes. An owner household emptied by its members moving out (join,
+  new_household) sells its home: the richest adult mover gets `housing.sale_proceeds`. The importance-0 lines
+  ("... is fixed.", "... is never properly fixed.") go to the residents' memory, never `sim.event` (PLAN 2.8).
+- `folk_model.js`: `Person.position` reads `town.places` as the Map it is, so `p.x` / `p.y` and the `at` of folk
+  events match Python (they were [0, 0] in the port).
+- Tests: `tests.test_folk_gen` (20) and `tests.test_folk_money` (11, including a three-week Python/Node rehearsal
+  of folk_life compared person by person, with memory, the luck log and positions).
 
 ## Cut (in the brief's order)
 The folk market (crowded upgrades, buying, renovation), newcomers (`folk_gen.newcomer` exists in both languages
@@ -47,13 +52,13 @@ car=True)`, <= 12 min to the station); teens to Riverton High by train when it i
 
 ## Changes needed elsewhere
 1. **housing.py:1518 / housing.js:1477 (L2's "life: households" hunk):** `sim.folk.new_household(sim, members,
-   home_id, how)` passes four arguments, but F2a's `Folk.new_household(self, member_ids, home_id, how)` takes
-   three, so a TypeError is raised the first time a townsperson splits through `housing.new_household`. The fix:
-   `sim.folk.new_household([m.id for m in members], home_id, how)` (JS: `members.map(m => m.id)`).
-   `folk_life.new_household` takes ids or people.
+   home_id, how)` passes four arguments. F2a's `Folk.new_household` on `v3-folk-live` (64231df) now takes both
+   forms, so nothing is needed once that is merged. Otherwise the fix is `sim.folk.new_household([m.id for m in
+   members], home_id, how)` (JS: `members.map(m => m.id)`). `folk_life.new_household` takes ids or people.
 2. **R1a, region.json:** the "green" gardener row has count 1, so the named park keeper can have only one folk
    coworker on an overlapping shift. `test_folk_gen` asks for min(2, the overlapping slots there). Count 2 meets the
-   brief's ">= 2 folk coworkers".
+   brief's ">= 2 folk coworkers". Still count 1 on `v3-r1a` / `v3-region-frozen` (fa53ec8). After R1a changes
+   it: regenerate `tests/fixtures/folk_seed1.json` (command below) and make `test_named_meet_folk` ask for 2.
 3. **F2a, folk.js:** call `G.folk_life.pay_shift` at shift end and delegate `nightly`, `pensions`, `weekly`,
    `new_household`, `on_household_empty`, `join`, `split`, `release` and `on_birthday` the way folk.py does.
    `folk_life` calls `folk.kill` and `folk.on_job_change` only when `sim.folk` has `wheel` (Folk, not GenFolk).
@@ -63,7 +68,9 @@ car=True)`, <= 12 min to the station); teens to Riverton High by train when it i
 
 No housing helper rejected a `FolkHousehold`: `weekly_cost`, `weekly_outgo`, `list_vacancies`, `value`,
 `sale_proceeds`, `fix_emergency`, `stage_of`, `condition_of` and `_change_condition` all work on it.
-`fix_emergency(sim, hh, payer)` gets the folk payer as agent, so the news stays folk-only.
+`folk_life` no longer calls `housing.fix_emergency`: its `emergency_settled` news is importance 0, which PLAN 2.8
+keeps out of `sim.event` for folk, so `folk_life` clears `home.emergency` itself and writes the line to memory.
+Another caller should not call `fix_emergency` on a folk household for the same reason.
 
 ## Folk section for F3's protocol
 > **Townsfolk.** In the region world, 1,000 townsfolk (`--folk N`; 0 in millbrook) live in about 420 households
@@ -76,8 +83,8 @@ No housing helper rejected a `FolkHousehold`: `weekly_cost`, `weekly_outgo`, `li
 > take-home pay at the end of each shift, the $400 pension on Friday 09:00 to 65+ without a paid job, and on Sunday
 > 23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Three
 > Sundays in the red move a household to a cheaper rental or out of town (`left_town`, its `agents` the folk ids).
-> Folk homes have their own damp, chills and emergencies (`damp_chill`, `emergency`, `emergency_settled` naming
-> folk only). With `folk_isolated`, no townsperson has a tie to the 60, a job at Millbrook's places or a seat at
+> Folk homes have their own damp, chills and emergencies (`damp_chill`, `emergency`, naming folk only; a fix is
+> in the residents' memory). With `folk_isolated`, no townsperson has a tie to the 60, a job at Millbrook's places or a seat at
 > Millbrook's school.
 
 ## Tests to run
@@ -85,3 +92,16 @@ No housing helper rejected a `FolkHousehold`: `weekly_cost`, `weekly_outgo`, `li
 checks run when `node` is present). Regenerate `tests/fixtures/folk_seed1.json` with `python3 -m
 gameofailife.folk_gen --dump 1 tests/fixtures/folk_seed1.json` only if region.json or the cast changes (after a
 change to region.json's rows, re-check the Millbrook-row and coworker numbers).
+
+## Checks after the verifier's fixes (2184eb7 and this commit)
+Integrated scratch tree (this HEAD + `v3-folk-live` 64231df's folk.py, folk_transit.py, folk.js, folk_transit.js
+and engine.json), `Simulation(seed=1, world="region", folk=1000)` with 30 folk homes set derelict, one game day,
+Python and Node giving the same numbers: folk luck log pickpocket 511, bargain 135, damp_chill 14,
+home_emergency 63; no `emergency_settled` event; the damp_chill event for f16 at [202, 129] in both; no
+townsperson at (0, 0) (f0 179 61 in Node); f87 joining another household gets 11163 for quayside_house_12; 60
+renting households sent through `fall_behind` all move, with 0 commutes differing from `folk.on_job_change`.
+
+## Full suite
+`nice -n 10 python3 -W ignore -m unittest discover -s tests` on this HEAD: 881 tests, 9 skipped, 4 failures, none
+F1's: the 3 `tests.test_people` failures of item 4, and `test_integration.DevFixture` (client/dev/fixture_town.js
+is the integrator's; it fails the same way on the previous HEAD 1e95398: state.agents, crowd, folk_n, talks, trains).
