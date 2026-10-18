@@ -134,7 +134,19 @@ does not keep, so the step p99 stays under 8 ms.
   city gains "life"; test_dashboard CITY_KEYS gains "life".
 
 ## Perf (tests/perf_folk.py, region seed 1)
-Engine, one game day, process_time, `--quick --skip-server --skip-node` (best of 1), after this round's stats fix:
-folk 0 mean 0.30 ms, p99 1.50 ms; folk 1000 mean 0.81 ms, p99 7.59 ms (gate 8 ms), 2.75x the mean (gate 5x), at
-load 2.3. Before the fix, the same run gave p99 6.25 ms at load 2.7. Without the ring reuse and the lean hourly
-sample, it gave 9.74 ms. The hourly sample is now about 5 ms on a 1,060-person city.
+Full run under flock /tmp/v3-slow.lock at this HEAD's code, after this round's stats fix: OK.
+- Engine, one game day, best of 3 process_time runs (load 3.1): folk 0 mean 0.31 ms, p99 1.33 ms; folk 1000
+  mean 0.59 ms, p99 5.98 ms (gate 8 ms), max 27.3 ms, 1.91x the mean (gate 5x).
+- Server, speed 16, folk 1000, God view, 120 s (load 2.5): 1.70 ms CPU a tick (gate 20 ms) over 4,610 ticks,
+  38.4 ticks/s, 2,354 frames, welcome 431 KB.
+- Node, one game day (load 2.4): 0.74 s wall (build 0.33 s).
+- One quick engine run (best of 1) without the ring reuse and the lean hourly sample gave p99 9.74 ms. That is
+  why `folk_parts(sim, hourly=True)` exists.
+
+## Checks at this HEAD
+- `tests.test_hooks tests.test_dashboard tests.test_folk_protocol tests.test_folk_isolation tests.test_port
+  tests.test_seams`: 162 tests OK (3 skipped).
+- `page_check.cjs` (region, 1000 folk): ok, 0 errors.
+- Full suite: 929 tests, 5 failures, all listed above. One is test_integration DevFixture: fixture_town.js is
+  the integrator's, see INTEGRATOR 1, or set GOAL_SKIP_DEVFIXTURE=1. Three are L1's test_people tests. One is
+  R1b's IdentityTest GC tick (128 ms); it passes when run alone (15 s).
