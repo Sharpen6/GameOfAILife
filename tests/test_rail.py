@@ -67,7 +67,8 @@ class LineTest(unittest.TestCase):
     def test_track_tiles_are_rail(self):
         for ln in self.lines.values():
             for track, tiles in ln.tracks.items():
-                self.assertEqual(len(tiles), self.town.rail["lines"][list(self.lines).index(ln.id)]["track_tiles"][track])
+                data = self.town.rail["lines"][list(self.lines).index(ln.id)]
+                self.assertEqual(len(tiles), data["track_tiles"][track])
                 for x, y in tiles:  # the view draws corners + 0.5: every tile between them is track
                     self.assertIn(self.town.tiles[y][x], "=rx", (ln.id, track, x, y))
                 for (x0, y0), (x1, y1) in zip(tiles, tiles[1:]):
