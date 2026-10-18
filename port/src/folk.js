@@ -20,6 +20,7 @@
   const SHIFT_SPREAD = 5;
   const LATE_GRACE = 5; // minutes late before reputation suffers
   const EVENING = 19 * 60; // choices after this are "evening" ones
+  const DINNER_FROM = 17 * 60 + 30, DINNER_UNTIL = 19 * 60 + 30, DINNER_MINUTES = 45; // the family dinner, once a day
   const STROLL_EVERY = 5; // minutes between a park stroller's hops
   const STROLL_MINUTES = 10; // one way of a stroll round the block when no park is in reach
   const FAV_WALK = 25, FAV_CAR = 15, FAV_KEEP = 3; // favourites: the nearest FAV_KEEP within these minutes
@@ -496,7 +497,32 @@
         this._go_home(sim, p, now, "sleep", this._wake_tick(p, now));
         return;
       }
+      if (DINNER_FROM <= m && m < DINNER_UNTIL && home !== null && p.inside === home && this._dinner(p, now, day)) return;
       this.choose(sim, p, now, m >= EVENING ? "evening" : "day_off");
+    }
+
+    // The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one grocery
+    // each. Needs someone to eat with and food in the house.
+    _dinner(p, now, day) {
+      const hh = this.hh_of(p);
+      if (hh === null || hh.dinner_day === day || hh.groceries <= 0) return false;
+      const diners = [];
+      for (const mid of hh.member_ids) {
+        const q = this.person(mid);
+        if (q !== null && q !== p && q.alive && !q.gone && q.trip === null && q.inside === p.inside &&
+            q.activity === "relax_home") diners.push(q);
+      }
+      if (!diners.length) return false;
+      hh.dinner_day = day;
+      hh.groceries = Math.max(0, hh.groceries - diners.length - 1);
+      for (const q of diners) {
+        this._gain(q, now);
+        this.settle(q, now);
+        this.ends.delete(q.i);
+        this._begin(q, now, "dinner_home", DINNER_MINUTES);
+      }
+      this._begin(p, now, "dinner_home", DINNER_MINUTES);
+      return true;
     }
 
     // A stay where the person is. A leisure stay ends when the place shuts; at a shut place it is home.
@@ -1399,7 +1425,7 @@
   }
 
   G.folk = {
-    BARGAIN, PICKPOCKET, RAINED_OUT, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
+    BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
     GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,

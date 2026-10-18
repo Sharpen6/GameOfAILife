@@ -36,6 +36,7 @@ SHIFT_MARGIN = 10  # minutes spare before a shift, on average: each person keeps
 SHIFT_SPREAD = 5
 LATE_GRACE = 5  # minutes late before reputation suffers
 EVENING = 19 * 60  # choices after this are "evening" ones
+DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES = 17 * 60 + 30, 19 * 60 + 30, 45  # the family dinner, once a day
 STROLL_EVERY = 5  # minutes between a park stroller's hops
 STROLL_MINUTES = 10  # one way of a stroll round the block when no park is in reach
 FAV_WALK, FAV_CAR, FAV_KEEP = 25, 15, 3  # favourites: the nearest FAV_KEEP within these minutes
@@ -494,7 +495,33 @@ class Folk:
         if night:
             self._go_home(sim, p, now, "sleep", self._wake_tick(p, now))
             return
+        if DINNER_FROM <= m < DINNER_UNTIL and home is not None and p.inside == home and self._dinner(p, now, day):
+            return
         self.choose(sim, p, now, "evening" if m >= EVENING else "day_off")
+
+    def _dinner(self, p, now: int, day: int) -> bool:
+        """The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one
+        grocery each. Needs someone to eat with and food in the house."""
+        hh = self.hh_of(p)
+        if hh is None or hh.dinner_day == day or hh.groceries <= 0:
+            return False
+        diners = []
+        for mid in hh.member_ids:
+            q = self.person(mid)
+            if q is not None and q is not p and q.alive and not q.gone and q.trip is None and q.inside == p.inside \
+                    and q.activity == "relax_home":
+                diners.append(q)
+        if not diners:
+            return False
+        hh.dinner_day = day
+        hh.groceries = max(0, hh.groceries - len(diners) - 1)
+        for q in diners:
+            self._gain(q, now)
+            self.settle(q, now)
+            self.ends.pop(q.i, None)
+            self._begin(q, now, "dinner_home", DINNER_MINUTES)
+        self._begin(p, now, "dinner_home", DINNER_MINUTES)
+        return True
 
     def _begin(self, p, now: int, activity: str, minutes: int) -> None:
         """A stay where the person is. A leisure stay ends when the place shuts; at a shut place it is home."""
