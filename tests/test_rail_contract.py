@@ -95,7 +95,8 @@ def py_boarding(town):
     for ln in rail.lines(town).values():
         for track in ("out", "in"):
             for s in ln.stations:
-                out.append([ln.id, track, s, [rail.boarding(town, ln.id, track, s, t) for t in range(ln.cycle_minutes)]])
+                row = [rail.boarding(town, ln.id, track, s, t) for t in range(ln.cycle_minutes)]
+                out.append([ln.id, track, s, row])
         out.append([ln.id, "run", ln.run, ln.cycle_minutes])
     out.append(["timetable", rail.timetable_json(town)])
     out.append(["rail", rail.rail_json(town)])
@@ -199,6 +200,28 @@ class StateContractTest(unittest.TestCase):
         self.assertTrue(stations <= set(self.town.places))
         self.assertTrue(all(self.town.places[s].kind == "station" for s in stations))
         self.assertEqual(len(stations), 9)
+
+
+class SimulationTrainsTest(unittest.TestCase):
+    """Once F3's hooks are in: the state frame carries the 10 trains in region world and [] in millbrook, and the
+    timetable carries `train` in region world only."""
+
+    def test_state_and_timetable(self):
+        from gameofailife.sim import Simulation
+        try:
+            sim = Simulation(1, world="region")
+        except TypeError:
+            self.skipTest("Simulation has no world= yet (F3's hooks)")
+        state = sim.state_json(housing=False)
+        if "trains" not in state:
+            self.skipTest("state_json has no trains yet (F3's hooks)")
+        self.assertEqual(len(state["trains"]), 10)
+        tick = sim.clock.tick
+        self.assertEqual(state["trains"], plain(rail.train_rows(sim.town, tick, sim.folk.riders(tick))))
+        self.assertEqual(sim.timetable()["train"], plain(rail.timetable_json(sim.town)))
+        mb = Simulation(1)
+        self.assertEqual(mb.state_json(housing=False)["trains"], [])
+        self.assertNotIn("train", mb.timetable())
 
 
 if __name__ == "__main__":
