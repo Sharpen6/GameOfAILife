@@ -39,7 +39,11 @@ EVENING = 19 * 60  # choices after this are "evening" ones
 DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES = 17 * 60 + 30, 19 * 60 + 30, 45  # the family dinner, once a day
 # Off sick (life.can_work False), a townsperson rests at home (sick_home) until the next of these meals or bedtime,
 # eats at home (eat_home, a grocery) and rests again; breakfast is on waking, as every day.
-SICK_MEALS = (12 * 60 + 30, 18 * 60 + 30)
+LUNCH = 12 * 60 + 30
+SICK_MEALS = (LUNCH, 18 * 60 + 30)
+# A late shift's morning at home (they set off after LUNCH + MEAL_MINUTES) breaks for lunch at LUNCH, a meal at
+# home as off sick: breakfast, the shift's own lunch break and nothing more would starve them by inches.
+MEAL_MINUTES = 30
 STROLL_EVERY = 5  # minutes between a park stroller's hops
 STROLL_MINUTES = 10  # one way of a stroll round the block when no park is in reach
 FAV_WALK, FAV_CAR, FAV_KEEP = 25, 15, 3  # favourites: the nearest FAV_KEEP within these minutes
@@ -529,17 +533,20 @@ class Folk:
         bed = self._bed_minute(p)
         night = m >= bed or m < self._wake_minute(p, day)
         if act == "sick_home" and p.state == "busy" and not night:
-            self._sick_meal(p, now)  # a rest off sick ends at a meal at home
+            self._home_meal(p, now)  # a rest off sick ends at a meal at home
             return
         if job is not None and day % 7 in job.workdays and p.worked_day != day and m < self._end_minute(p) - 60:
             commute, mode = self._commute_of(p)
             leave = self._set_off(p)
             early = m < leave
             if early and (p.inside == home or home is None) and not night:
-                self._begin(p, now, "relax_home", leave - m)
+                if act == "relax_home" and LUNCH <= m < LUNCH + 60 and m + MEAL_MINUTES <= leave:
+                    self._home_meal(p, now)  # lunch before a late shift
+                else:
+                    self._begin(p, now, "relax_home", self._lunch_break(m, leave) - m)
                 return
             if early and home is not None and leave - m > 60 and not night:
-                self._go_home(sim, p, now, "relax_home", day * DAY + leave)
+                self._go_home(sim, p, now, "relax_home", day * DAY + self._lunch_break(m, leave))
                 return
             if not early or not night:
                 p.worked_day = day
@@ -572,9 +579,16 @@ class Folk:
                 break
         self._go_home(sim, p, now, "sick_home", day * DAY + until if until > m else self._wake_tick(p, now))
 
-    def _sick_meal(self, p, now: int) -> None:
-        """A meal at home off sick, as breakfast is (eat_home, a grocery if there is one); with the fridge empty the
-        household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its payer can afford them."""
+    @staticmethod
+    def _lunch_break(m: int, leave: int) -> int:
+        """The minute a morning at home before the shift ends: LUNCH when lunch fits before they set off, else
+        when they set off."""
+        return LUNCH if m < LUNCH and LUNCH + MEAL_MINUTES <= leave else leave
+
+    def _home_meal(self, p, now: int) -> None:
+        """A meal at home (off sick, or lunch before a late shift), as breakfast is (eat_home, a grocery if there is
+        one); with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its
+        payer can afford them."""
         hh = self.hh_of(p)
         if hh is not None:
             if hh.groceries <= 0:
@@ -585,7 +599,7 @@ class Folk:
                     hh.groceries += GROCERY_MEALS
             if hh.groceries > 0:
                 hh.groceries -= 1
-        self._begin(p, now, "eat_home", 30)
+        self._begin(p, now, "eat_home", MEAL_MINUTES)
 
     def _dinner(self, p, now: int, day: int) -> bool:
         """The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one

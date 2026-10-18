@@ -581,8 +581,9 @@ class CompanionTest(unittest.TestCase):
 class GroceriesAndHealthTest(unittest.TestCase):
     """Nobody with money starves: a household with no grocer in reach (no market or grocer's within FAV_WALK on
     foot, or FAV_CAR by car) orders its groceries in for DELIVERY_FEE more. Health heals as a named's does (every
-    need above WELL_ABOVE) up to life.max_health, hunger at 0 costs HUNGER_HEALTH a minute, both in closed form; and
-    a townsperson whose health runs out while fed collapses rather than starves."""
+    need above WELL_ABOVE) up to life.max_health, hunger at 0 costs HUNGER_HEALTH a minute, both in closed form; off
+    sick they rest and eat at home, and a late shift lunches at home; a townsperson whose health runs out while fed
+    collapses rather than starves."""
 
     def test_no_grocer_in_reach_orders_in(self):
         sim = make_world(SEEDS[0], N)
@@ -667,6 +668,29 @@ class GroceriesAndHealthTest(unittest.TestCase):
         self.assertGreater(acts["sick_home"], 0)
         self.assertEqual([meals[d] >= 3 for d in range(3)], [True] * 3, meals)  # breakfast, lunch, dinner
         self.assertGreater(low, 0.0)
+
+    def test_a_late_shift_lunches_at_home(self):
+        """Breakfast (cut short by a school run) and the shift's own lunch break starved a 15:00-23:00 nurse with
+        money by day 10 of the 60-day soak: a late shift's morning at home breaks for lunch at LUNCH."""
+        sim = make_world(SEEDS[0], N)
+        f = sim.folk
+        late = [p for p in f.living() if p.job is not None and p.job.hourly_wage > 0 and len(p.job.workdays) == 7
+                and f._set_off(p) >= folk.LUNCH + folk.MEAL_MINUTES and f.home_place(p) is not None]
+        self.assertTrue(late)
+        p = late[0]
+        home = f.home_place(p)
+        lunches, low, last = Counter(), 100.0, None
+        for _ in range(3 * DAY):
+            sim.step()
+            if p.activity != last:
+                last = p.activity
+                day, m = divmod(sim.clock.tick, DAY)
+                if last == "eat_home" and folk.LUNCH <= m < folk.LUNCH + 60:
+                    lunches[day] += 1
+                    self.assertEqual(p.inside, home)
+            low = min(low, p.needs["hunger"])
+        self.assertEqual([lunches[d] for d in range(3)], [1, 1, 1], p.id)
+        self.assertGreater(low, 20.0, p.id)
 
     def test_collapse_is_not_starving(self):
         if not integrated():

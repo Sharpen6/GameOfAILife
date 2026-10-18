@@ -23,7 +23,11 @@
   const DINNER_FROM = 17 * 60 + 30, DINNER_UNTIL = 19 * 60 + 30, DINNER_MINUTES = 45; // the family dinner, once a day
   // Off sick (life.can_work false), a townsperson rests at home (sick_home) until the next of these meals or bedtime,
   // eats at home (eat_home, a grocery) and rests again; breakfast is on waking, as every day.
-  const SICK_MEALS = [12 * 60 + 30, 18 * 60 + 30];
+  const LUNCH = 12 * 60 + 30;
+  const SICK_MEALS = [LUNCH, 18 * 60 + 30];
+  // A late shift's morning at home (they set off after LUNCH + MEAL_MINUTES) breaks for lunch at LUNCH, a meal at
+  // home as off sick: breakfast, the shift's own lunch break and nothing more would starve them by inches.
+  const MEAL_MINUTES = 30;
   const STROLL_EVERY = 5; // minutes between a park stroller's hops
   const STROLL_MINUTES = 10; // one way of a stroll round the block when no park is in reach
   const FAV_WALK = 25, FAV_CAR = 15, FAV_KEEP = 3; // favourites: the nearest FAV_KEEP within these minutes
@@ -521,7 +525,7 @@
       const bed = this._bed_minute(p);
       const night = m >= bed || m < this._wake_minute(p, day);
       if (act === "sick_home" && p.state === "busy" && !night) {
-        this._sick_meal(p, now); // a rest off sick ends at a meal at home
+        this._home_meal(p, now); // a rest off sick ends at a meal at home
         return;
       }
       if (job !== null && job.workdays.includes(day % 7) && p.worked_day !== day && m < this._end_minute(p) - 60) {
@@ -529,11 +533,15 @@
         const leave = this._set_off(p);
         const early = m < leave;
         if (early && (p.inside === home || home === null) && !night) {
-          this._begin(p, now, "relax_home", leave - m);
+          if (act === "relax_home" && LUNCH <= m && m < LUNCH + 60 && m + MEAL_MINUTES <= leave) {
+            this._home_meal(p, now); // lunch before a late shift
+          } else {
+            this._begin(p, now, "relax_home", Folk._lunch_break(m, leave) - m);
+          }
           return;
         }
         if (early && home !== null && leave - m > 60 && !night) {
-          this._go_home(sim, p, now, "relax_home", day * DAY + leave);
+          this._go_home(sim, p, now, "relax_home", day * DAY + Folk._lunch_break(m, leave));
           return;
         }
         if (!early || !night) {
@@ -574,9 +582,16 @@
       this._go_home(sim, p, now, "sick_home", until > m ? day * DAY + until : this._wake_tick(p, now));
     }
 
-    // A meal at home off sick, as breakfast is (eat_home, a grocery if there is one); with the fridge empty the
-    // household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its payer can afford them.
-    _sick_meal(p, now) {
+    // The minute a morning at home before the shift ends: LUNCH when lunch fits before they set off, else when they
+    // set off.
+    static _lunch_break(m, leave) {
+      return m < LUNCH && LUNCH + MEAL_MINUTES <= leave ? LUNCH : leave;
+    }
+
+    // A meal at home (off sick, or lunch before a late shift), as breakfast is (eat_home, a grocery if there is one);
+    // with the fridge empty the household orders groceries in first (GROCERY_COST + DELIVERY_FEE) when its payer can
+    // afford them.
+    _home_meal(p, now) {
       const hh = this.hh_of(p);
       if (hh !== null) {
         if (hh.groceries <= 0) {
@@ -589,7 +604,7 @@
         }
         if (hh.groceries > 0) hh.groceries -= 1;
       }
-      this._begin(p, now, "eat_home", 30);
+      this._begin(p, now, "eat_home", MEAL_MINUTES);
     }
 
     // The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one grocery
