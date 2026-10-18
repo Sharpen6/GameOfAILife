@@ -110,6 +110,43 @@
       carsOf(id, now) { const t = trains.get(id); return t ? cars(t, now == null ? viewNow() : now) : null; },
       sOf(id, now) { const t = trains.get(id); return t ? sOf(t, now == null ? viewNow() : now) : null; },
       rows: () => [...trains.values()].map(t => t.row),
+      // The Transit layer, drawn by view.js over the scene: each line's tracks in its colour, the bus loops
+      // dashed (town.timetable.bus.lines[*].corners, when the town has them), and a ring at each station
+      // (stations: [{x, y, line}] in tiles). Returns the number of shapes drawn.
+      drawTransit(g, stations) {
+        const v = scene.view(), k = scene.dpr || 1, proj = scene.proj;
+        const P = (x, y) => { const w = proj.toWorld(x, y); return [w[0] * v.S + v.ox, w[1] * v.S + v.oy]; };
+        const path = pts => { g.beginPath(); pts.forEach((p, n) => { const q = P(p[0], p[1]); if (n) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); };
+        let n = 0;
+        g.save();
+        g.setTransform(1, 0, 0, 1, 0, 0);
+        g.lineJoin = "round"; g.lineCap = "round";
+        const tt = town.timetable && town.timetable.bus && town.timetable.bus.lines;
+        for (const b of Array.isArray(tt) ? tt : []) {
+          if (!b || !Array.isArray(b.corners) || b.corners.length < 2) continue;
+          path(b.corners.map(c => [c[0] + 0.5, c[1] + 0.5]));
+          g.setLineDash([6 * k, 5 * k]); g.strokeStyle = "rgba(255, 207, 58, 0.9)"; g.lineWidth = 2.5 * k; g.stroke();
+          n++;
+        }
+        g.setLineDash([]);
+        for (const L of lines.values()) {
+          for (const pl of Object.values(L.tracks)) {
+            path(pl.pts);
+            g.strokeStyle = "rgba(16, 16, 20, 0.55)"; g.lineWidth = 6 * k; g.stroke();
+            g.strokeStyle = L.color; g.lineWidth = 3.5 * k; g.stroke();
+            n++;
+          }
+        }
+        for (const s of stations || []) {
+          const L = lines.get(s.line), q = P(s.x, s.y);
+          g.beginPath(); g.arc(q[0], q[1], 7 * k, 0, 2 * Math.PI);
+          g.fillStyle = "#ffffff"; g.fill();
+          g.strokeStyle = L ? L.color : "#8a8a96"; g.lineWidth = 3 * k; g.stroke();
+          n++;
+        }
+        g.restore();
+        return n;
+      },
       stats: () => ({ trains: trains.size, trainCars: drawnCars }),
       version: () => version,
       items(v, out) {

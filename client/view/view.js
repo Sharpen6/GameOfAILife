@@ -20,6 +20,12 @@
 //   focus({district | station | line}) a district's centre (its largest rect's), a station, a whole line
 //   districts(), stations(), lod()     [{id, name, center}], [{id, name, line, x, y}], "near" | "mid" | "far"
 //   setLayers({transit, labels, pings, runs})  kept in localStorage["goal.view"]; layers() reads them
+//   track(id, {x, y, inside} | null)   where someone the map does not show is: follow and focus go there; while
+//                                      they are selected and inside, their building is outlined
+//   goTo(on), millbrook()              the Go to list (Millbrook, districts with the people there now, stations);
+//                                      Millbrook at zoom 0.5. Keys on a region town: M Millbrook, G Go to, T Transit;
+//                                      the View menu adds Transit and Go to there. The Transit layer draws the
+//                                      tracks in line colour, dashed bus loops and station rings over the map.
 //   debug()                            {lod, level, chunks, cacheMP, spriteMP, items, runs, splitRuns,
 //                                      statics_builds, crowd, crowdDrawn, trainCars, pings, drawMs, buildMs, queue,
 //                                      minimapMs}; minimap() the minimap (districtAt, toMini, stats)
@@ -49,6 +55,8 @@
     let lastLots = null, lastHomes = null, seedHousing = false; // the last lots and homes any frame carried
     let lastClick = null, highlightRaw = null, overlayRaw = null, gaps = [], dprCap = 2, slowChecked = 0;
     let camLate = false, saveLate = false; // a camera report or a save held back by its rate limit, sent later
+    let transitStations = null;             // the Transit layer's station rings (the town's, once)
+    const tracked = new Map();              // id -> {x, y, inside}: where the host says someone is (track())
     const dynamic = opt.dynamicResolution !== false;
 
     // --- the .cv-* controls -----------------------------------------------------------------------------
@@ -63,8 +71,15 @@
     const mIso = el("button", "cv-menu-item", "Isometric"), mFlat = el("button", "cv-menu-item", "Top-down"), mMini = el("button", "cv-menu-item", "Minimap");
     const mHomes = el("button", "cv-menu-item", "Homes");
     mHomes.title = "Colour the homes on the minimap by condition (on by itself when zoomed out)";
-    for (const b of [mIso, mFlat, mMini, mHomes]) { b.type = "button"; menu.appendChild(b); }
+    // region towns only (a railway): the Transit layer (T) and Go to (G), after v2's four items
+    const mTransit = el("button", "cv-menu-item", "Transit"), mGoto = el("button", "cv-menu-item", "Go to…");
+    mTransit.title = "Rail lines, bus loops and stations over the map (T)"; mGoto.title = "Fly to Millbrook, a district or a station (G)";
+    for (const b of [mIso, mFlat, mMini, mHomes, mTransit, mGoto]) { b.type = "button"; menu.appendChild(b); }
     ctl.appendChild(menu);
+    const goto = el("div", "cv-menu cv-goto");
+    goto.setAttribute("role", "menu"); goto.setAttribute("aria-label", "Go to");
+    goto.style.maxHeight = "min(60vh, 420px)"; goto.style.overflowY = "auto";
+    ctl.appendChild(goto);
     const chip = el("div", "cv-follow");
     const chipName = el("button", "cv-follow-name"), chipX = el("button", "cv-follow-x", "✕");
     chipName.type = chipX.type = "button"; chipX.title = "Stop following"; chipX.setAttribute("aria-label", "Stop following");
@@ -74,7 +89,61 @@
     bOut.addEventListener("click", () => cam && cam.zoomOut());
     bFit.addEventListener("click", () => cam && cam.fit());
     bView.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.toggle("cv-open"); syncMenu(); placeMenu(); });
-    document.addEventListener("click", ev => { if (!ctl.contains(ev.target)) menu.classList.remove("cv-open"); });
+    document.addEventListener("click", ev => { if (!ctl.contains(ev.target)) { menu.classList.remove("cv-open"); goto.classList.remove("cv-open"); } });
+    mTransit.addEventListener("click", () => { view.setLayers({ transit: !layers.transit }); syncMenu(); });
+    mGoto.addEventListener("click", ev => { ev.stopPropagation(); menu.classList.remove("cv-open"); openGoto(true); });
+    goto.addEventListener("click", ev => {
+      const b = ev.target.closest("[data-go]");
+      if (!b) return;
+      ev.stopPropagation();
+      const [kind, id] = b.dataset.go.split(":");
+      if (kind === "millbrook") goMillbrook();
+      else view.focus(kind === "district" ? { district: id } : { station: id });
+      goto.classList.remove("cv-open");
+    });
+    const isRegion = () => !!(town && town.rail && Array.isArray(town.rail.lines) && town.rail.lines.length);
+    function goMillbrook() {
+      if (!cam || !town) return;
+      const r = Array.isArray(town.millbrook) ? town.millbrook : [0, 0, Math.min(80, town.w || 80), Math.min(50, town.h || 50)];
+      const w = scene.proj.toWorld(r[0] + r[2] / 2, r[1] + r[3] / 2);
+      if (cam.follow) { cam.follow = null; syncChip(); }
+      cam.flyTo(w[0], w[1], 0.5, 700);
+    }
+    // people in a district now: those the crowd shows in its rects, and occ of its places
+    function peopleIn(d) {
+      const rects = (town.districts.find(q => q.id === d.id) || {}).rects || [];
+      const inR = (x, y) => rects.some(r => x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]);
+      let n = 0;
+      if (crowd && crowd.each) crowd.each((x, y) => { if (inR(x, y)) n++; });
+      const occ = scene && Array.isArray(scene.occ) ? scene.occ : null;
+      if (occ) (town.places || []).forEach((p, k) => { if (p.district === d.id || (!p.district && inR(p.x, p.y))) n += occ[k] | 0; });
+      return n;
+    }
+    function openGoto(on) {
+      if (!on || !isRegion()) { goto.classList.remove("cv-open"); return; }
+      const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+      const item = (go, text, sub) => `<button type="button" class="cv-menu-item" role="menuitem" data-go="${esc(go)}">${esc(text)}${sub ? ` <span style="opacity:0.6;font-weight:400">${esc(sub)}</span>` : ""}</button>`;
+      const head = text => `<div style="padding:6px 10px 2px;font-size:11px;opacity:0.6;text-transform:uppercase;letter-spacing:0.05em">${esc(text)}</div>`;
+      const seen = new Set();
+      goto.innerHTML = item("millbrook:", "Millbrook", "M") + head("Districts")
+        + districtList().map(d => item(`district:${d.id}`, d.name, `${peopleIn(d)} now`)).join("") + head("Stations")
+        + stationList().filter(s => !seen.has(s.id) && seen.add(s.id)).map(s => item(`station:${s.id}`, s.name, s.line)).join("");
+      goto.classList.add("cv-open");
+      goto.classList.remove("cv-side");
+      const f = freeArea();
+      if (goto.getBoundingClientRect().bottom > f.y1 + (canvas.getBoundingClientRect().top || 0) - 4) goto.classList.add("cv-side");
+    }
+    // M Millbrook, G Go to, T Transit (region towns; keys typed into a field or already handled are left alone)
+    const typing = () => { const a = document.activeElement; return a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable); };
+    const onKey = ev => {
+      if (ev.defaultPrevented || typing() || ev.metaKey || ev.ctrlKey || ev.altKey || !isRegion()) return;
+      const k = ev.key.toLowerCase();
+      if (k === "m") { goMillbrook(); ev.preventDefault(); }
+      else if (k === "g") { openGoto(!goto.classList.contains("cv-open")); ev.preventDefault(); }
+      else if (k === "t") { view.setLayers({ transit: !layers.transit }); syncMenu(); ev.preventDefault(); }
+      else if (k === "escape") goto.classList.remove("cv-open");
+    };
+    window.addEventListener("keydown", onKey);
     mIso.addEventListener("click", () => { view.setMode({ projection: "iso" }); menu.classList.remove("cv-open"); });
     mFlat.addEventListener("click", () => { view.setMode({ projection: "flat" }); menu.classList.remove("cv-open"); });
     mMini.addEventListener("click", () => { if (mini) mini.setOpen(!mini.isOpen()); syncMenu(); });
@@ -91,6 +160,9 @@
       mIso.classList.toggle("cv-on", proj === "iso"); mFlat.classList.toggle("cv-on", proj === "flat");
       mMini.classList.toggle("cv-on", !!(mini && mini.isOpen()));
       mHomes.disabled = !mini; mHomes.classList.toggle("cv-on", !!(mini && mini.homesOn()));
+      const reg = isRegion();
+      mTransit.hidden = mGoto.hidden = !reg;
+      mTransit.classList.toggle("cv-on", !!layers.transit);
     }
     function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : isFolk(id) ? "townsperson" : id; }
     function syncChip() {
@@ -234,7 +306,8 @@
       if (!scene || !t) return null;
       const proj = scene.proj;
       if (t.agent != null && isFolk(t.agent) && !movers.agent(t.agent)) {
-        const q = crowd ? crowd.pos(t.agent) : null;
+        const q = crowd ? crowd.pos(t.agent) : null, tr = tracked.get(t.agent);
+        if (!q && tr) return { w: proj.toWorld(tr.x + 0.5, tr.y + 0.5), zoom: 2, tile: [tr.x + 0.5, tr.y + 0.5] };
         return q ? { w: proj.toWorld(q[0], q[1]), zoom: 2, tile: q } : null;
       }
       if (t.agent != null) {
@@ -282,9 +355,10 @@
     }
     function followPos() {
       if (!cam || !cam.follow) return null;
-      if (crowd && isFolk(cam.follow)) { const t = crowd.pos(cam.follow); return t ? scene.proj.toWorld(t[0], t[1]) : null; }
+      const tr = tracked.get(cam.follow), trW = tr ? scene.proj.toWorld(tr.x + 0.5, tr.y + 0.5) : null;
+      if (crowd && isFolk(cam.follow) && !movers.agent(cam.follow)) { const t = crowd.pos(cam.follow); return t ? scene.proj.toWorld(t[0], t[1]) : trW; }
       const r = movers.byId(cam.follow);
-      return r && r.foot ? r.foot : null;
+      return r && r.foot ? r.foot : trW;
     }
     function emitCamera(force) {
       if (!hooks.onCamera) return;
@@ -341,8 +415,16 @@
     // Highlights and overlays may name home ids; the scene draws by place id.
     function applyHighlight() {
       if (!scene) return;
-      const h = highlightRaw;
-      scene.highlight = h ? { agents: (h.agents || []).slice(), places: [...new Set((h.places || []).map(placeIdOf).filter(Boolean))] } : null;
+      const h = highlightRaw, inside = trackedPlace();
+      scene.highlight = h || inside ? { agents: ((h && h.agents) || []).slice(), places: [...new Set(((h && h.places) || []).map(placeIdOf).concat(inside ? [inside] : []).filter(Boolean))] } : null;
+    }
+    // the place the selected (followed) person is inside, when the host tracks them there
+    function trackedPlace() {
+      const tr = selected != null ? tracked.get(selected) : null;
+      if (!tr || !tr.inside || !town) return null;
+      if (crowd && isFolk(selected) && crowd.pos(selected)) return null;
+      const p = (town.places || []).find(q => tr.x >= q.x && tr.x < q.x + q.w && tr.y >= q.y && tr.y < q.y + q.h);
+      return p ? p.id : null;
     }
     function applyOverlay() {
       if (!scene) return;
@@ -399,6 +481,7 @@
       if (mini) mini.destroy();
       mini = null;
       town = CV.normalizeTown(t);
+      transitStations = null;
       scene = CV.makeScene(canvas, town, { projection: prefs.projection === "flat" ? "flat" : "iso", rot: prefs.rot | 0 });
       scene.dpr = canvas.width / (canvas.clientWidth || canvas.width);
       scene.chunkBudget = chunkBudget();
@@ -456,6 +539,10 @@
       scene.selected = selected;
       if (now - reservedAt > 250) refreshReserved();
       scene.draw(now);
+      if (trains && layers.transit && trains.drawTransit) {
+        if (!transitStations) transitStations = stationList();
+        trains.drawTransit(canvas.getContext("2d"), transitStations);
+      }
       if (pings && layers.pings !== false) {
         const t1 = performance.now();
         pings.draw(canvas.getContext("2d"), now);
@@ -525,6 +612,7 @@
         selected = id == null ? null : id;
         if (scene) scene.selected = selected;
         if (cam) cam.follow = selected && (!o || o.follow !== false) ? selected : null;
+        applyHighlight();
         syncChip(); emitCamera(true);
       },
       focus(target, o) {
@@ -619,6 +707,16 @@
         if (opt.persist !== false) savePrefs(Object.assign(loadPrefs(), { layers: prefs.layers }));
       },
       layers() { return Object.assign({}, layers); },
+      // where someone the map does not show is (a townsperson indoors): follow and focus go there, and while they
+      // are selected and inside, their building is outlined. null forgets them.
+      track(id, p) {
+        if (id == null) return;
+        if (p && p.x != null && p.y != null) tracked.set(String(id), { x: +p.x, y: +p.y, inside: !!p.inside });
+        else tracked.delete(String(id));
+        applyHighlight();
+      },
+      goTo(on) { openGoto(on !== false); return goto.classList.contains("cv-open"); },
+      millbrook() { goMillbrook(); },
       debug() {
         const d = scene && typeof scene.debug === "function" ? scene.debug() : {};
         const s = (scene && scene.stats) || {};
@@ -641,7 +739,7 @@
       },
       worldOfTile(x, y, z) { return scene ? scene.proj.toWorld(x, y, z) : null; },
       cssOfTile(x, y, z) { if (!scene) return null; const w = scene.proj.toWorld(x, y, z); return scene.worldToCss(w[0], w[1]); },
-      destroy() { view.stop(); if (ro) ro.disconnect(); if (cam) cam.destroy(); if (mini) mini.destroy(); ctl.remove(); chip.remove(); },
+      destroy() { view.stop(); window.removeEventListener("keydown", onKey); if (ro) ro.disconnect(); if (cam) cam.destroy(); if (mini) mini.destroy(); ctl.remove(); chip.remove(); },
     };
     return view;
   };

@@ -22,6 +22,8 @@
 //     minimap: 240 x 120 on the region, the by-kind base in <= 10 ms (gated only at load <= 8), trains as dots in
 //     their line colour, folk as 1 px dots, hover names the district, a click recentres, a double-click flies
 //     there at zoom 0.5
+//     Go to (G) lists Millbrook, every district and station and flies there; M shows Millbrook at 0.5; T draws
+//     the Transit layer; track() follows a townsperson indoors and outlines the building
 // 13. no Math.random in client/view/*.js
 // Timings (frame gaps) are reported with the load, never gated here (PLAN 6). Set VIEW_SHOTS=<folder> to save
 // screenshots (default view at 08:00, a station with a train, far view).
@@ -459,6 +461,71 @@ async function runNavigation(browser) {
   await ctx.close();
 }
 
+// --- 12c. Go to, M, Transit, track ------------------------------------------------------------------------------
+async function runGoto(browser) {
+  console.log("go to, transit, track");
+  const { ctx, page, log } = await open(browser, "zoom=0.25&x=85&y=48&minute=480");
+  // Go to (G): Millbrook, every district, every station; a click flies there
+  await page.keyboard.press("g");
+  await page.waitForTimeout(150);
+  const list = await page.evaluate(() => {
+    const box = document.querySelector(".cv-goto"), items = [...box.querySelectorAll("[data-go]")].map(b => b.dataset.go);
+    const ds = __view.districts().map(d => "district:" + d.id), ss = [...new Set(__view.stations().map(s => "station:" + s.id))];
+    const r = box.getBoundingClientRect();
+    return { open: box.classList.contains("cv-open"), millbrook: items.includes("millbrook:"), districts: ds.every(d => items.includes(d)),
+      stations: ss.every(s => items.includes(s)), n: items.length, want: 1 + ds.length + ss.length, inside: r.top >= 0 && r.bottom <= innerHeight + 1 };
+  });
+  check(list.open && list.millbrook && list.districts && list.stations && list.n === list.want, "go to: G lists Millbrook, every district and every station", list);
+  check(list.inside, "go to: the list is inside the window", list);
+  const pick = await page.evaluate(() => { const s = __view.stations().find(q => q.id === "central_station") || __view.stations()[0]; return s; });
+  await page.click(`.cv-goto [data-go="station:${pick.id}"]`);
+  await page.waitForTimeout(1100);
+  const c1 = await page.evaluate(() => __view.camera());
+  check(Math.hypot(c1.x - pick.x, c1.y - pick.y) <= 1 && !(await page.evaluate(() => document.querySelector(".cv-goto").classList.contains("cv-open"))),
+    "go to: a station item flies there and closes the list", { cam: c1, want: [pick.x, pick.y] });
+  // M: Millbrook at zoom 0.5
+  await page.keyboard.press("m");
+  await page.waitForTimeout(1100);
+  const c2 = await page.evaluate(() => __view.camera());
+  check(Math.hypot(c2.x - 40, c2.y - 25) <= 1 && Math.abs(c2.zoom - 0.5) < 0.02, "keys: M shows Millbrook at zoom 0.5", c2);
+  // T: the Transit layer draws over the map, and the View menu shows it on
+  const tr = await page.evaluate(async () => {
+    const d = () => { const c = document.getElementById("c"), x = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let h = 0; for (let i = 0; i < x.length; i += 997) h = (h * 31 + x[i]) >>> 0; return h; };
+    __drive(false);
+    await new Promise(r => setTimeout(r, 300));
+    __view.setCamera({ x: 112, y: 50, zoom: 0.25 });
+    await new Promise(r => setTimeout(r, 1500));
+    const a = d();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+    await new Promise(r => setTimeout(r, 300));
+    const b = d(), on = __view.layers().transit;
+    const shapes = __view.trains().drawTransit(document.getElementById("c").getContext("2d"), __view.stations());
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+    return { changed: a !== b, on, off: __view.layers().transit, shapes };
+  });
+  check(tr.on && !tr.off && tr.changed && tr.shapes >= 10, "keys: T switches the Transit layer (tracks and station rings over the map)", tr);
+  // track(): a townsperson the map does not show is followed to where the host says, and outlined inside
+  const tk = await page.evaluate(async () => {
+    const st = __frameAt(__tick() + 1);
+    const c = st.crowd, out = [];
+    for (let k = 0; k + 3 < c.length; k += 4) if (c[k] !== 417) out.push(c[k], c[k + 1], c[k + 2], c[k + 3]);
+    st.crowd = out;
+    __push(st);
+    const p = __view.scene().town.places.find(q => q.kind === "cafe");
+    __view.track("f417", { x: p.x + 1, y: p.y + 1, inside: true });
+    __view.select("f417", { follow: true });
+    await new Promise(r => setTimeout(r, 1200));
+    const cam = __view.camera(), hl = __view.scene().highlight;
+    const res = { cam, want: [p.x + 1.5, p.y + 1.5], outlined: !!(hl && hl.places.includes(p.id)) };
+    __view.track("f417", null); __view.select(null);
+    res.cleared = !(__view.scene().highlight && __view.scene().highlight.places.includes(p.id));
+    return res;
+  });
+  check(Math.hypot(tk.cam.x - tk.want[0], tk.cam.y - tk.want[1]) <= 1 && tk.outlined && tk.cleared, "track(): follow goes indoors to the tracked place and outlines it", tk);
+  noErrors(log, "go to");
+  await ctx.close();
+}
+
 // --- 12b. minimap ----------------------------------------------------------------------------------------------
 async function runMinimap(browser) {
   console.log("minimap");
@@ -551,7 +618,7 @@ async function main() {
   console.log(`load ${L.toFixed(2)}`);
   try {
     const only = (process.env.ONLY || "").split(",").filter(Boolean);
-    for (const [name, fn] of [["crowd", runCrowd], ["trains", runTrains], ["bridges", runBridges], ["pings", runPings], ["navigation", runNavigation], ["minimap", runMinimap]]) {
+    for (const [name, fn] of [["crowd", runCrowd], ["trains", runTrains], ["bridges", runBridges], ["pings", runPings], ["navigation", runNavigation], ["minimap", runMinimap], ["goto", runGoto]]) {
       if (only.length && !only.includes(name)) continue;
       try { await fn(browser); } catch (e) { check(false, `${name}: ran to the end`, String((e && e.stack) || e).split("\n").slice(0, 3).join(" | ")); }
     }
