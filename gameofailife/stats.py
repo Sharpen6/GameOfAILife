@@ -209,12 +209,30 @@ PART_COUNTS = ("population", "start_population", "adults", "children", "working"
                "out_of_work")
 
 
+# F2a's `Folk.city_parts` keys that name the same thing as `_add_parts`'s (its mood and health are sums).
+PART_ALIASES = {"employed": "working", "pupils": "students", "mood": "mood_sum", "health": "health_sum",
+                "money": "money_sum"}
+DISTRICT_ALIASES = {"population": "people", "mood": "mood_sum", "money": "money_sum"}
+
+
+def canon_parts(parts: dict | None) -> dict | None:
+    """`Folk.city_parts(sim)` with F2a's key names mapped onto `_add_parts`'s and `_districts`'s."""
+    if not parts:
+        return parts
+    out = {PART_ALIASES.get(k, k): v for k, v in parts.items() if k != "districts"}
+    out["districts"] = {did: {DISTRICT_ALIASES.get(k, k): v for k, v in row.items()}
+                        for did, row in (parts.get("districts") or {}).items()}
+    return out
+
+
 def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
     """Add the townsfolk to a city block (`Folk.city_parts(sim)`, F2a). Every key is optional:
     PART_COUNTS ints (added); `mood_sum`, `health_sum` (floats) and `needs_sum` ({need: float}) over the folk
     counted in `population` (the means then cover everyone); `adult_worths` (the folk adults' worths, ints: wealth
     total, median, top-10 share and gini cover everyone); `in_debt` (int); `luck` ({touched, raised, lowered}, ints,
-    and `sum`). Named-only stays named-only: `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
+    and `sum`); `money_sum` (cash and savings, added to the wealth total when there are no worths). F2a's own
+    names (`employed`, `pupils`, `mood`, `health`, `money`) arrive through `canon_parts`. Named-only stays
+    named-only: `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
     named_n = block["population"]
     for k in PART_COUNTS:
         block[k] += int(parts.get(k, 0))
@@ -236,6 +254,8 @@ def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
         w["total"] += sum(worths)
         w["median"], w["top10_share"], w["gini"] = _int(median(adults)), top_share(adults), gini(adults)
         w["in_debt"] += int(parts.get("in_debt", 0))
+    elif parts.get("money_sum"):  # no worths: the townsfolk's cash and savings still count in the total
+        block["wealth"]["total"] += int(parts["money_sum"])
 
 
 def _counter_json(block: dict) -> dict:
@@ -312,7 +332,7 @@ def stats_json(sim: Simulation, full: bool = False) -> dict:
     the samples recorded since the previous push, and each sample goes in one push only.
     """
     people = _people(sim)
-    parts = sim.folk.city_parts(sim) if sim.folk.n else None
+    parts = canon_parts(sim.folk.city_parts(sim)) if sim.folk.n else None
     samples = list(sim.stats.samples) if full else sim.stats.take_new_samples()
     out = {"type": "stats", "full": bool(full), "tick": sim.clock.tick, "time": sim.clock.stamp(),
            "day": sim.clock.day, "city": _city_block(sim, people, parts), "llm": _llm_block(sim),
@@ -437,7 +457,7 @@ class CityStats:
         if not getattr(sim, "agents", None):
             return None
         people = _people(sim)
-        city = _city_block(sim, people, sim.folk.city_parts(sim) if sim.folk.n else None)
+        city = _city_block(sim, people, canon_parts(sim.folk.city_parts(sim)) if sim.folk.n else None)
         homes = city["homes"]
         self.samples.append({
             "tick": sim.clock.tick, "day": sim.clock.day, "pop": city["population"], "mood": city["mood"],

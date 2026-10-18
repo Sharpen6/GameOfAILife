@@ -183,6 +183,25 @@
   const PART_COUNTS = ["population", "start_population", "adults", "children", "working", "students", "retired",
     "out_of_work"];
 
+  // F2a's Folk.city_parts keys that name the same thing as _add_parts's (its mood and health are sums).
+  const PART_ALIASES = { employed: "working", pupils: "students", mood: "mood_sum", health: "health_sum",
+    money: "money_sum" };
+  const DISTRICT_ALIASES = { population: "people", mood: "mood_sum", money: "money_sum" };
+
+  // Folk.city_parts(sim) with F2a's key names mapped onto _add_parts's and _districts's.
+  function canon_parts(parts) {
+    if (!parts) return parts;
+    const rename = (row, names) => {
+      const o = {};
+      for (const [k, v] of Object.entries(row)) o[hasOwn(names, k) ? names[k] : k] = v;
+      return o;
+    };
+    const out = rename(Object.fromEntries(Object.entries(parts).filter(([k]) => k !== "districts")), PART_ALIASES);
+    out.districts = {};
+    for (const [did, row] of Object.entries(parts.districts ?? {})) out.districts[did] = rename(row, DISTRICT_ALIASES);
+    return out;
+  }
+
   // Add the townsfolk to a city block (Folk.city_parts(sim), F2a); every key is optional (see the Python twin).
   function _add_parts(block, people, parts) {
     const named_n = block.population;
@@ -209,6 +228,8 @@
       w.top10_share = top_share(adults);
       w.gini = gini(adults);
       w.in_debt += pyInt(parts.in_debt ?? 0);
+    } else if (parts.money_sum) { // no worths: the townsfolk's cash and savings still count in the total
+      block.wealth.total += pyInt(parts.money_sum);
     }
   }
 
@@ -287,7 +308,7 @@
   // the samples recorded since the previous push, and each sample goes in one push only.
   function stats_json(sim, full = false) {
     const people = _people(sim);
-    const parts = sim.folk.n ? sim.folk.city_parts(sim) : null;
+    const parts = sim.folk.n ? canon_parts(sim.folk.city_parts(sim)) : null;
     const samples = full ? sim.stats.samples.slice() : sim.stats.take_new_samples();
     const out = { type: "stats", full: Boolean(full), tick: sim.clock.tick, time: sim.clock.stamp(),
       day: sim.clock.day, city: _city_block(sim, people, parts), llm: _llm_block(sim),
@@ -401,7 +422,7 @@
     sample(sim) {
       if (!sim.agents || !sim.agents.size) return null;
       const people = _people(sim);
-      const city = _city_block(sim, people, sim.folk.n ? sim.folk.city_parts(sim) : null);
+      const city = _city_block(sim, people, sim.folk.n ? canon_parts(sim.folk.city_parts(sim)) : null);
       const homes = city.homes;
       this.samples.push({
         tick: sim.clock.tick, day: sim.clock.day, pop: city.population, mood: city.mood,
@@ -451,6 +472,7 @@
     RECENT_DEATHS, LOG_DECIDERS, DECISIONS_LIMIT, DECISIONS_MAX, _zeros, avg_seconds, _int, _mean, median, gini,
     top_share, _money, _Person, _people, _district_of_place, _homes_at, _wealth_block, _homes_block, _city_block,
     _counter_json, _llm_block, _districts, _households, _people_rows, stats_json, region_block, PART_COUNTS,
+    canon_parts,
     _add_parts, decisions, CityStats,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

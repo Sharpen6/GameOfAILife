@@ -36,6 +36,11 @@ FRAME_SECONDS = 0.05
 SPEEDS = (0, 1, 2, 4, 8, 16)
 GOD_ONLY = {"set_luck", "set_speed", "pause", "resume", "set_profile"}
 HOUSING_EVERY = 40  # frames carry `lots` and `homes` when they change, and in every 40th frame anyway
+REGION_HOUSING_CHECK = 20  # the region's `lots` and `homes` are compared every 20th frame ...
+REGION_HOUSING_EVERY = 200  # ... and sent anyway every 200th (PLAN 2.11)
+OCC_EVERY = 40  # a frame carries `occ` at most every 40th frame ...
+OCC_TICKS = 10  # ... once the last one sent is 10 ticks old (PLAN 2.11)
+CATCH_UP_FRAMES = 4  # a late loop pass runs at most this many frames' worth of ticks (folk.md 9)
 WELCOME_HISTORY, WELCOME_NEWS, WELCOME_HEADLINES, WELCOME_LLM_LOG = 80, 120, 20, 80
 STALL_SECONDS = 5.0  # how long a push may wait to be sent before its client is dropped
 AHEAD_SECONDS = 0.5  # how long a fork may wait behind texts that are already in the inbox
@@ -112,12 +117,20 @@ def url_host(host: str, bound: str) -> str:
     return bound
 
 
+def frame_span(elapsed: float) -> float:
+    """The real seconds a loop pass turns into ticks: the time since the last pass, exactly FRAME_SECONDS when it
+    was on time (to the float, so an on-time loop runs v2's tick sequence), at most CATCH_UP_FRAMES frames."""
+    if abs(elapsed - FRAME_SECONDS) < 1e-9:
+        return FRAME_SECONDS
+    return max(0.0, min(elapsed, CATCH_UP_FRAMES * FRAME_SECONDS))
+
+
 def merge_state(old: dict, new: dict) -> dict:
     """One state frame for two (PLAN 3.14): the newer frame, with the older one's events before its own, the
     older one's fork summaries upserted by id (the newer copy wins, in the older one's place), and the older one's
-    `lots` and `homes` when the newer frame lacks them. Neither frame is changed."""
+    `lots`, `homes` and `occ` when the newer frame lacks them. Neither frame is changed."""
     state = new["state"]
-    kept = {k: old["state"][k] for k in ("lots", "homes") if k in old["state"] and k not in state}
+    kept = {k: old["state"][k] for k in ("lots", "homes", "occ") if k in old["state"] and k not in state}
     if kept:
         state = {**state, **kept}
     forks = list(old["forks"])
@@ -243,6 +256,7 @@ class GameServer:
         self._loop_task: asyncio.Task | None = None
         self._pending_ticks = 0.0
         self._frames = 0  # state frames encoded so far
+        self._occ_tick: int | None = None  # the tick of the last `occ` a frame carried
         self._housing_sent: dict[str, str] = {}  # the encoded `lots` and `homes` the views last got
         self._stats_at = time.monotonic()  # when the last stats push went out
         self._stats_stepped = False  # a tick ran since then
@@ -271,9 +285,14 @@ class GameServer:
             await self._server.wait_closed()
 
     async def _run(self) -> None:
+        # folk.md 9: each pass sleeps what is left of its frame after the last pass's work, then runs the ticks
+        # the real time since the last pass is worth (frame_span), so a slow tick costs speed, not ticks.
+        last = time.monotonic()
         while True:
-            await asyncio.sleep(FRAME_SECONDS)
-            self._pending_ticks += FRAME_SECONDS * TICKS_PER_REAL_SECOND * self.speed
+            await asyncio.sleep(max(0.0, FRAME_SECONDS - (time.monotonic() - last)))
+            now = time.monotonic()
+            self._pending_ticks += frame_span(now - last) * TICKS_PER_REAL_SECOND * self.speed
+            last = now
             stepped = False
             while self._pending_ticks >= 1:
                 self._pending_ticks -= 1
@@ -295,6 +314,7 @@ class GameServer:
         if viewers and (stepped or events or forks):
             state = self.sim.state_json(housing=False)
             state.update(self._housing_changes())
+            self._add_occ(state)
             frame = encoded("state", {"type": "state", "speed": self.speed, "state": state, "events": events,
                                       "forks": forks})
             for ws in viewers:
@@ -319,9 +339,15 @@ class GameServer:
 
     def _housing_changes(self) -> dict:
         """The frame's `lots` and `homes`: each one when its encoded JSON differs from what was last sent, and
-        both in every HOUSING_EVERY-th frame. Views keep the last copy they got."""
+        both in every HOUSING_EVERY-th frame. In the region they are compared only every REGION_HOUSING_CHECK-th
+        frame and sent anyway every REGION_HOUSING_EVERY-th (PLAN 2.11). Views keep the last copy they got."""
         self._frames += 1
-        every = self._frames % HOUSING_EVERY == 0
+        if self.sim.world == "region":
+            if self._frames % REGION_HOUSING_CHECK:
+                return {}
+            every = self._frames % REGION_HOUSING_EVERY == 0
+        else:
+            every = self._frames % HOUSING_EVERY == 0
         out = {}
         for key, value in self.sim.housing_maps().items():
             text = json.dumps(value)
@@ -329,6 +355,13 @@ class GameServer:
                 self._housing_sent[key] = text
                 out[key] = value
         return out
+
+    def _add_occ(self, state: dict) -> None:
+        """`occ` in every OCC_EVERY-th frame once the last one sent is OCC_TICKS old (the welcome always has it)."""
+        tick = self.sim.clock.tick
+        if self._frames % OCC_EVERY == 0 and (self._occ_tick is None or tick - self._occ_tick >= OCC_TICKS):
+            state["occ"] = self.sim.folk.occ()
+            self._occ_tick = tick
 
     def _welcome_god(self) -> dict:
         """A new God view's (or watcher's) start: the town once, the full state, and the recent past."""
@@ -651,6 +684,8 @@ class GameServer:
             return {"type": "home", "home": home} if home else {"type": "error", "error": "unknown home"}
         if t == "get_stats":
             return self.sim.stats_json(full=True)
+        if t == "get_folk":
+            return {"type": "folk", "v": self.sim.folk.v, "rows": self.sim.folk.roster_rows(self.sim)}
         if t == "get_decisions":
             page = self.sim.decisions(msg.get("agent_id"), msg.get("before"), msg.get("limit"))
             return page if page is not None else {"type": "error", "error": "unknown character"}
