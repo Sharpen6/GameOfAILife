@@ -509,7 +509,7 @@ def populate(folk, sim, n: int) -> None:
             p._nt = now
             wake = day0 + rr.int(360, 450)
             job = p.job
-            if job is not None and job.hourly_wage > 0 and 0 in job.workdays and p.commute is not None:
+            if job is not None and job.hourly_wage > 0 and sim.clock.weekday in job.workdays and p.commute is not None:
                 leave = day0 + job.start_hour * 60 - p.commute[1] - 15
                 if leave < wake:
                     wake = leave

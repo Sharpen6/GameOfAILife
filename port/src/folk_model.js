@@ -69,7 +69,7 @@
       this.activity = "sleep";
       this.activity_place = null;
       this.state = "busy";
-      this.relationships = {}; // id -> agent Relationship over folk and named ids (people.set_rel)
+      this.relationships = new Map(); // id -> agent Relationship over folk and named ids (people.set_rel)
       this.life = null; // life LifeState, set by life.init
       this.memory = []; // last MEMORY_KEEP lines "stamp: text"
       this.traits = {}; // Profile.TRAITS keys
