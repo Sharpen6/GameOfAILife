@@ -5,7 +5,8 @@
 //
 // Opens the page from file:// in Chromium, waits for the city to run, opens a person (through Dash when the
 // client has the dashboard, else from the classic roster), and checks: no console errors or page errors, no
-// request leaves the page, the clock moves, the person's panel shows, and no a[href*="character.html"] exists.
+// request leaves the page, the clock moves, the person's panel shows, no a[href*="character.html"] exists, and the
+// page did not fall back to Millbrook (it reports the world and townsfolk it runs: `world`, `folk`).
 // Prints one JSON line. Without Playwright or a browser it can launch it prints {"skip": why} and exits 0.
 "use strict";
 
@@ -54,6 +55,12 @@ async function main() {
     await page.waitForFunction(() => /Day \d+/.test((document.getElementById("clock") || {}).textContent || ""),
       null, { timeout: 20000 });
     result.clock_start = await page.textContent("#clock");
+    // the world the page runs (page.js: region with 1,000 townsfolk unless ?world= says otherwise) and whether it had
+    // to fall back to Millbrook (the notice page.js shows when the region cannot start)
+    Object.assign(result, await page.evaluate(() => {
+      const p = window.GameOfAILifePage || {};
+      return { world: p.world, folk: p.folk, fallback: !!document.getElementById("world-notice") };
+    }));
     // The dashboard client is the one whose game.js started Dash (Dash.inspect() is null until Dash.init).
     const dash = await page.evaluate(() => (window.Dash && typeof Dash.inspect === "function" ? Dash.inspect() : null));
     result.client = dash ? "dashboard" : "classic";
@@ -74,7 +81,7 @@ async function main() {
     result.clock_end = await page.textContent("#clock");
     result.character_links = await page.evaluate(() => document.querySelectorAll('a[href*="character.html"]').length);
     result.ok = !errors.length && !external.length && result.character_links === 0 && result.clock_end !== result.clock_start
-      && (!dash || result.host.kind === "browser");
+      && (!dash || result.host.kind === "browser") && !result.fallback;
   } catch (err) {
     result.error = String(err.message || err).split("\n")[0];
   } finally {
