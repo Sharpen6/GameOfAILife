@@ -29,14 +29,16 @@ UPKEEP_COOLDOWN = 5 * DAY  # once a weekend
 REPAIR_COOLDOWN = 60  # one adult answers the emergency
 TROUBLE_COOLDOWN = {"arrears": 3 * DAY, "cant_fix": 7 * DAY}
 RENT_CUT = 40  # a renter downsizes only to a home at least this much cheaper a week
-DOWNSIZE_AFTER_DAYS = 90  # a household thinks of downsizing only after this long in its home (or in the game)
+DOWNSIZE_AFTER_DAYS = 90  # the households that start in their homes think of downsizing from this game day ...
+DOWNSIZE_AFTER_MOVE_DAYS = 120  # ... and a household that moved in only after this long in the home it chose
 DOWNSIZE_BASE = 0.1  # house_hunt's downsizing variant: the base of selling up and buying smaller (renting: less) ...
 DOWNSIZE_RETIRED = 0.35  # ... and how much more inviting it is once every adult is retired
-DOWNSIZE_DRIFT = 0.05  # ... and this much more for every 30 days beyond DOWNSIZE_AFTER_DAYS in the home ...
+DOWNSIZE_DRIFT = 0.05  # ... and this much more for every 30 days the household has been thinking of it ...
 DOWNSIZE_DRIFT_MAX = 0.4  # ... up to this: the spare rooms weigh more as the months go by
+DOWNSIZE_SCARCE = 0.3  # ... and this much more while no house has been for sale for a while (house_drought)
 DOWNSIZE_SETTLE = 120 * DAY  # after downsizing, a household doesn't look at the market again for this long ...
-DOWNSIZE_NO_BIGGER = 360 * DAY  # ... nor at a home with more bedrooms for this long, unless it gets crowded
-DOWNSIZE_STAY = 60 * DAY  # a household that decides to stay put isn't asked about downsizing again for this long
+DOWNSIZE_SETTLED = 360 * DAY  # ... nor, for this long, downsize again or take more bedrooms unless crowded
+DOWNSIZE_STAY = 30 * DAY  # a household that decides to stay put isn't asked about downsizing again for this long
 HELP_MARGIN = 300  # asking a friend for the deficit plus this ...
 HELP_RICH = 3  # ... of a friend with at least this many times that put by
 REPAIR_FRIEND = 30  # affinity of a friend who would come and help fix it
@@ -137,8 +139,9 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
         return None
     cands = housing.hunt_candidates(sim, hh)
     if not cands:
-        settled = now - (hh.moved_tick or 0) >= DOWNSIZE_AFTER_DAYS * DAY
-        fork = _downsize_hunt(sim, agent, hh) if settled and housing.outgrown(sim, hh) else None
+        months = _downsize_months(sim, hh)
+        fork = (_downsize_hunt(sim, agent, hh, months) if months is not None and hh.cooldowns.get("downsized", 0) <= now
+                and housing.outgrown(sim, hh) else None)
         if fork is None:
             hh.cooldowns["house_hunt"] = now + NO_CANDIDATE_RETRY
         return fork
@@ -234,15 +237,26 @@ def _keep_looking(label: str, base: float, cooldown: int) -> Option:
                   extra={"hh_cooldown": cooldown})
 
 
-def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
-    """house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and lived there at least
-    DOWNSIZE_AFTER_DAYS, when nothing better is on the market: sell up and buy the smaller home `housing_trouble`
-    would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not asked again for
-    DOWNSIZE_STAY). Either move, once it goes through, settles the household for DOWNSIZE_SETTLE and keeps it out
-    of bigger homes for DOWNSIZE_NO_BIGGER. A move that isn't available (no smaller home for sale, or no rental
-    the household can carry) gives its slot to "decide another time"; with neither there is no fork. Selling up
-    is the thrifty choice; it gets easier to make once everyone is retired and with every month (DOWNSIZE_DRIFT)
-    the household has lived there, so it comes now and then, not for all."""
+def _downsize_months(sim: Simulation, hh: Household) -> int | None:
+    """The whole months (of 30 days) a household has had downsizing on its mind, or None while it hasn't: a household
+    that started in its home thinks of it from day DOWNSIZE_AFTER_DAYS of the game, one that moved in once it has
+    lived DOWNSIZE_AFTER_MOVE_DAYS in the home it chose."""
+    wait = DOWNSIZE_AFTER_DAYS if hh.moved_tick is None else DOWNSIZE_AFTER_MOVE_DAYS
+    over = sim.clock.tick - (hh.moved_tick or 0) - wait * DAY
+    return over // (30 * DAY) if over >= 0 else None
+
+
+def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household, months: int) -> Fork | None:
+    """house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and has had downsizing on
+    its mind for `months` (`_downsize_months`), when nothing better is on the market: sell up and buy the smaller home
+    `housing_trouble` would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not
+    asked again for DOWNSIZE_STAY). Either move, once it goes through, settles the household: no market for
+    DOWNSIZE_SETTLE, and for DOWNSIZE_SETTLED no second downsizing and no home with more bedrooms unless it gets
+    crowded. A move that isn't available (no smaller home for sale, or no rental the household can carry) gives its
+    slot to "decide another time"; with neither there is no fork. Selling up is the thrifty choice. It is more
+    inviting once everyone is retired, a little more with every month (DOWNSIZE_DRIFT), and more while no house has
+    been for sale for a while (DOWNSIZE_SCARCE), so households come to it one by one, now and then, and most often
+    when the town is short of houses."""
     now = sim.clock.tick
     cur = sim.homes[hh.home_id]
     people = housing.adults(sim, hh)
@@ -254,8 +268,9 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
     if not smaller and rental is None:
         return None
     hh.cooldowns["house_hunt"] = now + HUNT_COOLDOWN
-    months = (now - (hh.moved_tick or 0) - DOWNSIZE_AFTER_DAYS * DAY) // (30 * DAY)
-    lift = (DOWNSIZE_RETIRED if retired else 0.0) + min(DOWNSIZE_DRIFT_MAX, DOWNSIZE_DRIFT * months)
+    scarce = housing.house_drought(sim)
+    lift = ((DOWNSIZE_RETIRED if retired else 0.0) + min(DOWNSIZE_DRIFT_MAX, DOWNSIZE_DRIFT * months)
+            + (DOWNSIZE_SCARCE if scarce else 0.0))
     moves = [_sell_and_buy(sim, hh, _smallest(sim, smaller), DOWNSIZE_BASE + lift) if smaller else None,
              _sell_and_rent(sim, hh, rental, DOWNSIZE_BASE - 0.05 + lift) if rental else None]
     later = Option("Talk it over and decide another time", [("relax_home", "home")], base=0.05,
@@ -264,7 +279,7 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
                    else [], extra={"hh_cooldown": 7 * DAY})
     for opt in moves:
         if opt:
-            opt.extra["settle"] = {"house_hunt": DOWNSIZE_SETTLE, "bigger_home": DOWNSIZE_NO_BIGGER}
+            opt.extra["settle"] = {"house_hunt": DOWNSIZE_SETTLE, "downsized": DOWNSIZE_SETTLED}
     look = _keep_looking("Keep looking for the right smaller place", 0.1, 14 * DAY)
     stay = Option(f"Stay in {cur.name}: it's home", [("relax_home", "home")], base=0.15,
                   tags={"family": 0.3, "thrift": -0.3, "adventure": -0.4}, gains={"fun": 10},
@@ -273,11 +288,12 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
                   extra={"hh_cooldown": DOWNSIZE_STAY})
     n = housing.residents(sim, hh)
     whom = "just you" if n == 1 else f"the {n} of you"
-    retiring = retired and (cur.arrived is None or not cur.arrived["retired"])  # else they have shrunk
-    why = "now that you are retired" if retiring else f"with {cur.bedrooms} bedrooms for {whom}"
+    why = "in retirement" if retired else f"with {cur.bedrooms} bedrooms for {whom}"
+    weeks = housing.LANDLORD_SELLS_DAYS // 7
+    short = f", and no house has been for sale in Millbrook for {weeks} weeks" if scarce else ""
     question = (f"Your household has ${_whole(housing.funds(sim, hh)):,} put by. You own {cur.name}, worth about "
                 f"${housing.value(sim, cur.id):,}: more home than you need {why}. Nothing better is on the market, "
-                f"but a smaller place is. Do you downsize?")
+                f"but a smaller place is{short}. Do you downsize?")
     return Fork(agent.id, "house_hunt", question, [m or later for m in moves] + [look, stay], now, major=True)
 
 

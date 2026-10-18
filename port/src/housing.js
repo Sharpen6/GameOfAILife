@@ -172,7 +172,6 @@
       this.pending_emergency = null; // hidden {kind, due}: never serialised
       this.emergency = null; // live {kind, since}: public
       this.history = []; // {tick, time, event, household, price}
-      this.arrived = null; // the household as it moved in, {residents, retired}; null: the starting cast
     }
   }
 
@@ -465,15 +464,13 @@
   // least 90% of today's; or a home worth at least 15% more.
   //
   // Owners look only at homes for sale unless they are crowded: selling up to rent a pricier place gives away
-  // the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4). Unless crowded,
-  // a household doesn't take more bedrooms once every adult is retired, nor for a while after it has downsized
-  // (its "bigger_home" cooldown).
+  // the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4). For a year after
+  // it has downsized (its "downsized" cooldown), a household doesn't take more bedrooms unless it is crowded.
   function is_upgrade(sim, hh, home_id) {
     const cur = sim.homes.get(hh.home_id), nw = sim.homes.get(home_id);
     if (TIERS[nw.tier].rank < TIERS[cur.tier].rank) return false;
     if (crowded(sim, hh) && nw.bedrooms > cur.bedrooms) return true;
-    if (nw.bedrooms > cur.bedrooms && (getd(hh.cooldowns, "bigger_home", 0) > sim.clock.tick
-      || adults(sim, hh).every(a => retired(a)))) return false;
+    if (nw.bedrooms > cur.bedrooms && getd(hh.cooldowns, "downsized", 0) > sim.clock.tick) return false;
     const owner = cur.owner === hh.id;
     if (owner && !buys(nw)) return false;
     if (!owner && buys(nw)) return value(sim, home_id) >= 0.9 * value(sim, cur.id);
@@ -491,26 +488,14 @@
     return vacancies(sim).filter(h => fits(sim, hh, h) && is_upgrade(sim, hh, h.id) && affordable(sim, hh, h.id));
   }
 
-  // What `Home.arrived` records when a household moves in: its residents, and whether every adult is retired.
-  function _arrival(sim, hh) {
-    return { residents: residents(sim, hh), retired: adults(sim, hh).every(a => retired(a)) };
-  }
-
-  // An owner household that has outgrown its home since it moved in: every adult has retired since, or it has
-  // shrunk since and has at least SPARE_BEDROOMS more bedrooms than residents. The starting cast has lived in its
-  // homes for years, so for it being retired, or that many bedrooms to spare, is enough. A home that was already
-  // more than the household needed when it moved in (three in five bedrooms, a retired couple) is not outgrown:
-  // they chose it. `house_hunt` offers an outgrown home's household a smaller one when nothing better is on the
-  // market.
+  // An owner household that has outgrown its home: every adult is retired, or it has at least SPARE_BEDROOMS more
+  // bedrooms than residents. `house_hunt` asks it now and then whether to downsize, once it has lived there a while
+  // and when nothing better is on the market.
   function outgrown(sim, hh) {
     const home = sim.homes.get(hh.home_id);
     const people = adults(sim, hh);
     if (home.owner !== hh.id || !people.length) return false;
-    const now = _arrival(sim, hh);
-    const spare = now.residents <= home.bedrooms - SPARE_BEDROOMS;
-    const was = home.arrived;
-    if (was === null) return now.retired || spare;
-    return (now.retired && !was.retired) || (spare && now.residents < was.residents);
+    return people.every(a => retired(a)) || residents(sim, hh) <= home.bedrooms - SPARE_BEDROOMS;
   }
 
   // The smaller homes an owner could sell up and buy: for sale, vacant, fitting, in at least DOWNSIZE_CONDITION,
@@ -522,7 +507,8 @@
   }
 
   // No house or big house other than `but` has been for sale for LANDLORD_SELLS_DAYS: none is for sale now
-  // (under offer included) and none was bought in that time (a home is for sale until it is bought).
+  // (under offer included) and none was bought in that time (a home is for sale until it is bought). The landlord
+  // then sells a let house its tenants leave, and owners who have outgrown their homes think harder about selling.
   function house_drought(sim, but = null) {
     const now = sim.clock.tick;
     if (now < LANDLORD_SELLS_DAYS * DAY) return false;
@@ -781,7 +767,6 @@
       old.listing = "for_rent";
     }
     old.household = null;
-    old.arrived = null;
     release(old);
     old.pending_emergency = null;
     if (old.emergency) { // the problem stays with the house, as lost condition
@@ -801,7 +786,6 @@
     }
     nw.listing = null;
     nw.household = hh.id;
-    nw.arrived = _arrival(sim, hh);
     release(nw);
     hh.home_id = nw.id;
     hh.moved_tick = now;
@@ -1166,7 +1150,6 @@
     if (home.household !== hh.id) return;
     const now = sim.clock.tick, stamp = sim.clock.stamp();
     home.household = null;
-    home.arrived = null;
     home.pending_emergency = null;
     home.emergency = null;
     release(home);
@@ -1352,7 +1335,7 @@
     round50, stamp_of, stage_of, stage_name, condition_of, value, sale_proceeds, property_tax, listed, hold, release,
     adults, residents, crowded, funds, tenure, weekly_cost, comfort, worth_parts, net_worth, household_name,
     household_summary, pay_household, round10, retired, weekly_income, bills, living, commute, buys, housing_cost,
-    weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates, _arrival, outgrown,
+    weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates, outgrown,
     downsize_candidates, house_drought, cheapest_rental, owner_occupied, lot_homes, hardship_rent, _one, _hh_lower,
     _hh_possessive, district_name, town_homes_json, town_housing_json, lots_json, homes_json, possessions_json,
     fork_you, agent_page_fields, market_json, home_page, _members, available, too_late, move_household, renovate,

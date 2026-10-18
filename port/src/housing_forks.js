@@ -21,14 +21,16 @@
   const REPAIR_COOLDOWN = 60; // one adult answers the emergency
   const TROUBLE_COOLDOWN = { arrears: 3 * DAY, cant_fix: 7 * DAY };
   const RENT_CUT = 40; // a renter downsizes only to a home at least this much cheaper a week
-  const DOWNSIZE_AFTER_DAYS = 90; // a household thinks of downsizing only after this long in its home (or in the game)
+  const DOWNSIZE_AFTER_DAYS = 90; // the households that start in their homes think of downsizing from this game day ...
+  const DOWNSIZE_AFTER_MOVE_DAYS = 120; // ... and a household that moved in only after this long in the home it chose
   const DOWNSIZE_BASE = 0.1; // house_hunt's downsizing variant: the base of selling up to buy smaller (renting: less)
   const DOWNSIZE_RETIRED = 0.35; // ... and how much more inviting it is once every adult is retired
-  const DOWNSIZE_DRIFT = 0.05; // ... and this much more for every 30 days beyond DOWNSIZE_AFTER_DAYS in the home ...
+  const DOWNSIZE_DRIFT = 0.05; // ... and this much more for every 30 days the household has been thinking of it ...
   const DOWNSIZE_DRIFT_MAX = 0.4; // ... up to this: the spare rooms weigh more as the months go by
+  const DOWNSIZE_SCARCE = 0.3; // ... and this much more while no house has been for sale for a while (house_drought)
   const DOWNSIZE_SETTLE = 120 * DAY; // after downsizing, a household doesn't look at the market again for this long ...
-  const DOWNSIZE_NO_BIGGER = 360 * DAY; // ... nor at a home with more bedrooms for this long, unless it gets crowded
-  const DOWNSIZE_STAY = 60 * DAY; // a household that decides to stay put isn't asked about downsizing for this long
+  const DOWNSIZE_SETTLED = 360 * DAY; // ... nor, for this long, downsize again or take more bedrooms unless crowded
+  const DOWNSIZE_STAY = 30 * DAY; // a household that decides to stay put isn't asked about downsizing for this long
   const HELP_MARGIN = 300; // asking a friend for the deficit plus this ...
   const HELP_RICH = 3; // ... of a friend with at least this many times that put by
   const REPAIR_FRIEND = 30; // affinity of a friend who would come and help fix it
@@ -122,8 +124,9 @@
       || sim.on_shift_now(agent)) return null;
     const cands = housing.hunt_candidates(sim, hh);
     if (!cands.length) {
-      const settled = now - (hh.moved_tick || 0) >= DOWNSIZE_AFTER_DAYS * DAY;
-      const fork = settled && housing.outgrown(sim, hh) ? _downsize_hunt(sim, agent, hh) : null;
+      const months = _downsize_months(sim, hh);
+      const fork = months !== null && getd(hh.cooldowns, "downsized", 0) <= now && housing.outgrown(sim, hh)
+        ? _downsize_hunt(sim, agent, hh, months) : null;
       if (fork === null) hh.cooldowns.house_hunt = now + NO_CANDIDATE_RETRY;
       return fork;
     }
@@ -221,15 +224,26 @@
       extra: { hh_cooldown: cooldown } });
   }
 
-  // house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and lived there at least
-  // DOWNSIZE_AFTER_DAYS, when nothing better is on the market: sell up and buy the smaller home `housing_trouble`
-  // would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not asked again for
-  // DOWNSIZE_STAY). Either move, once it goes through, settles the household for DOWNSIZE_SETTLE and keeps it out
-  // of bigger homes for DOWNSIZE_NO_BIGGER. A move that isn't available (no smaller home for sale, or no rental
-  // the household can carry) gives its slot to "decide another time"; with neither there is no fork. Selling up
-  // is the thrifty choice; it gets easier to make once everyone is retired and with every month (DOWNSIZE_DRIFT)
-  // the household has lived there, so it comes now and then, not for all.
-  function _downsize_hunt(sim, agent, hh) {
+  // The whole months (of 30 days) a household has had downsizing on its mind, or null while it hasn't: a household
+  // that started in its home thinks of it from day DOWNSIZE_AFTER_DAYS of the game, one that moved in once it has
+  // lived DOWNSIZE_AFTER_MOVE_DAYS in the home it chose.
+  function _downsize_months(sim, hh) {
+    const wait = hh.moved_tick === null ? DOWNSIZE_AFTER_DAYS : DOWNSIZE_AFTER_MOVE_DAYS;
+    const over = sim.clock.tick - (hh.moved_tick || 0) - wait * DAY;
+    return over >= 0 ? Math.floor(over / (30 * DAY)) : null;
+  }
+
+  // house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and has had downsizing on
+  // its mind for `months` (`_downsize_months`), when nothing better is on the market: sell up and buy the smaller home
+  // `housing_trouble` would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not
+  // asked again for DOWNSIZE_STAY). Either move, once it goes through, settles the household: no market for
+  // DOWNSIZE_SETTLE, and for DOWNSIZE_SETTLED no second downsizing and no home with more bedrooms unless it gets
+  // crowded. A move that isn't available (no smaller home for sale, or no rental the household can carry) gives its
+  // slot to "decide another time"; with neither there is no fork. Selling up is the thrifty choice. It is more
+  // inviting once everyone is retired, a little more with every month (DOWNSIZE_DRIFT), and more while no house has
+  // been for sale for a while (DOWNSIZE_SCARCE), so households come to it one by one, now and then, and most often
+  // when the town is short of houses.
+  function _downsize_hunt(sim, agent, hh, months) {
     const housing = H();
     const now = sim.clock.tick;
     const cur = sim.homes.get(hh.home_id);
@@ -240,8 +254,9 @@
     if (rental !== null && !housing.affordable(sim, hh, rental.id)) rental = null;
     if (!smaller.length && rental === null) return null;
     hh.cooldowns.house_hunt = now + HUNT_COOLDOWN;
-    const months = Math.floor((now - (hh.moved_tick || 0) - DOWNSIZE_AFTER_DAYS * DAY) / (30 * DAY));
-    const lift = (retired ? DOWNSIZE_RETIRED : 0.0) + Math.min(DOWNSIZE_DRIFT_MAX, DOWNSIZE_DRIFT * months);
+    const scarce = housing.house_drought(sim);
+    const lift = (retired ? DOWNSIZE_RETIRED : 0.0) + Math.min(DOWNSIZE_DRIFT_MAX, DOWNSIZE_DRIFT * months)
+      + (scarce ? DOWNSIZE_SCARCE : 0.0);
     const moves = [smaller.length ? _sell_and_buy(sim, hh, _smallest(sim, smaller), DOWNSIZE_BASE + lift) : null,
       rental ? _sell_and_rent(sim, hh, rental, DOWNSIZE_BASE - 0.05 + lift) : null];
     const later = new Option("Talk it over and decide another time", [["relax_home", "home"]], { base: 0.05,
@@ -249,7 +264,7 @@
       outcomes: people.length > 1 ? [new Outcome("talk", "A long talk about the future", 0.4, +1, { fun: 4 })] : [],
       extra: { hh_cooldown: 7 * DAY } });
     for (const opt of moves) {
-      if (opt) opt.extra.settle = { house_hunt: DOWNSIZE_SETTLE, bigger_home: DOWNSIZE_NO_BIGGER };
+      if (opt) opt.extra.settle = { house_hunt: DOWNSIZE_SETTLE, downsized: DOWNSIZE_SETTLED };
     }
     const look = _keep_looking("Keep looking for the right smaller place", 0.1, 14 * DAY);
     const stay = new Option(`Stay in ${cur.name}: it's home`, [["relax_home", "home"]], { base: 0.15,
@@ -259,11 +274,12 @@
       extra: { hh_cooldown: DOWNSIZE_STAY } });
     const n = housing.residents(sim, hh);
     const whom = n === 1 ? "just you" : `the ${n} of you`;
-    const retiring = retired && (cur.arrived === null || !cur.arrived.retired); // else they have shrunk
-    const why = retiring ? "now that you are retired" : `with ${cur.bedrooms} bedrooms for ${whom}`;
+    const why = retired ? "in retirement" : `with ${cur.bedrooms} bedrooms for ${whom}`;
+    const weeks = Math.floor(housing.LANDLORD_SELLS_DAYS / 7);
+    const short = scarce ? `, and no house has been for sale in Millbrook for ${weeks} weeks` : "";
     const question = `Your household has $${commas(_whole(housing.funds(sim, hh)))} put by. You own ${cur.name}, `
       + `worth about $${commas(housing.value(sim, cur.id))}: more home than you need ${why}. Nothing better is on the `
-      + "market, but a smaller place is. Do you downsize?";
+      + `market, but a smaller place is${short}. Do you downsize?`;
     const opts = moves.map(m => m || later).concat([look, stay]);
     return new Fork(agent.id, "house_hunt", question, opts, now, { major: true });
   }
@@ -550,12 +566,12 @@
 
   G.housing_forks = {
     MAJOR_KINDS, NO_CANDIDATE_RETRY, HUNT_COOLDOWN, UPKEEP_COOLDOWN, REPAIR_COOLDOWN, TROUBLE_COOLDOWN, RENT_CUT,
-    DOWNSIZE_AFTER_DAYS, DOWNSIZE_BASE, DOWNSIZE_RETIRED, DOWNSIZE_DRIFT, DOWNSIZE_DRIFT_MAX, DOWNSIZE_SETTLE,
-    DOWNSIZE_NO_BIGGER, DOWNSIZE_STAY, HELP_MARGIN, HELP_RICH,
+    DOWNSIZE_AFTER_DAYS, DOWNSIZE_AFTER_MOVE_DAYS, DOWNSIZE_BASE, DOWNSIZE_RETIRED, DOWNSIZE_DRIFT, DOWNSIZE_DRIFT_MAX,
+    DOWNSIZE_SCARCE, DOWNSIZE_SETTLE, DOWNSIZE_SETTLED, DOWNSIZE_STAY, HELP_MARGIN, HELP_RICH,
     REPAIR_FRIEND, HELP_FRIEND, HANDYMAN, PIZZA, BUILDERS_WORKS, EMERGENCY_WORKS, UPKEEP_BELOW, FRESH_DAYS,
     FRESH_BELOW, TRADE, WAIT, TROUBLE, LOOKS, GOSSIP, _hh_window, _ready, _first, _stage_note, _has_kids, _friend,
-    _partner, _move_outcomes, house_hunt_fork, _keep_looking, _downsize_hunt, _whole, upkeep_fork, repair_fork,
-    _trouble, _downsize_outcomes, _move_down, _smallest, _sell_and_buy, _sell_and_rent, _chain, _fallbacks,
+    _partner, _move_outcomes, house_hunt_fork, _keep_looking, _downsize_months, _downsize_hunt, _whole, upkeep_fork,
+    repair_fork, _trouble, _downsize_outcomes, _move_down, _smallest, _sell_and_buy, _sell_and_rent, _chain, _fallbacks,
     housing_trouble_fork,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

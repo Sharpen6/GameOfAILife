@@ -183,7 +183,6 @@ class Home:
     pending_emergency: dict | None = None  # hidden {"kind", "due"}: never serialised
     emergency: dict | None = None  # live {"kind", "since"}: public
     history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "household", "price"}
-    arrived: dict | None = None  # the household as it moved in, {"residents", "retired"}; None: the starting cast
 
 
 @dataclass(eq=False)
@@ -513,16 +512,14 @@ def is_upgrade(sim, hh: Household, home_id: str) -> bool:
     least 90% of today's; or a home worth at least 15% more.
 
     Owners look only at homes for sale unless they are crowded: selling up to rent a pricier place gives away
-    the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4). Unless crowded,
-    a household doesn't take more bedrooms once every adult is retired, nor for a while after it has downsized
-    (its "bigger_home" cooldown)."""
+    the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4). For a year after
+    it has downsized (its "downsized" cooldown), a household doesn't take more bedrooms unless it is crowded."""
     cur, new = sim.homes[hh.home_id], sim.homes[home_id]
     if TIERS[new.tier]["rank"] < TIERS[cur.tier]["rank"]:
         return False
     if crowded(sim, hh) and new.bedrooms > cur.bedrooms:
         return True
-    if new.bedrooms > cur.bedrooms and (hh.cooldowns.get("bigger_home", 0) > sim.clock.tick
-                                        or all(retired(a) for a in adults(sim, hh))):
+    if new.bedrooms > cur.bedrooms and hh.cooldowns.get("downsized", 0) > sim.clock.tick:
         return False
     owner = cur.owner == hh.id
     if owner and not buys(new):
@@ -543,28 +540,15 @@ def hunt_candidates(sim, hh: Household) -> list[Home]:
     return [h for h in vacancies(sim) if fits(sim, hh, h) and is_upgrade(sim, hh, h.id) and affordable(sim, hh, h.id)]
 
 
-def _arrival(sim, hh: Household) -> dict:
-    """What `Home.arrived` records when a household moves in: its residents, and whether every adult is retired."""
-    return {"residents": residents(sim, hh), "retired": all(retired(a) for a in adults(sim, hh))}
-
-
 def outgrown(sim, hh: Household) -> bool:
-    """An owner household that has outgrown its home since it moved in: every adult has retired since, or it has
-    shrunk since and has at least SPARE_BEDROOMS more bedrooms than residents. The starting cast has lived in its
-    homes for years, so for it being retired, or that many bedrooms to spare, is enough. A home that was already
-    more than the household needed when it moved in (three in five bedrooms, a retired couple) is not outgrown:
-    they chose it. `house_hunt` offers an outgrown home's household a smaller one when nothing better is on the
-    market."""
+    """An owner household that has outgrown its home: every adult is retired, or it has at least SPARE_BEDROOMS more
+    bedrooms than residents. `house_hunt` asks it now and then whether to downsize, once it has lived there a while
+    and when nothing better is on the market."""
     home = sim.homes[hh.home_id]
     people = adults(sim, hh)
     if home.owner != hh.id or not people:
         return False
-    now = _arrival(sim, hh)
-    spare = now["residents"] <= home.bedrooms - SPARE_BEDROOMS
-    was = home.arrived
-    if was is None:
-        return now["retired"] or spare
-    return (now["retired"] and not was["retired"]) or (spare and now["residents"] < was["residents"])
+    return all(retired(a) for a in people) or residents(sim, hh) <= home.bedrooms - SPARE_BEDROOMS
 
 
 def downsize_candidates(sim, hh: Household) -> list[Home]:
@@ -577,7 +561,8 @@ def downsize_candidates(sim, hh: Household) -> list[Home]:
 
 def house_drought(sim, but: str | None = None) -> bool:
     """No house or big house other than `but` has been for sale for LANDLORD_SELLS_DAYS: none is for sale now
-    (under offer included) and none was bought in that time (a home is for sale until it is bought)."""
+    (under offer included) and none was bought in that time (a home is for sale until it is bought). The landlord
+    then sells a let house its tenants leave, and owners who have outgrown their homes think harder about selling."""
     now = sim.clock.tick
     if now < LANDLORD_SELLS_DAYS * DAY:
         return False
@@ -843,7 +828,6 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
     else:
         old.listing = "for_rent"
     old.household = None
-    old.arrived = None
     release(old)
     old.pending_emergency = None
     if old.emergency:  # the problem stays with the house, as lost condition
@@ -861,7 +845,6 @@ def move_household(sim, hh: Household, home_id: str, how: str, factor: float = 1
         hh.weekly_rent = _int(new.rent * factor)
     new.listing = None
     new.household = hh.id
-    new.arrived = _arrival(sim, hh)
     release(new)
     hh.home_id = new.id
     hh.moved_tick = now
@@ -1213,7 +1196,6 @@ def on_death(sim, agent: Agent) -> None:
         return
     now, stamp = sim.clock.tick, sim.clock.stamp()
     home.household = None
-    home.arrived = None
     home.pending_emergency = None
     home.emergency = None
     release(home)
