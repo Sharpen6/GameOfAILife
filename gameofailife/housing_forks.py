@@ -39,6 +39,8 @@ DOWNSIZE_SCARCE = 0.3  # ... and this much more while no house has been for sale
 DOWNSIZE_SETTLE = 120 * DAY  # after downsizing, a household doesn't look at the market again for this long ...
 DOWNSIZE_SETTLED = 360 * DAY  # ... nor, for this long, downsize again or take more bedrooms unless crowded
 DOWNSIZE_STAY = 30 * DAY  # a household that decides to stay put isn't asked about downsizing again for this long
+NOTICE_RETRY = DAY  # tenants under notice are asked where to go again after this long when nothing came of it ...
+NOTICE_LATER = 3 * DAY  # ... and after this long when they asked for more time or kept looking
 HELP_MARGIN = 300  # asking a friend for the deficit plus this ...
 HELP_RICH = 3  # ... of a friend with at least this many times that put by
 REPAIR_FRIEND = 30  # affinity of a friend who would come and help fix it
@@ -127,12 +129,16 @@ def _move_outcomes(sim: Simulation, hh: Household, agent: Agent, home_id: str, b
 
 def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     """A better home the household can afford is on the market: buy (or rent) the best, haggle for it, take the
-    cheaper one (or keep looking), or stay put. A run-down home is bought with its renovation, done the day it is
-    bought (the affordability gate already counts it), so it is never derelict in use. With nothing better on the
-    market, an owner household that has outgrown its home gets the downsizing variant instead, when a smaller home
-    will do (`_downsize_hunt`)."""
+    cheaper one (when one really costs less, else keep looking), or stay put. A run-down home is bought with its
+    renovation, done the day it is bought (the affordability gate already counts it), so it is never derelict in
+    use. With nothing better on the market, an owner household that has outgrown its home gets the downsizing
+    variant instead, when a smaller home will do (`_downsize_hunt`); tenants the landlord has given notice get the
+    notice variant (`_notice_hunt`)."""
     hh = sim.households[agent.household_id]
     now = sim.clock.tick
+    home = housing.under_notice(sim, hh)
+    if home is not None:
+        return _notice_hunt(sim, agent, hh, home)
     if (not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or hh.arrears
             or (hh.moved_tick is not None and now - hh.moved_tick < housing.MOVE_GAP_DAYS * DAY)
             or sim.on_shift_now(agent)):
@@ -156,7 +162,16 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     reno = {h.id: housing.reno_cost(sim, h.id) if housing.buys(h) else 0 for h in cands}
     a = max(cands, key=lambda h: (TIERS[h.tier]["rank"], worth[h.id], cond[h.id], h.id))
     rest = [h for h in cands if h is not a]
-    b = min(rest, key=lambda h: (housing.net_cost(sim, hh, h.id), cond[h.id], h.id)) if rest else None
+
+    def spend(h) -> tuple[float, float]:
+        """What moving to `h` costs: the cash (its renovation included), then a week there."""
+        return housing.net_cost(sim, hh, h.id) + reno[h.id], housing.weekly_outgo(sim, hh, h.id)
+
+    # B, "the cheaper" home, is the cheapest of the others (ties: the fixer-upper first), offered only when it costs
+    # less than A to move into, or as much and less a week; else that slot keeps looking.
+    b = min(rest, key=lambda h: (*spend(h), cond[h.id], h.id)) if rest else None
+    if b is not None and spend(b) >= spend(a):
+        b = None
 
     def rises(h) -> bool:
         return housing.weekly_outgo(sim, hh, h.id) > outgo
@@ -295,6 +310,64 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household, months: int) ->
                 f"${housing.value(sim, cur.id):,}: more home than you need {why}. Nothing better is on the market, "
                 f"but a smaller place is{short}. Do you downsize?")
     return Fork(agent.id, "house_hunt", question, [m or later for m in moves] + [look, stay], now, major=True)
+
+
+def _notice_hunt(sim: Simulation, agent: Agent, hh: Household, home) -> Fork | None:
+    """house_hunt for tenants whose let house the landlord is selling (`housing.give_notice`), asked in the household
+    window until they have moved: rent the best fitting home to let they can carry, rent the cheapest one they can
+    carry when that costs less a week, buy the house from the landlord when they can afford it, or ask the landlord
+    for more time (it waits no longer than the notice, after which it moves them itself). A move that isn't
+    available gives its slot to keep looking (two kinds) or "decide another time". The rentals offered pass the
+    affordability gate of every house_hunt move (PLAN decision 57); a household that can carry none is moved into the
+    cheapest fitting one by the landlord when the notice runs out (`housing.landlord_notices`)."""
+    now = sim.clock.tick
+    if not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or sim.on_shift_now(agent):
+        return None
+    hh.cooldowns["house_hunt"] = now + NOTICE_RETRY
+    carried = [h for h in housing.vacancies(sim, "for_rent")
+               if housing.fits(sim, hh, h) and housing.affordable(sim, hh, h.id)]
+    best = (max(carried, key=lambda h: (TIERS[h.tier]["rank"], h.bedrooms, housing.condition_of(sim, h.id), -h.rent,
+                                        h.id)) if carried else None)
+    cheap = min(carried, key=lambda h: (h.rent, -housing.condition_of(sim, h.id), h.id)) if carried else None
+    if cheap is not None and cheap.rent >= best.rent:
+        cheap = None
+
+    def rent(h, the: str, base: float, tags: dict) -> Option:
+        text = f"Rent {the}{h.name} ({TIERS[h.tier]['label']}{_stage_note(sim, h.id)}) for ${h.rent}/week"
+        return Option(text, [("move_house", h.place)], cost=MOVING_COST, base=base, tags=tags, gains={"fun": 10},
+                      outcomes=_downsize_outcomes(sim, hh), extra={"move": h.id, "how": "rent"},
+                      household_pays=True, charge=False)
+
+    first = (rent(best, "", 0.45, {"family": 0.3, "diligence": 0.3, "thrift": -0.1}) if best
+             else _keep_looking("Look for somewhere else to rent", 0.3, NOTICE_RETRY))
+    second = (rent(cheap, "the cheaper ", 0.3, {"thrift": 0.7, "family": -0.2, "adventure": 0.1}) if cheap
+              else _keep_looking("Keep looking for the right place", 0.15, NOTICE_LATER))
+    worth = housing.value(sim, home.id)
+    if housing.can_buy_let_home(sim, hh):
+        third = Option(f"Buy {home.name} from {LANDLORD} for ${worth:,}", [("relax_home", "home")], cost=worth,
+                       base=0.3, tags={"family": 0.5, "adventure": 0.2, "thrift": -0.3}, gains={"fun": 15},
+                       outcomes=[Outcome("glad_to_stay", "Glad to have stayed put", 0.5, +1,
+                                         {"fun": 10, "family_bond": 2}),
+                                 Outcome("stretched", "Buying it stretches them thin", 0.25, -1, {"fun": -6})],
+                       extra={"buy_let": home.id}, household_pays=True, charge=False)
+    else:
+        third = Option("Talk it over and decide another time", [("relax_home", "home")], base=0.05,
+                       tags={"family": 0.2, "diligence": -0.2}, gains={"fun": 5},
+                       outcomes=[Outcome("talk", "A long talk about where to go", 0.4, +1, {"fun": 4})]
+                       if len(housing.adults(sim, hh)) > 1 else [], extra={"hh_cooldown": NOTICE_RETRY})
+    wait = Option(f"Ask {LANDLORD} for more time", [("phone_call", None)], base=0.0,
+                  tags={"social": 0.3, "thrift": 0.2, "diligence": -0.3}, gains={"fun": 5},
+                  outcomes=[Outcome("more_time", f"{LANDLORD} says it can wait until the notice runs out", 0.5, +1,
+                                    {"fun": 4}, group="time"),
+                            Outcome("no_more_time", f"{LANDLORD} wants the house empty as soon as it can", 1.0, -1,
+                                    {"fun": -6}, group="time")],
+                  extra={"hh_cooldown": NOTICE_LATER})
+    due = housing.stamp_of(home.notice["due"])
+    rent_now = housing._int(hh.weekly_rent)
+    question = (f"{LANDLORD} is selling {home.name}, the house you rent (${rent_now}/week), and has given your "
+                f"household notice: you have to move out by {due}. Your household has "
+                f"${_whole(housing.funds(sim, hh)):,} put by. What do you do?")
+    return Fork(agent.id, "house_hunt", question, [first, second, third, wait], now, major=True)
 
 
 def _whole(x: float) -> int:

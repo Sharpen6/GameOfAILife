@@ -7,7 +7,7 @@
 // asked the same question again. `forks.build_fork` resolves these lazily.
 (function (G) {
   "use strict";
-  const { getd, commas, firstName, minBy, maxBy, relKey } = G.py;
+  const { getd, commas, firstName, cmp, minBy, maxBy, relKey } = G.py;
   const H = () => G.housing;
   const { Fork, Option, Outcome } = G.forks;
   const { CAR_SALE, DAY, GRACE_HOLD_DAYS, LANDLORD, MOVING_COST, ODD_JOBS_PAY, RENO_FACTOR, STAGES, STUFF_PRICE,
@@ -31,6 +31,8 @@
   const DOWNSIZE_SETTLE = 120 * DAY; // after downsizing, a household doesn't look at the market again for this long ...
   const DOWNSIZE_SETTLED = 360 * DAY; // ... nor, for this long, downsize again or take more bedrooms unless crowded
   const DOWNSIZE_STAY = 30 * DAY; // a household that decides to stay put isn't asked about downsizing for this long
+  const NOTICE_RETRY = DAY; // tenants under notice are asked where to go again after this long when nothing came of it ...
+  const NOTICE_LATER = 3 * DAY; // ... and after this long when they asked for more time or kept looking
   const HELP_MARGIN = 300; // asking a friend for the deficit plus this ...
   const HELP_RICH = 3; // ... of a friend with at least this many times that put by
   const REPAIR_FRIEND = 30; // affinity of a friend who would come and help fix it
@@ -111,14 +113,17 @@
   // --- house_hunt (major) -----------------------------------------------------------
 
   // A better home the household can afford is on the market: buy (or rent) the best, haggle for it, take the
-  // cheaper one (or keep looking), or stay put. A run-down home is bought with its renovation, done the day it is
-  // bought (the affordability gate already counts it), so it is never derelict in use. With nothing better on the
-  // market, an owner household that has outgrown its home gets the downsizing variant instead, when a smaller home
-  // will do (`_downsize_hunt`).
+  // cheaper one (when one really costs less, else keep looking), or stay put. A run-down home is bought with its
+  // renovation, done the day it is bought (the affordability gate already counts it), so it is never derelict in
+  // use. With nothing better on the market, an owner household that has outgrown its home gets the downsizing
+  // variant instead, when a smaller home will do (`_downsize_hunt`); tenants the landlord has given notice get the
+  // notice variant (`_notice_hunt`).
   function house_hunt_fork(sim, agent) {
     const housing = H();
     const hh = sim.households.get(agent.household_id);
     const now = sim.clock.tick;
+    const home = housing.under_notice(sim, hh);
+    if (home !== null) return _notice_hunt(sim, agent, hh, home);
     if (!_hh_window(sim) || !_ready(sim, agent, hh, "house_hunt") || hh.arrears
       || (hh.moved_tick !== null && now - hh.moved_tick < housing.MOVE_GAP_DAYS * DAY)
       || sim.on_shift_now(agent)) return null;
@@ -142,7 +147,14 @@
     for (const h of cands) reno[h.id] = housing.buys(h) ? housing.reno_cost(sim, h.id) : 0;
     const a = maxBy(cands, h => [TIERS[h.tier].rank, worth[h.id], cond[h.id], h.id]);
     const rest = cands.filter(h => h !== a);
-    const b = rest.length ? minBy(rest, h => [housing.net_cost(sim, hh, h.id), cond[h.id], h.id]) : null;
+
+    // What moving to `h` costs: the cash (its renovation included), then a week there.
+    const spend = h => [housing.net_cost(sim, hh, h.id) + reno[h.id], housing.weekly_outgo(sim, hh, h.id)];
+
+    // B, "the cheaper" home, is the cheapest of the others (ties: the fixer-upper first), offered only when it costs
+    // less than A to move into, or as much and less a week; else that slot keeps looking.
+    let b = rest.length ? minBy(rest, h => [...spend(h), cond[h.id], h.id]) : null;
+    if (b !== null && cmp(spend(b), spend(a)) >= 0) b = null;
 
     const rises = h => housing.weekly_outgo(sim, hh, h.id) > outgo;
 
@@ -282,6 +294,65 @@
       + `market, but a smaller place is${short}. Do you downsize?`;
     const opts = moves.map(m => m || later).concat([look, stay]);
     return new Fork(agent.id, "house_hunt", question, opts, now, { major: true });
+  }
+
+  // house_hunt for tenants whose let house the landlord is selling (`housing.give_notice`), asked in the household
+  // window until they have moved: rent the best fitting home to let they can carry, rent the cheapest one they can
+  // carry when that costs less a week, buy the house from the landlord when they can afford it, or ask the landlord
+  // for more time (it waits no longer than the notice, after which it moves them itself). A move that isn't
+  // available gives its slot to keep looking (two kinds) or "decide another time". The rentals offered pass the
+  // affordability gate of every house_hunt move (PLAN decision 57); a household that can carry none is moved into the
+  // cheapest fitting one by the landlord when the notice runs out (`housing.landlord_notices`).
+  function _notice_hunt(sim, agent, hh, home) {
+    const housing = H();
+    const now = sim.clock.tick;
+    if (!_hh_window(sim) || !_ready(sim, agent, hh, "house_hunt") || sim.on_shift_now(agent)) return null;
+    hh.cooldowns.house_hunt = now + NOTICE_RETRY;
+    const carried = housing.vacancies(sim, "for_rent")
+      .filter(h => housing.fits(sim, hh, h) && housing.affordable(sim, hh, h.id));
+    const best = carried.length ? maxBy(carried,
+      h => [TIERS[h.tier].rank, h.bedrooms, housing.condition_of(sim, h.id), -h.rent, h.id]) : null;
+    let cheap = carried.length ? minBy(carried, h => [h.rent, -housing.condition_of(sim, h.id), h.id]) : null;
+    if (cheap !== null && cheap.rent >= best.rent) cheap = null;
+
+    const rent = (h, the, base, tags) => {
+      const text = `Rent ${the}${h.name} (${TIERS[h.tier].label}${_stage_note(sim, h.id)}) for $${h.rent}/week`;
+      return new Option(text, [["move_house", h.place]], { cost: MOVING_COST, base, tags, gains: { fun: 10 },
+        outcomes: _downsize_outcomes(sim, hh), extra: { move: h.id, how: "rent" },
+        household_pays: true, charge: false });
+    };
+
+    const first = best ? rent(best, "", 0.45, { family: 0.3, diligence: 0.3, thrift: -0.1 })
+      : _keep_looking("Look for somewhere else to rent", 0.3, NOTICE_RETRY);
+    const second = cheap ? rent(cheap, "the cheaper ", 0.3, { thrift: 0.7, family: -0.2, adventure: 0.1 })
+      : _keep_looking("Keep looking for the right place", 0.15, NOTICE_LATER);
+    const worth = housing.value(sim, home.id);
+    let third;
+    if (housing.can_buy_let_home(sim, hh)) {
+      third = new Option(`Buy ${home.name} from ${LANDLORD} for $${commas(worth)}`, [["relax_home", "home"]],
+        { cost: worth, base: 0.3, tags: { family: 0.5, adventure: 0.2, thrift: -0.3 }, gains: { fun: 15 },
+          outcomes: [new Outcome("glad_to_stay", "Glad to have stayed put", 0.5, +1, { fun: 10, family_bond: 2 }),
+            new Outcome("stretched", "Buying it stretches them thin", 0.25, -1, { fun: -6 })],
+          extra: { buy_let: home.id }, household_pays: true, charge: false });
+    } else {
+      third = new Option("Talk it over and decide another time", [["relax_home", "home"]], { base: 0.05,
+        tags: { family: 0.2, diligence: -0.2 }, gains: { fun: 5 },
+        outcomes: housing.adults(sim, hh).length > 1
+          ? [new Outcome("talk", "A long talk about where to go", 0.4, +1, { fun: 4 })] : [],
+        extra: { hh_cooldown: NOTICE_RETRY } });
+    }
+    const wait = new Option(`Ask ${LANDLORD} for more time`, [["phone_call", null]], { base: 0.0,
+      tags: { social: 0.3, thrift: 0.2, diligence: -0.3 }, gains: { fun: 5 },
+      outcomes: [new Outcome("more_time", `${LANDLORD} says it can wait until the notice runs out`, 0.5, +1,
+        { fun: 4 }, "time"),
+      new Outcome("no_more_time", `${LANDLORD} wants the house empty as soon as it can`, 1.0, -1, { fun: -6 }, "time")],
+      extra: { hh_cooldown: NOTICE_LATER } });
+    const due = housing.stamp_of(home.notice.due);
+    const rent_now = housing._int(hh.weekly_rent);
+    const question = `${LANDLORD} is selling ${home.name}, the house you rent ($${rent_now}/week), and has given your `
+      + `household notice: you have to move out by ${due}. Your household has `
+      + `$${commas(_whole(housing.funds(sim, hh)))} put by. What do you do?`;
+    return new Fork(agent.id, "house_hunt", question, [first, second, third, wait], now, { major: true });
   }
 
   const _whole = x => H()._int(x);
@@ -566,12 +637,12 @@
 
   G.housing_forks = {
     MAJOR_KINDS, NO_CANDIDATE_RETRY, HUNT_COOLDOWN, UPKEEP_COOLDOWN, REPAIR_COOLDOWN, TROUBLE_COOLDOWN, RENT_CUT,
-    DOWNSIZE_AFTER_DAYS, DOWNSIZE_AFTER_MOVE_DAYS, DOWNSIZE_BASE, DOWNSIZE_RETIRED, DOWNSIZE_DRIFT, DOWNSIZE_DRIFT_MAX,
-    DOWNSIZE_SCARCE, DOWNSIZE_SETTLE, DOWNSIZE_SETTLED, DOWNSIZE_STAY, HELP_MARGIN, HELP_RICH,
-    REPAIR_FRIEND, HELP_FRIEND, HANDYMAN, PIZZA, BUILDERS_WORKS, EMERGENCY_WORKS, UPKEEP_BELOW, FRESH_DAYS,
-    FRESH_BELOW, TRADE, WAIT, TROUBLE, LOOKS, GOSSIP, _hh_window, _ready, _first, _stage_note, _has_kids, _friend,
-    _partner, _move_outcomes, house_hunt_fork, _keep_looking, _downsize_months, _downsize_hunt, _whole, upkeep_fork,
-    repair_fork, _trouble, _downsize_outcomes, _move_down, _smallest, _sell_and_buy, _sell_and_rent, _chain, _fallbacks,
-    housing_trouble_fork,
+    DOWNSIZE_AFTER_DAYS, DOWNSIZE_AFTER_MOVE_DAYS, DOWNSIZE_BASE, DOWNSIZE_RETIRED, DOWNSIZE_DRIFT,
+    DOWNSIZE_DRIFT_MAX, DOWNSIZE_SCARCE, DOWNSIZE_SETTLE, DOWNSIZE_SETTLED, DOWNSIZE_STAY, NOTICE_RETRY, NOTICE_LATER,
+    HELP_MARGIN, HELP_RICH, REPAIR_FRIEND, HELP_FRIEND, HANDYMAN, PIZZA, BUILDERS_WORKS, EMERGENCY_WORKS,
+    UPKEEP_BELOW, FRESH_DAYS, FRESH_BELOW, TRADE, WAIT, TROUBLE, LOOKS, GOSSIP, _hh_window, _ready, _first,
+    _stage_note, _has_kids, _friend, _partner, _move_outcomes, house_hunt_fork, _keep_looking, _downsize_months,
+    _downsize_hunt, _notice_hunt, _whole, upkeep_fork, repair_fork, _trouble, _downsize_outcomes, _move_down,
+    _smallest, _sell_and_buy, _sell_and_rent, _chain, _fallbacks, housing_trouble_fork,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

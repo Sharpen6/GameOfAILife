@@ -36,6 +36,14 @@
   const MARKET_FLOOR = 20; // a home held for sale never drops below "neglected"
   const NEWS_SETTLE_DAYS = 1; // a home's poor stage is not news until its household has lived there this long
   const LANDLORD_SELLS_DAYS = 14; // with no other house for sale this long, the landlord sells a let house left empty
+  const NOTICE_FROM_DAY = 120; // from this game day, while no house is for sale (house_drought), the landlord sells a let house
+  const NOTICE_DAYS = 14; // ... with notice: the tenants have this long to move out, and then it goes on the market ...
+  const NOTICE_GAP_DAYS = 30; // ... at most once in this many days in the town ...
+  const NOTICE_SETTLED_DAYS = 120; // ... and never to tenants who moved in less than this long ago
+  // when tenants buy the house, the next notice keeps its sale date but gives at least this long
+  const NOTICE_MIN_DAYS = 7;
+  // it gives notice (but at once after tenants buy), and lists a house whose notice ran out, at this hour
+  const NOTICE_HOUR = 9;
   const WINTER_DECAY = 1.25;
   const CROWD_DECAY = 0.10; // +10% decay per resident beyond two
   const EMERGENCY_DECAY = 4.0; // extra decay per day while an emergency is unfixed
@@ -171,7 +179,19 @@
       this.held_for = null; // the household whose offer holds it while under offer (null: another buyer)
       this.pending_emergency = null; // hidden {kind, due}: never serialised
       this.emergency = null; // live {kind, since}: public
-      this.history = []; // {tick, time, event, household, price}
+      this.history = []; // {tick, time, event, household, price}; off_market on the "bought" row of a let house its
+      // tenants bought from the landlord (`buy_let_home`)
+      // The owner household's adults' shares of the home, adult id -> share summing to 1: what each one paid of the
+      // price when the household bought it. Empty (equal shares) for a home a household had at the start, or one
+      // nobody paid for; emptied when the home goes back on the market.
+      this.shares = {};
+      // The landlord's notice on a let house it is selling, {household, since, due} (ticks): the tenants move out
+      // by "due" and the house goes on the market then (`give_notice`), unless they buy it. `noticed` is NOTICE_DAYS
+      // before the sale of the last notice given here (when it was given, unless it took over the date of a sale the
+      // tenants bought out), kept after that and moved on a day for each day its sale waits for the tenants to go, so
+      // the landlord's sales are NOTICE_GAP_DAYS apart (`landlord_notices`); cleared when the tenants buy the house.
+      this.notice = null;
+      this.noticed = null;
     }
   }
 
@@ -311,13 +331,26 @@
     return crowded(sim, hh) ? c * 0.9 : c;
   }
 
-  // {cash, savings, home} in whole dollars. Savings include the savings-goal pot; home is an adult's equal
-  // share of an owned home's value.
+  // Each living adult's share of the household's home, adult id -> share summing to 1: the shares recorded when
+  // the household bought it (`Home.shares`), so the share of an adult who has died passes to the others in
+  // proportion to theirs, and an adult who paid nothing holds none. Equal shares when none is recorded (a home the
+  // household had at the start) or nobody who paid is left.
+  function home_shares(sim, hh) {
+    const people = adults(sim, hh);
+    const recorded = sim.homes.get(hh.home_id).shares;
+    const held = sum(people.map(a => getd(recorded, a.id, 0.0)));
+    const out = {};
+    for (const a of people) out[a.id] = held <= 0 ? 1 / people.length : getd(recorded, a.id, 0.0) / held;
+    return out;
+  }
+
+  // {cash, savings, home} in whole dollars. Savings include the savings-goal pot; home is an adult's share of an
+  // owned home's value (`home_shares`: by what each adult paid for it, equal for a starting home).
   function worth_parts(sim, agent) {
     const hh = sim.households.get(agent.household_id);
     let home = 0.0;
     if (agent.alive && agent.is_adult && tenure(sim, hh) === "owned") {
-      home = value(sim, hh.home_id) / Math.max(1, adults(sim, hh).length);
+      home = value(sim, hh.home_id) * getd(home_shares(sim, hh), agent.id, 0.0);
     }
     const saved = agent.goal ? agent.goal.saved : 0.0;
     return { cash: _int(agent.money), savings: _int(agent.savings + saved), home: _int(home) };
@@ -354,23 +387,30 @@
   }
 
   // Pay `amount` from the household's living adults, in proportion to each one's max(0, money + savings)
-  // (equally when every one is at or below zero). Each share comes out of savings first, then money, which may
-  // go negative. A negative amount (money coming in) is split equally into the adults' savings.
-  function pay_household(sim, hh, amount) {
+  // (equally when every one is at or below zero), and return what each paid, adult id -> dollars. Each share comes
+  // out of savings first, then money, which may go negative. A negative amount (money coming in) goes into the
+  // adults' savings: by `shares` (adult id -> share, as `home_shares` gives them) when given, else equally; nobody
+  // pays anything then, so the return is empty.
+  function pay_household(sim, hh, amount, shares = null) {
     const payers = adults(sim, hh);
-    if (!payers.length || !amount) return;
+    if (!payers.length || !amount) return {};
     if (amount < 0) {
-      for (const a of payers) a.savings += -amount / payers.length;
-      return;
+      for (const a of payers) {
+        a.savings += shares !== null ? -amount * getd(shares, a.id, 0.0) : -amount / payers.length;
+      }
+      return {};
     }
     const weights = payers.map(a => Math.max(0.0, a.money + a.savings));
     const total = sum(weights);
+    const paid = {};
     payers.forEach((a, i) => {
       const due = amount * (total > 0 ? weights[i] / total : 1 / payers.length);
       const take = Math.min(Math.max(a.savings, 0.0), due);
       a.savings -= take;
       a.money -= due - take;
+      paid[a.id] = due;
     });
+    return paid;
   }
 
   // --- money, affordability and the market -------------------------------------------------
@@ -507,15 +547,18 @@
   }
 
   // No house or big house other than `but` has been for sale for LANDLORD_SELLS_DAYS: none is for sale now
-  // (under offer included) and none was bought in that time (a home is for sale until it is bought). The landlord
-  // then sells a let house its tenants leave, and owners who have outgrown their homes think harder about selling.
+  // (under offer included) and none was bought in that time (a home is for sale until it is bought; one its tenants
+  // bought from the landlord, marked off_market, never was). The landlord then sells a let house its tenants leave,
+  // and owners who have outgrown their homes think harder about selling.
   function house_drought(sim, but = null) {
     const now = sim.clock.tick;
     if (now < LANDLORD_SELLS_DAYS * DAY) return false;
     for (const h of sim.homes.values()) {
       if (h.tier === "flat" || h.id === but) continue;
       if (h.household === null && h.listing === "for_sale") return false;
-      if (h.history.some(r => r.event === "bought" && now - r.tick < LANDLORD_SELLS_DAYS * DAY)) return false;
+      if (h.history.some(r => r.event === "bought" && !r.off_market && now - r.tick < LANDLORD_SELLS_DAYS * DAY)) {
+        return false;
+      }
     }
     return true;
   }
@@ -524,6 +567,39 @@
   function cheapest_rental(sim, hh, below = null, per_bedroom = 2) {
     const pool = vacancies(sim, "for_rent").filter(h => fits(sim, hh, h, per_bedroom) && (below === null || h.rent < below));
     return pool.length ? minBy(pool, h => [h.rent, -condition_of(sim, h.id), h.id]) : null;
+  }
+
+  // The let house the household lives in while the landlord is selling it with notice (`give_notice`), else null.
+  function under_notice(sim, hh) {
+    const home = sim.homes.get(hh.home_id);
+    return home.notice !== null && home.household === hh.id ? home : null;
+  }
+
+  // Tenants under notice could buy the let house they live in from the landlord at its value: `affordable`'s rules
+  // for a purchase (the reserve of the new weekly outgo is left, and the home is carried for a year). The landlord
+  // keeps a let house above LANDLORD_FLOOR, so it needs no renovation.
+  function can_buy_let_home(sim, hh) {
+    const home = sim.homes.get(hh.home_id);
+    const left = funds(sim, hh) - value(sim, home.id);
+    const outgo = home.base_value * PROPERTY_TAX + getd(TIERS[home.tier], "upkeep_est", 0) + bills(sim, hh)
+      + living(sim, hh) + commute(sim, hh);
+    return left >= RESERVE_WEEKS * outgo && (weekly_income(sim, hh) - outgo) * 52 + left >= 0;
+  }
+
+  // The let house the landlord sells with notice: one whose tenants have lived there since the start or for at least
+  // NOTICE_SETTLED_DAYS and have a fitting home to let to go to; the longest-standing tenants first (ties: id).
+  function notice_home(sim) {
+    const now = sim.clock.tick;
+    const pool = [];
+    for (const h of sim.homes.values()) {
+      if (h.owner !== "landlord" || h.tier === "flat" || h.household === null) continue;
+      const hh = sim.households.get(h.household);
+      if (hh.moved_tick !== null && now - hh.moved_tick < NOTICE_SETTLED_DAYS * DAY) continue;
+      if (adults(sim, hh).length && cheapest_rental(sim, hh) !== null) {
+        pool.push([hh.moved_tick === null ? -1 : hh.moved_tick, h.id, h]);
+      }
+    }
+    return pool.length ? minBy(pool, row => [row[0], row[1]])[2] : null;
   }
 
   const owner_occupied = home => home.household !== null && home.owner === home.household;
@@ -729,11 +805,14 @@
   // household can't raise the money after all (`check=false` skips the affordability gate, for a step down to a
   // rental out of housing trouble).
   //
-  // The old home is freed and listed (an owned one for sale at its value, with the sale credited to the
-  // household's savings; a rented one back to let, unless it is a house and no other house has been for sale
-  // for LANDLORD_SELLS_DAYS: then the landlord sells it). The van and the price are paid from the household pot.
-  // Members free to drop what they are doing set off for the new home; the rest go there the next time they
-  // head home. `plan_decider=false` leaves the decider alone, for a fork option whose own steps go there.
+  // The old home is freed and listed (an owned one for sale at its value, with the sale credited to the adults'
+  // savings by their shares of it; a rented one back to let, unless it is a house and no other house has been for
+  // sale for LANDLORD_SELLS_DAYS: then the landlord sells it; one the landlord gave the household notice on stays
+  // empty until the notice runs out, `landlord_notices`). The van and the price are paid from the household
+  // pot, and a home bought records each adult's share of it as their part of that payment, so buying moves an
+  // adult's money into their own equity, never into another's. Members free to drop what they are doing set off
+  // for the new home; the rest go there the next time they head home. `plan_decider=false` leaves the decider
+  // alone, for a fork option whose own steps go there.
   function move_household(sim, hh, home_id, how, factor = 1.0, decider = null, forced = null, plan_decider = true,
     check_money = true) {
     const nw = sim.homes.get(home_id);
@@ -753,18 +832,20 @@
     const owned = old.owner === hh.id;
     const buy = how === "buy";
     const proceeds = owned ? sale_proceeds(sim, old.id) : 0;
-    const sells = old.owner === "landlord" && old.tier !== "flat" && house_drought(sim, nw.id);
+    const sells = old.owner === "landlord" && old.tier !== "flat" && old.notice === null && house_drought(sim, nw.id);
     // Leave the old home: an owned one goes on the market, a rented one back to the landlord (who sells a
-    // house when there has been none for sale for a while).
+    // house when there has been none for sale for a while, and keeps one it gave notice on empty until the
+    // notice runs out).
     if (owned) {
-      pay_household(sim, hh, -proceeds);
+      pay_household(sim, hh, -proceeds, home_shares(sim, hh));
       old.owner = "market";
       old.listing = "for_sale";
+      old.shares = {};
     } else if (sells) {
       old.owner = "market";
       old.listing = "for_sale";
     } else {
-      old.listing = "for_rent";
+      old.listing = old.notice !== null ? null : "for_rent";
     }
     old.household = null;
     release(old);
@@ -777,9 +858,11 @@
     // Pay and take the new home.
     const price = buy ? _int(value(sim, home_id) * factor) : 0;
     const van = buy || !(forced || (hh.arrears > 0 && !owned)) ? MOVING_COST : 0;
-    pay_household(sim, hh, price + van);
+    const dues = pay_household(sim, hh, price + van);
     if (buy) {
       nw.owner = hh.id;
+      nw.shares = {}; // one split pays the price and the van
+      for (const [aid, due] of Object.entries(dues)) nw.shares[aid] = due / (price + van);
       hh.weekly_rent = 0;
     } else {
       hh.weekly_rent = _int(nw.rent * factor);
@@ -845,6 +928,97 @@
     pay_household(sim, hh, cost);
     lot.works_until = Math.max(lot.works_until, sim.clock.tick + RENOVATE_WORKS_MINUTES);
     _change_condition(sim, lot, 100 - lot.condition);
+  }
+
+  // --- group B: the landlord sells a let house with notice --------------------------------------
+
+  // The landlord is selling a let house: its tenants have NOTICE_DAYS to move out, or until `due` when the notice
+  // takes over the date of a sale the last tenants bought out (`buy_let_home`); house_hunt's notice variant asks them
+  // where to go at once, and the house goes on the market when the notice runs out (`landlord_notices`).
+  function give_notice(sim, home, due = null) {
+    const hh = sim.households.get(home.household);
+    const now = sim.clock.tick;
+    due = due === null ? now + NOTICE_DAYS * DAY : due;
+    home.notice = { household: hh.id, since: now, due };
+    home.noticed = due - NOTICE_DAYS * DAY;
+    delete hh.cooldowns.house_hunt;
+    const notice = due - now === NOTICE_DAYS * DAY ? `${Math.floor(NOTICE_DAYS / 7)} weeks' notice`
+      : `notice to move out by ${stamp_of(due)}`;
+    _event(sim, `${LANDLORD} is selling ${home.name} and gives ${_hh_lower(sim, hh)} ${notice}.`, "home_listed",
+      home.place, adults(sim, hh)[0] || null, _members(sim, hh).map(a => a.id));
+  }
+
+  // NOTICE_HOUR every day. A house whose notice has run out goes on the market, its tenants moved first into the
+  // cheapest fitting home to let if they are still there (an eviction: the landlord's van, no affordability gate;
+  // crowding relaxed to FORCED_CROWDING when nothing else fits, and another day's wait when nothing is free, which
+  // the next notice waits too). The sale is when the notice runs out however soon the tenants go, so the landlord's
+  // sales are as far apart as its notices. Then the landlord may give a notice (`_landlord_sells`).
+  function landlord_notices(sim) {
+    const now = sim.clock.tick;
+    for (const home of sim.homes.values()) {
+      if (home.notice === null || home.notice.due > now) continue;
+      if (home.household !== null) {
+        const hh = sim.households.get(home.household);
+        const rental = cheapest_rental(sim, hh) || cheapest_rental(sim, hh, null, FORCED_CROWDING);
+        if (rental === null || !move_household(sim, hh, rental.id, "rent", 1.0, null, "evicted")) {
+          home.notice.due += DAY;
+          home.noticed += DAY;
+          continue;
+        }
+      }
+      home.notice = null;
+      home.owner = "market";
+      home.listing = "for_sale";
+      _event(sim, `${LANDLORD} puts ${home.name} up for sale ($${commas(value(sim, home.id))}).`, "home_listed",
+        home.place);
+    }
+    _landlord_sells(sim);
+  }
+
+  // From day NOTICE_FROM_DAY, while no house has been for sale for LANDLORD_SELLS_DAYS (`house_drought`), no notice
+  // is running and none was given in the last NOTICE_GAP_DAYS (counted from NOTICE_DAYS before its sale,
+  // `Home.noticed`), the landlord gives notice on one let house (`notice_home`), to move out by `due` when given.
+  function _landlord_sells(sim, due = null) {
+    const now = sim.clock.tick;
+    const homes = Array.from(sim.homes.values());
+    if (now < NOTICE_FROM_DAY * DAY || homes.some(h => h.notice !== null) || !house_drought(sim)) return;
+    if (homes.some(h => h.noticed !== null && now - h.noticed < NOTICE_GAP_DAYS * DAY)) return;
+    const home = notice_home(sim);
+    if (home !== null) give_notice(sim, home, due);
+  }
+
+  // Tenants under notice buy the let house they live in from the landlord at its value, paid from the household
+  // pot; each adult's share of it is what they paid, and the notice ends. The house was never on the market, so the
+  // purchase leaves a house drought standing (its "bought" row is marked off_market) and doesn't count towards the
+  // gap between the landlord's sales: the landlord gives notice on the next let house at once (`_landlord_sells`),
+  // to move out by the same date, so its sale is not put off (but never less than NOTICE_MIN_DAYS from now). Returns
+  // false, with a too_late event, when the notice is over or they can't raise the money after all.
+  function buy_let_home(sim, hh, agent = null) {
+    const home = sim.homes.get(hh.home_id);
+    const who = household_name(sim, hh);
+    if (under_notice(sim, hh) === null || !can_buy_let_home(sim, hh)) {
+      _event(sim, `${who} can't buy ${home.name} after all.`, "too_late", home.place, agent);
+      return false;
+    }
+    const now = sim.clock.tick, stamp = sim.clock.stamp();
+    const price = value(sim, home.id);
+    const sale = home.notice.due;
+    const dues = pay_household(sim, hh, price);
+    home.owner = hh.id;
+    home.listing = null;
+    home.notice = null;
+    home.noticed = null;
+    home.shares = {};
+    for (const [aid, due] of Object.entries(dues)) home.shares[aid] = due / price;
+    hh.weekly_rent = 0;
+    hh.hardship_rent = null;
+    _history(hh.history, { tick: now, time: stamp, event: "bought", home: home.id, name: home.name, price });
+    _history(home.history, { tick: now, time: stamp, event: "bought", household: hh.id, price, off_market: true });
+    _event(sim, `${who} ${_one(sim, hh) ? "buys" : "buy"} ${home.name} (${TIERS[home.tier].label}, `
+      + `${district_name(sim, home)}) from ${LANDLORD} for $${commas(price)}.`, "home_bought", home.place, agent,
+    _members(sim, hh).map(a => a.id));
+    _landlord_sells(sim, Math.max(sale, now + NOTICE_MIN_DAYS * DAY));
+    return true;
   }
 
   // The floor under a household deep in the red (PLAN 5.5): a cheaper rental (owners: any rental, after a
@@ -1109,9 +1283,10 @@
   }
 
   // Every tick, before the agents: a pending emergency whose time has come goes live, and one left unfixed
-  // for EMERGENCY_DAYS settles as lost condition.
+  // for EMERGENCY_DAYS settles as lost condition; at NOTICE_HOUR, the landlord's notices (`landlord_notices`).
   function tick(sim) {
     const now = sim.clock.tick;
+    if (sim.clock.minute_of_day === NOTICE_HOUR * 60) landlord_notices(sim);
     for (const home of sim.homes.values()) {
       const pending = home.pending_emergency;
       if (pending && pending.due <= now) {
@@ -1158,10 +1333,11 @@
     if (home.owner === hh.id) {
       home.owner = "market";
       home.listing = "for_sale";
+      home.shares = {};
       _event(sim, `${home.name} goes on the market after ${agent.name}'s death.`, "home_listed", home.place, null,
         [agent.id]);
     } else {
-      home.listing = "for_rent";
+      home.listing = home.notice !== null ? null : "for_rent"; // a notice's sale goes ahead when it runs out
     }
   }
 
@@ -1178,8 +1354,8 @@
 
   // The housing extras of a chosen option, at decision time (PLAN 3.11): move (with what comes only if the move
   // goes through: settle, household cooldowns {key: minutes}, and renovate, the price of doing up the home
-  // bought), hold, repair, works, fix_emergency, hh_cooldown, belt_tighten, sell_car, sell_stuff, ask_help and
-  // odd_jobs.
+  // bought), buy_let (tenants under notice buy the house they rent), hold, repair, works, fix_emergency, hh_cooldown,
+  // belt_tighten, sell_car, sell_stuff, ask_help and odd_jobs.
   function apply_extra(sim, agent, fork, opt) {
     const extra = (opt && opt.extra) || {};
     if (!Object.keys(extra).length) return;
@@ -1196,6 +1372,7 @@
         _call_off(agent, opt); // nothing to move into
       }
     }
+    if ("buy_let" in extra && !buy_let_home(sim, hh, agent)) _call_off(agent, opt);
     if ("hold" in extra) { // an offer: nobody else takes the home while the seller thinks it over
       const home = sim.homes.get(extra.hold);
       if (available(sim, hh, home)) {
@@ -1331,22 +1508,24 @@
 
   G.housing = {
     TIERS, STAGES, STAGE_COMFORT, LANDLORD, LANDLORD_FLOOR, LANDLORD_RESTORE, VACANT_DECAY, MARKET_FLOOR,
-    NEWS_SETTLE_DAYS, LANDLORD_SELLS_DAYS, WINTER_DECAY, CROWD_DECAY, EMERGENCY_DECAY, PROPERTY_TAX, SALE_FEE,
-    MOVING_COST, CALLOUT, RENO_FACTOR, RESERVE_WEEKS, MOVE_GAP_DAYS, DOWNSIZE_SHARE, DOWNSIZE_CONDITION,
-    SPARE_BEDROOMS, CAR_SALE, EMERGENCY_DAYS, LIVING_PER_PERSON, LIVING_PER_RETIREE, ARREARS_PROGRESS, HARDSHIP_REPAY,
-    FORCED_CROWDING, STUFF_DAYS, GRACE_DAYS, GRACE_HOLD_DAYS, ODD_JOBS_DAYS, ODD_JOBS_PAY, STUFF_PRICE,
-    EMERGENCY_KINDS, EMERGENCY_TEXT, DAY, MOVE_VAN_MINUTES, LANDLORD_WORKS_MINUTES, RENOVATE_WORKS_MINUTES,
-    UNDER_OFFER_DAYS, OFFER_HOLD_MINUTES, SETTLE_DAMAGE, EMERGENCY_STAGE_P, WINTER_EMERGENCY, DAMP_HEALTH, DAMP_CHILL,
-    CHILL, STAGE_REPUTATION, KEPT_BIG_HOUSE_PRIDE, STAGE_NEWS, EMERGENCY_NEWS, EMERGENCY_NAME, ORDINALS, HOME_SPECS,
+    NEWS_SETTLE_DAYS, LANDLORD_SELLS_DAYS, NOTICE_FROM_DAY, NOTICE_DAYS, NOTICE_GAP_DAYS, NOTICE_SETTLED_DAYS,
+    NOTICE_MIN_DAYS, NOTICE_HOUR, WINTER_DECAY, CROWD_DECAY, EMERGENCY_DECAY, PROPERTY_TAX, SALE_FEE, MOVING_COST,
+    CALLOUT, RENO_FACTOR, RESERVE_WEEKS, MOVE_GAP_DAYS, DOWNSIZE_SHARE, DOWNSIZE_CONDITION, SPARE_BEDROOMS, CAR_SALE,
+    EMERGENCY_DAYS, LIVING_PER_PERSON, LIVING_PER_RETIREE, ARREARS_PROGRESS, HARDSHIP_REPAY, FORCED_CROWDING,
+    STUFF_DAYS, GRACE_DAYS, GRACE_HOLD_DAYS, ODD_JOBS_DAYS, ODD_JOBS_PAY, STUFF_PRICE, EMERGENCY_KINDS,
+    EMERGENCY_TEXT, DAY, MOVE_VAN_MINUTES, LANDLORD_WORKS_MINUTES, RENOVATE_WORKS_MINUTES, UNDER_OFFER_DAYS,
+    OFFER_HOLD_MINUTES, SETTLE_DAMAGE, EMERGENCY_STAGE_P, WINTER_EMERGENCY, DAMP_HEALTH, DAMP_CHILL, CHILL,
+    STAGE_REPUTATION, KEPT_BIG_HOUSE_PRIDE, STAGE_NEWS, EMERGENCY_NEWS, EMERGENCY_NAME, ORDINALS, HOME_SPECS,
     LOT_CONDITION, START_OWNER, START_LISTING, ACTIVITIES_EXTRA, Home, Lot, build_homes, build_lots, init, _int,
     round50, stamp_of, stage_of, stage_name, condition_of, value, sale_proceeds, property_tax, listed, hold, release,
-    adults, residents, crowded, funds, tenure, weekly_cost, comfort, worth_parts, net_worth, household_name,
-    household_summary, pay_household, round10, retired, weekly_income, bills, living, commute, buys, housing_cost,
-    weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates, outgrown,
-    downsize_candidates, house_drought, cheapest_rental, owner_occupied, lot_homes, hardship_rent, _one, _hh_lower,
-    _hh_possessive, district_name, town_homes_json, town_housing_json, lots_json, homes_json, possessions_json,
-    fork_you, agent_page_fields, market_json, home_page, _members, available, too_late, move_household, renovate,
-    forced_move, weekly_charges, _stage_news, _just_moved_in, _change_condition, nightly, tick, fix_emergency,
-    on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale, afford_score,
+    adults, residents, crowded, funds, tenure, weekly_cost, comfort, home_shares, worth_parts, net_worth,
+    household_name, household_summary, pay_household, round10, retired, weekly_income, bills, living, commute, buys,
+    housing_cost, weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates,
+    outgrown, downsize_candidates, house_drought, cheapest_rental, under_notice, can_buy_let_home, notice_home,
+    owner_occupied, lot_homes, hardship_rent, _one, _hh_lower, _hh_possessive, district_name, town_homes_json,
+    town_housing_json, lots_json, homes_json, possessions_json, fork_you, agent_page_fields, market_json, home_page,
+    _members, available, too_late, move_household, renovate, give_notice, landlord_notices, _landlord_sells,
+    buy_let_home, forced_move, weekly_charges, _stage_news, _just_moved_in, _change_condition, nightly, tick,
+    fix_emergency, on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale, afford_score,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));
