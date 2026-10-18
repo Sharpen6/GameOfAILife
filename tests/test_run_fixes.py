@@ -484,24 +484,41 @@ class Invites(unittest.TestCase):
 
     def test_a_friend_asked_on_a_walk_comes_along(self):
         # The lonely fork's "Ask <friend> to walk in <park>": the invite once lapsed within a minute, as a walk was
-        # not an activity an invite meets at, so the friend never saw it.
+        # not an activity an invite meets at, so the friend never saw it. On a Sunday morning of a running city each
+        # idle adult asks the friend on the walk: the invite stays pending until the friend's invite fork answers it,
+        # and an accepted walk has both walking in the park together.
         sim = Simulation(1)
-        statuses = collections.Counter()
-        together = set()
-        for _ in range(14 * MINUTES_PER_DAY):
+        while sim.clock.tick < 6 * MINUTES_PER_DAY + 10 * 60:  # Day 7 Sun 10:00
             sim.step()
-            for inv in sim.invites.values():
-                host, guest = sim.agents[inv["from"]], sim.agents[inv["to"]]
-                if not host.is_adult or sim.town.places[inv["place"]].kind != "park":
-                    continue
-                statuses[inv["id"], inv["status"]] += 1
-                if (inv["status"] == "accept" and host.activity == guest.activity == "walk_park"
+        together, answered = set(), 0
+        hosts = [a for a in sorted(sim.agents.values(), key=lambda a: a.id)
+                 if a.is_adult and a.activity == "idle" and not sim.on_shift_now(a)][:6]
+        self.assertGreaterEqual(len(hosts), 3)
+        for host in hosts:
+            host.needs["social"] = 10
+            fork = forks.lonely_fork(sim, host)
+            ask = [k for k, o in enumerate(fork.options) if o.label.startswith("Ask ")] if fork else []
+            if not ask:
+                continue
+            sim._decide(host, fork, ask[0], "model", "")
+            inv = next(i for i in sim.invites.values() if i["from"] == host.id and i["status"] == "pending")
+            guest = sim.agents[inv["to"]]
+            sim.step()
+            self.assertEqual(inv["status"], "pending", (host.id, guest.id))  # it no longer lapses at once
+            reply = forks.invite_fork(sim, guest)
+            if reply is None:  # the friend is off to work or the park is shut by then: the invite waits
+                continue
+            answered += 1
+            sim._decide(guest, reply, [o.extra["answer"] for o in reply.options].index("accept"), "model", "")
+            for _ in range(90):
+                sim.step()
+                if (host.activity == guest.activity == "walk_park"
                         and host.activity_place == guest.activity_place == inv["place"]
                         and host.state == guest.state == "busy"):
                     together.add(inv["id"])
-            if together:
-                break
-        self.assertTrue(together, sorted(statuses))
+                    break
+        self.assertGreaterEqual(answered, 2)
+        self.assertGreaterEqual(len(together), 2, together)
 
 
 class ScheduleLine(unittest.TestCase):

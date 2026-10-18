@@ -869,18 +869,25 @@
   }
 
   // When bored (fun under 40) or, for a child, cooped up at home (cooped_up), from 08:00 to 21:00 off shift.
+  // free_time: under this age a child plays, never hangs out at a cafe alone
+  const CHILD_AGE = 13;
+
+  // When bored: see forks.py. Nobody kept home by an illness goes out for fun; a child under CHILD_AGE plays
+  // (`_play`) rather than hang out at a cafe, and draws and builds at home rather than work on a side project.
   function free_time_fork(sim, agent) {
     const hour = sim.clock.hour;
     if (!(8 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1) || in_work_window(sim, agent)) return null;
+    if (!G.life.can_work(sim, agent)) return null; // off sick or on the ward: they rest
     const family = family_fork(sim, agent); // Saturday evening: the family first (FIXLISTS 6)
     if (family) return family;
     const idle = agent.is_adult && (agent.idle_home ?? 0) >= IDLE_HOME + personal(agent, IDLE_SPREAD);
     if (agent.needs.fun >= 40 && !idle && (agent.is_adult || cooped_up(sim, agent) <= 0)) return null;
     const park = _park(sim, agent);
-    const short = _short_of(agent, 6);
+    const child = agent.age < CHILD_AGE;
+    const short = child || _short_of(agent, 6);
     const cafe = !short ? _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES) : null; // open for all of it
     let out;
-    if (short) { // a child without the $6: off to play instead
+    if (short) { // a young child, or a child without the $6: off to play instead
       out = _play(sim, agent);
     } else if (cafe) {
       out = new Option(`Hang out at ${cafe.name}`, [["hang_out", cafe.id]], { cost: 6, tags: { social: 0.8, thrift: -0.3 },
@@ -897,7 +904,8 @@
         outcomes: [new Outcome("unwind", "Properly unwinds", 0.5, +1, { fun: 6 }, "relax"),
           new Outcome("restless", "Gets restless and bored", 0.3, -1, { fun: -6 }, "relax")] }),
       out,
-      new Option("Work on a side project", [["side_project", "home"]], { tags: { diligence: 0.6, adventure: 0.5, social: -0.3 },
+      new Option(child ? "Draw and build at home" : "Work on a side project", [["side_project", "home"]],
+        { tags: { diligence: 0.6, adventure: 0.5, social: -0.3 },
         gains: { fun: 25 },
         outcomes: [new Outcome("breakthrough", "Makes a breakthrough", 0.15, +1,
           agent.is_adult ? { fun: 15, money: 50 } : { fun: 20 }, "project"),
@@ -962,6 +970,6 @@
     DINNER_FROM, DINNER_UNTIL, LONELY_IDLE_COOLDOWN, _curfew,
     _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,
     work_lead, work_fork, sleep_fork, hunger_fork,
-    payday_fork, groceries_fork, lonely_fork, free_time_fork, BUILDERS, COOLDOWN, builders, build_fork,
+    payday_fork, groceries_fork, lonely_fork, free_time_fork, CHILD_AGE, BUILDERS, COOLDOWN, builders, build_fork,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

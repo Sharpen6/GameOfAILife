@@ -35,12 +35,26 @@
   const CPU_KEEP = 1440; // ticks of timings kept for the perf report
   const WARD = "ward";
   const FREE = ["relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-    "idle", "stroll", "movie", "golf", "read", "order_groceries"]; // activities that can be interrupted (is_free)
+    "idle", "stroll", "movie", "golf", "read", "order_groceries", "play_home", "draw_home",
+    "play"]; // activities that can be interrupted (is_free)
+  // A child under PLAY_AGE has a child's choices: play at home, draw and read, play in the park (or outside), never
+  // the grocery run, shopping, days out or cafes on their own.
+  const PLAY_AGE = 12;
+  // An under-5 is cared for: at home with a household member aged CARER_AGE or over, else at the nursery (the
+  // nearest school, while it is open) or with a sitter at home; awake they look again every NURSERY_CHECK minutes.
+  const CARER_AGE = 14, NURSERY_CHECK = 30;
+  // Going out: see folk.py (OUTING_BONUS and the rest).
+  const OUTING_BONUS = 0.2, RETIRED_OUTING = 0.1;
+  const OUT_FROM = 9 * 60, OUT_UNTIL = 18 * 60, OUT_LATE = 21 * 60;
+  const DINNER_OUT_WEEKEND = 0.25, DINNER_OUT_HUNGRY = 0.15;
+  const LUNCH_OUT = [12 * 60, 14 * 60], LUNCH_HUNGER = 75;
 
   // activity -> [need gains over the whole stay, outdoors]. Decay is folk_model's (DECAY_SCALE by activity).
   const ACT = {
     sleep: [{}, false], // energy: SLEEP_ENERGY a minute (v2's 0.17)
     baby: [{}, false],
+    sitter: [{}, false], // an under-5 at home with a sitter
+    nursery: [{ social: 20, fun: 10 }, false], // an under-5 at the nursery
     eat_home: [{ hunger: 60, social: 4 }, false],
     relax_home: [{ fun: 25, energy: 5 }, false],
     dinner_home: [{ hunger: 50, social: 10, fun: 5 }, false],
@@ -58,11 +72,15 @@
     movie: [{ fun: 45, social: 10 }, false],
     golf: [{ fun: 40, social: 15 }, false],
     read: [{ fun: 25 }, false],
+    play_home: [{ fun: 30, social: 10 }, false], // a child's play at home
+    draw_home: [{ fun: 25, energy: 5 }, false], // a child drawing and reading at home
+    play: [{ fun: 35, social: 20 }, true], // a child playing in the park
     ward: [{ hunger: 40 }, false],
     idle: [{}, false],
   };
   const SLEEP_ENERGY = 0.17;
-  const HOME_ACTS = ["sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries"];
+  const HOME_ACTS = ["sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries",
+    "play_home", "draw_home", "sitter"];
   const KEEP_OPEN = HOME_ACTS.concat(["work", "school", WARD, "idle"]); // stays that do not end at closing time
   const LEISURE = { // favourite key -> [place kind, styles or null for any]
     coffee: ["cafe", ["cafe", "bakery"]],
@@ -343,7 +361,7 @@
         this.occupants.set(place_id, occ);
       }
       occ.set(p.i, null);
-      if (p.activity === "walk_park") {
+      if (p.activity === "walk_park" || p.activity === "play") {
         this.strollers.set(p.i, place_id);
       } else {
         const k = this.pidx.get(place_id);
@@ -500,10 +518,7 @@
       const [day, m] = divmod(now, DAY);
       const home = this.home_place(p);
       if (p.age < 5) {
-        if (home !== null && p.inside !== home) this._enter(p, home);
-        p.activity = "baby";
-        p.state = "busy";
-        this._begin(p, now, "baby", this._wake_tick(p, now) - now);
+        this._little_one(p, now, home);
         return;
       }
       const act = p.activity;
@@ -574,6 +589,63 @@
     }
 
     // Off sick: rest at home until the next of SICK_MEALS or bedtime (overnight, until they wake).
+    // An under-5 is never left alone: at home (baby) while a household member aged CARER_AGE or over is there;
+    // with nobody home, at the nursery (the nearest school, inside and not drawn) while it is open, else with a
+    // sitter at home. Awake, they look again every NURSERY_CHECK minutes (until bedtime); asleep, not until they wake.
+    _little_one(p, now, home) {
+      const day = Math.floor(now / DAY), m = now % DAY;
+      const bed = this._bed_minute(p);
+      const asleep = m >= bed || m < this._wake_minute(p, day);
+      const carer = asleep || this._carer_home(p, home);
+      const nursery = carer ? null : this._nursery(home, m);
+      if (nursery !== null) {
+        if (p.inside !== nursery) this._enter(p, nursery);
+        p.activity = "nursery";
+        p.state = "busy";
+        this._begin(p, now, "nursery", NURSERY_CHECK);
+        return;
+      }
+      if (home !== null && p.inside !== home) this._enter(p, home);
+      const act = carer ? "baby" : "sitter";
+      p.activity = act;
+      p.state = "busy";
+      const until = asleep ? this._wake_tick(p, now) : Math.min(now + NURSERY_CHECK, day * DAY + bed);
+      this._begin(p, now, act, until - now);
+    }
+
+    // Someone in p's household aged CARER_AGE or over is at home now (not on a trip).
+    _carer_home(p, home) {
+      const hh = this.hh_of(p);
+      if (hh === null || home === null) return false;
+      for (const mid of hh.member_ids) {
+        const q = this.person(mid);
+        if (q !== null && q !== undefined && q !== p && q.alive && !q.gone && q.age >= CARER_AGE && q.trip === null
+          && q.inside === home) return true;
+      }
+      return false;
+    }
+
+    // The nearest school to home on foot (allowed places), when it is open from m for NURSERY_CHECK minutes.
+    _nursery(home, m) {
+      if (home === null) return null;
+      const ck = `${home}|nursery`;
+      let got = this._fav_cache.get(ck);
+      if (got === undefined) {
+        const net = ft().net(this.town);
+        const cands = [];
+        for (const [pid, place] of this.town.places) {
+          if (place.kind === "school" && this.allowed(pid)) cands.push([net.minutes(home, pid, "walk"), pid]);
+        }
+        cands.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+        got = cands.length ? [cands[0][1]] : [];
+        this._fav_cache.set(ck, got);
+      }
+      if (!got.length) return null;
+      const place = this.town.places.get(got[0]);
+      if (place.hours && !(place.hours[0] * 60 <= m && m + NURSERY_CHECK <= place.hours[1] * 60)) return null;
+      return got[0];
+    }
+
     _sick_rest(sim, p, now) {
       const [day, m] = divmod(now, DAY);
       let until = this._bed_minute(p);
@@ -875,14 +947,17 @@
       const meal = home_act === "dinner_home"; // dinner at home takes DINNER_MINUTES, then they choose again
       const at_home = minutes => (meal ? DINNER_MINUTES : minutes);
       let opts;
-      if (kind === "after_work") {
+      if (5 <= p.age && p.age < PLAY_AGE) {
+        opts = this._child_options(p, now, kind, home, home_act, relax_gains, meal, at_home, bed);
+      } else if (kind === "after_work") {
         const cafe_key = hungry ? "eat_out" : "coffee";
         opts = [
           new Option(meal ? "Go home for dinner" : "Go home and relax", home_act, home, at_home(90), 0,
             { family: 0.3 }, relax_gains, 0.2),
           this._grocery_option(p, now, home, low ? 1.0 : -0.8),
           new Option(hungry ? "Eat out" : "Coffee", hungry ? "eat_out" : "coffee",
-            this._pick(p, cafe_key, now, 40), hungry ? 40 : 20, hungry ? MEAL_COST : COFFEE_COST,
+            this._pick(p, cafe_key, now, 40) || (hungry ? null : this._pick(p, "eat_out", now, 20)),
+            hungry ? 40 : 20, hungry ? MEAL_COST : COFFEE_COST,
             { social: 0.4, thrift: -0.3 }, ACT[hungry ? "eat_out" : "coffee"][0], 0.0),
           this._park_option(p, now, 60),
         ];
@@ -893,26 +968,80 @@
           ? this._grocery_option(p, now, home, 1.0)
           : new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
             { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05);
+        const lunch = LUNCH_OUT[0] <= m && m < LUNCH_OUT[1] && p._needs.hunger < LUNCH_HUNGER
+          ? this._pick(p, "eat_out", now, 45) : null;
         opts = [
           new Option(meal ? "Dinner at home" : "Stay home", home_act, home, at_home(120), 0, { family: 0.3 },
             relax_gains, 0.15),
           shop,
           this._hang_option(sim, p, now, 120),
-          ((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend) : null) ||
-            this._park_option(p, now, 90),
+          (lunch !== null ? new Option("Lunch out", "eat_out", lunch, 45, MEAL_COST, { social: 0.3, thrift: -0.3 },
+            ACT.eat_out[0], 0.1) : null)
+            || (((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend, shop.place) : null)
+            || this._park_option(p, now, 90)),
         ];
       } else { // evening
         const left = m < bed ? Math.max(30, bed - m) : 30;
+        const treat = ([4, 5].includes(Math.floor(now / DAY) % 7) ? DINNER_OUT_WEEKEND : 0.0)
+          + (hungry && low ? DINNER_OUT_HUNGRY : 0.0);
         opts = [
           new Option(meal ? "Dinner at home" : "Relax at home", home_act, home, at_home(left), 0,
             { family: 0.3 }, relax_gains, 0.25),
           new Option("Dinner out", "eat_out", this._pick(p, "eat_out", now, 60), 60, DINNER_COST,
-            { social: 0.3, thrift: -0.4 }, ACT.eat_out[0], -0.1),
+            { social: 0.3, thrift: -0.4 }, ACT.eat_out[0], -0.1 + treat),
           this._hang_option(sim, p, now, 120),
           new Option("Early night", "sleep", home, 0, 0, { health: 0.4 }, { energy: 30 }, 0.0),
         ];
       }
+      if (p.out_day !== Math.floor(now / DAY)) { // no outing yet today: going out appeals
+        const weekend = [4, 5].includes(Math.floor(now / DAY) % 7); // Friday and Saturday evenings
+        let bonus = kind === "day_off" && OUT_FROM <= m && m < OUT_UNTIL ? OUTING_BONUS
+          : kind === "after_work" ? OUTING_BONUS / 2
+            : kind === "evening" && m < OUT_LATE ? (weekend ? OUTING_BONUS : OUTING_BONUS / 2) : 0.0;
+        if (bonus) {
+          if (p.age >= 65 && p.job === null) bonus += RETIRED_OUTING;
+          for (const o of opts) {
+            if (o.place !== null && o.place !== undefined && (o.activity === "stroll" || o.place !== home)
+              && o.activity !== "sleep") o.base += bonus;
+          }
+        }
+      }
       return opts;
+    }
+
+    // A child's 4 options (under PLAY_AGE): home or dinner, play at home, play in the park (or outside round the
+    // block; an early night in the evening), draw and read at home. Free, and never an errand.
+    _child_options(p, now, kind, home, home_act, relax_gains, meal, at_home, bed) {
+      const m = now % DAY;
+      const play = { fun: 0.3, social: 0.3 };
+      if (kind === "evening") {
+        const left = m < bed ? Math.max(30, bed - m) : 30;
+        return [
+          new Option(meal ? "Dinner at home" : "Relax at home", home_act, home, at_home(left), 0,
+            { family: 0.3 }, relax_gains, 0.25),
+          new Option("Play at home", "play_home", home, Math.min(left, 60), 0, play, ACT.play_home[0], 0.1),
+          new Option("Draw and read at home", "draw_home", home, Math.min(left, 60), 0, { diligence: 0.3 },
+            ACT.draw_home[0], 0.05),
+          new Option("Early night", "sleep", home, 0, 0, { health: 0.4 }, { energy: 30 }, 0.0),
+        ];
+      }
+      const stay = kind === "after_work" ? 90 : 120;
+      const out = kind === "after_work" ? 60 : 90;
+      const park = this._pick(p, "park", now, out);
+      const outside = park !== null
+        ? new Option("Play in the park", "play", park, out, 0, { social: 0.4, adventure: 0.3 }, ACT.play[0], 0.1)
+        : new Option("Play outside", "stroll", home, 2 * STROLL_MINUTES, 0, { adventure: 0.3 }, ACT.stroll[0], 0.05);
+      const first = kind === "after_work"
+        ? new Option(meal ? "Go home for dinner" : "Go home and relax", home_act, home, at_home(stay), 0,
+          { family: 0.3 }, relax_gains, 0.2)
+        : new Option(meal ? "Dinner at home" : "Stay home", home_act, home, at_home(stay), 0, { family: 0.3 },
+          relax_gains, 0.15);
+      return [
+        first,
+        new Option("Play at home", "play_home", home, stay, 0, play, ACT.play_home[0], 0.1),
+        outside,
+        new Option("Draw and read at home", "draw_home", home, stay, 0, { diligence: 0.3 }, ACT.draw_home[0], 0.05),
+      ];
     }
 
     _park_option(p, now, minutes) {
@@ -925,8 +1054,9 @@
         { health: 0.4 }, ACT.stroll[0], 0.05);
     }
 
-    // A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or null.
-    _day_out_option(p, now, spend) {
+    // A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or null; never at `avoid`
+    // (the place the shopping option already goes to).
+    _day_out_option(p, now, spend, avoid = null) {
       const home = this.home_place(p);
       if (home === null) return null;
       const car = this._has_car(p);
@@ -945,6 +1075,7 @@
         this._fav_cache.set(ck, got);
       }
       for (const pid of got) {
+        if (pid === avoid) continue;
         const place = this.town.places.get(pid);
         const [act, label, cost, age] = DAY_OUT[`${place.kind}/${place.style}`];
         if (p.age >= age && this._usable(pid, now, DAY_OUT_MINUTES)) {
@@ -1061,7 +1192,9 @@
       const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now, "luck");
       const rolls = [PICKPOCKET];
       if (activity === "shopping" || activity === "buy_groceries") rolls.unshift(BARGAIN);
-      if ((activity === "walk_park" || activity === "stroll") && sim.weather === "rain") rolls.push(RAINED_OUT);
+      if ((activity === "walk_park" || activity === "stroll" || activity === "play") && sim.weather === "rain") {
+        rolls.push(RAINED_OUT);
+      }
       for (const [what, valence, chance, money, fun] of rolls) {
         const prob = G.dice.odds(chance, valence, p.luck);
         const roll = rr.random();
@@ -1076,6 +1209,9 @@
     _play(sim, p, now, opt) {
       if (opt.place === null || opt.place === undefined) {
         opt = new Option("Go home and relax", "relax_home", this.home_place(p), 60);
+      }
+      if (opt.activity === "stroll" || (!HOME_ACTS.includes(opt.activity) && opt.place !== this.home_place(p))) {
+        p.out_day = Math.floor(now / DAY); // an outing today
       }
       if (opt.cost > 0) {
         const payer = this._payer(p) || p;
@@ -1737,7 +1873,9 @@
     DAY_OUT, DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES, BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
-    GROCERY_MEALS, DELIVERY_FEE, FOOD_PARCEL, PARCEL_NOTE_DAYS, urgency, Option, Folk, is_free, send_to, hospitalise,
+    GROCERY_MEALS, DELIVERY_FEE, FOOD_PARCEL, PARCEL_NOTE_DAYS, PLAY_AGE, CARER_AGE, NURSERY_CHECK, OUTING_BONUS,
+    RETIRED_OUTING, OUT_FROM, OUT_UNTIL, OUT_LATE, DINNER_OUT_WEEKEND, DINNER_OUT_HUNGRY, LUNCH_OUT, LUNCH_HUNGER,
+    urgency, Option, Folk, is_free, send_to, hospitalise,
     kill, on_job_change, add_person, add_baby, join, split, release, on_birthday, settle,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

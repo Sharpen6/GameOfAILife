@@ -311,6 +311,19 @@ class FolkDaysTest(unittest.TestCase):
                 self.assertTrue(0.12 <= evening / n <= 0.35, (seed, d, evening, n))
             self.assertLessEqual(probe.peak, 400, seed)
 
+    def test_out_and_about_between_the_peaks(self):
+        """Days out, lunch out, retirees' outings and evenings out (stage 5): on weekdays at least 3.5% of the
+        townsfolk are outdoors at 11:00 every day, and 2.5% at 20:00 on average (before: about 1.8% and 1.7-2.4%)."""
+        if not integrated():
+            self.skipTest("needs the real Simulation")
+        for seed, probe in self.probes.items():
+            n = len(probe.f.living())
+            for t in _weekday_ticks(probe, 660):
+                self.assertGreaterEqual(probe.outdoors[t] / n, 0.035, (seed, t, probe.outdoors[t]))
+            evening = [probe.outdoors[t] / n for t in _weekday_ticks(probe, 1200)]
+            self.assertTrue(evening, seed)
+            self.assertGreaterEqual(sum(evening) / len(evening), 0.025, (seed, evening))
+
     def test_the_rush_is_spread_over_the_hour(self):
         """Starts are staggered (folk_gen.shift_offset), so the street does not empty at 08:00 between those who start
         at 08:00 and those who start at 09:00: on weekdays at least half the morning peak is outdoors at 08:00."""

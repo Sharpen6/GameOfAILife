@@ -52,12 +52,32 @@ UNAVAILABLE = -9.0  # the score of an option whose place is shut or full
 CPU_KEEP = 1440  # ticks of CPU timings kept for the perf report
 WARD = "ward"
 FREE = ("relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-        "idle", "stroll", "movie", "golf", "read", "order_groceries")  # activities that can be interrupted (is_free)
+        "idle", "stroll", "movie", "golf", "read", "order_groceries", "play_home", "draw_home",
+        "play")  # activities that can be interrupted (is_free)
+# A child under PLAY_AGE has a child's choices: play at home, draw and read, play in the park (or outside), never
+# the grocery run, shopping, days out or cafes on their own.
+PLAY_AGE = 12
+# An under-5 is cared for: at home with a household member aged CARER_AGE or over, else at the nursery (the nearest
+# school, while it is open) or with a sitter at home; awake they look again every NURSERY_CHECK minutes.
+CARER_AGE, NURSERY_CHECK = 14, 30
+# Going out: with no outing yet today, every option away from home gets OUTING_BONUS in a day-off choice from
+# OUT_FROM to OUT_UNTIL, half of it after work, and half of it in an evening one before OUT_LATE (all of it on
+# Friday and Saturday evenings); a retiree gets RETIRED_OUTING more.
+# Dinner out gets DINNER_OUT_WEEKEND on Friday and Saturday evenings and DINNER_OUT_HUNGRY when hungry with the
+# fridge low; a day-off choice from LUNCH_OUT[0] to LUNCH_OUT[1] offers lunch out at a favourite cafe in place of
+# the walk or day out when they are peckish (hunger under LUNCH_HUNGER). Coffee is at any cafe when no
+# cafe-or-bakery is in reach.
+OUTING_BONUS, RETIRED_OUTING = 0.2, 0.1
+OUT_FROM, OUT_UNTIL, OUT_LATE = 9 * 60, 18 * 60, 21 * 60
+DINNER_OUT_WEEKEND, DINNER_OUT_HUNGRY = 0.25, 0.15
+LUNCH_OUT, LUNCH_HUNGER = (12 * 60, 14 * 60), 75
 
 # activity -> (need gains over the whole stay, outdoors). Decay is folk_model's (DECAY_SCALE by activity).
 ACT = {
     "sleep": ({}, False),  # energy: SLEEP_ENERGY a minute (v2's 0.17)
     "baby": ({}, False),
+    "sitter": ({}, False),  # an under-5 at home with a sitter
+    "nursery": ({"social": 20, "fun": 10}, False),  # an under-5 at the nursery
     "eat_home": ({"hunger": 60, "social": 4}, False),
     "relax_home": ({"fun": 25, "energy": 5}, False),
     "dinner_home": ({"hunger": 50, "social": 10, "fun": 5}, False),
@@ -75,11 +95,15 @@ ACT = {
     "movie": ({"fun": 45, "social": 10}, False),
     "golf": ({"fun": 40, "social": 15}, False),
     "read": ({"fun": 25}, False),
+    "play_home": ({"fun": 30, "social": 10}, False),  # a child's play at home
+    "draw_home": ({"fun": 25, "energy": 5}, False),  # a child drawing and reading at home
+    "play": ({"fun": 35, "social": 20}, True),  # a child playing in the park
     "ward": ({"hunger": 40}, False),
     "idle": ({}, False),
 }
 SLEEP_ENERGY = 0.17
-HOME_ACTS = ("sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries")
+HOME_ACTS = ("sleep", "baby", "eat_home", "relax_home", "dinner_home", "sick_home", "order_groceries", "play_home",
+             "draw_home", "sitter")
 KEEP_OPEN = HOME_ACTS + ("work", "school", WARD, "idle")  # stays that do not end at closing time
 LEISURE = {  # favourite key -> (place kind, styles or None for any)
     "coffee": ("cafe", ("cafe", "bakery")),
@@ -363,7 +387,7 @@ class Folk:
         p.activity_place = place_id
         self.where[p.i] = place_id
         self.occupants.setdefault(place_id, {})[p.i] = None
-        if p.activity == "walk_park":
+        if p.activity == "walk_park" or p.activity == "play":
             self.strollers[p.i] = place_id
         else:
             k = self.pidx.get(place_id)
@@ -516,10 +540,7 @@ class Folk:
         day, m = divmod(now, DAY)
         home = self.home_place(p)
         if p.age < 5:
-            if home is not None and p.inside != home:
-                self._enter(p, home)
-            p.activity, p.state = "baby", "busy"
-            self._begin(p, now, "baby", self._wake_tick(p, now) - now)
+            self._little_one(p, now, home)
             return
         act = p.activity
         if act in ("work", "school") and p.state == "busy":
@@ -577,6 +598,59 @@ class Folk:
         if DINNER_FROM <= m < DINNER_UNTIL and home is not None and p.inside == home and self._dinner(p, now, day):
             return
         self.choose(sim, p, now, "evening" if m >= EVENING else "day_off")
+
+    def _little_one(self, p, now: int, home) -> None:
+        """An under-5 is never left alone: at home (baby) while a household member aged CARER_AGE or over is
+        there; with nobody home, at the nursery (the nearest school, inside and not drawn) while it is open, else
+        with a sitter at home. Awake, they look again every NURSERY_CHECK minutes (until bedtime); asleep (bedtime to
+        waking, at home), not until they wake."""
+        day, m = divmod(now, DAY)
+        bed = self._bed_minute(p)
+        asleep = m >= bed or m < self._wake_minute(p, day)
+        carer = asleep or self._carer_home(p, home)
+        nursery = None if carer else self._nursery(home, m)
+        if nursery is not None:
+            if p.inside != nursery:
+                self._enter(p, nursery)
+            p.activity, p.state = "nursery", "busy"
+            self._begin(p, now, "nursery", NURSERY_CHECK)
+            return
+        if home is not None and p.inside != home:
+            self._enter(p, home)
+        act = "baby" if carer else "sitter"
+        p.activity, p.state = act, "busy"
+        until = self._wake_tick(p, now) if asleep else min(now + NURSERY_CHECK, day * DAY + bed)
+        self._begin(p, now, act, until - now)
+
+    def _carer_home(self, p, home) -> bool:
+        """Someone in p's household aged CARER_AGE or over is at home now (not on a trip)."""
+        hh = self.hh_of(p)
+        if hh is None or home is None:
+            return False
+        for mid in hh.member_ids:
+            q = self.person(mid)
+            if (q is not None and q is not p and q.alive and not q.gone and q.age >= CARER_AGE and q.trip is None
+                    and q.inside == home):
+                return True
+        return False
+
+    def _nursery(self, home, m: int):
+        """The nearest school to home on foot (allowed places), when it is open from m for NURSERY_CHECK minutes."""
+        if home is None:
+            return None
+        ck = (home, "nursery")
+        got = self._fav_cache.get(ck)
+        if got is None:
+            net = folk_transit.net(self.town)
+            cands = sorted((net.minutes(home, pid, "walk"), pid) for pid, place in self.town.places.items()
+                           if place.kind == "school" and self.allowed(pid))
+            got = self._fav_cache[ck] = [cands[0][1]] if cands else []
+        if not got:
+            return None
+        place = self.town.places[got[0]]
+        if place.hours and not (place.hours[0] * 60 <= m and m + NURSERY_CHECK <= place.hours[1] * 60):
+            return None
+        return got[0]
 
     def _sick_rest(self, sim, p, now: int) -> None:
         """Off sick: rest at home until the next of SICK_MEALS or bedtime (overnight, until they wake)."""
@@ -869,14 +943,17 @@ class Folk:
         def at_home(minutes: int) -> int:
             return DINNER_MINUTES if meal else minutes
 
-        if kind == "after_work":
+        if 5 <= p.age < PLAY_AGE:
+            opts = self._child_options(p, now, kind, home, home_act, relax_gains, meal, at_home, bed)
+        elif kind == "after_work":
             cafe_key = "eat_out" if hungry else "coffee"
             opts = [
                 Option("Go home for dinner" if meal else "Go home and relax", home_act, home, at_home(90), 0,
                        {"family": 0.3}, relax_gains, 0.2),
                 self._grocery_option(p, now, home, 1.0 if low else -0.8),
                 Option("Eat out" if hungry else "Coffee", "eat_out" if hungry else "coffee",
-                       self._pick(p, cafe_key, now, 40), 40 if hungry else 20, MEAL_COST if hungry else COFFEE_COST,
+                       self._pick(p, cafe_key, now, 40) or (None if hungry else self._pick(p, "eat_out", now, 20)),
+                       40 if hungry else 20, MEAL_COST if hungry else COFFEE_COST,
                        {"social": 0.4, "thrift": -0.3}, ACT["eat_out" if hungry else "coffee"][0], 0.0),
                 self._park_option(p, now, 60),
             ]
@@ -887,25 +964,79 @@ class Folk:
             shop = (self._grocery_option(p, now, home, 1.0) if low else
                     Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
                            {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05))
+            lunch = (self._pick(p, "eat_out", now, 45)
+                     if LUNCH_OUT[0] <= m < LUNCH_OUT[1] and p._needs["hunger"] < LUNCH_HUNGER else None)
             opts = [
                 Option("Dinner at home" if meal else "Stay home", home_act, home, at_home(120), 0, {"family": 0.3},
                        relax_gains, 0.15),
                 shop,
                 self._hang_option(sim, p, now, 120),
-                ((self._day_out_option(p, now, spend) if (p.i + now // DAY) % 2 == 0 else None)
-                 or self._park_option(p, now, 90)),
+                (Option("Lunch out", "eat_out", lunch, 45, MEAL_COST, {"social": 0.3, "thrift": -0.3},
+                        ACT["eat_out"][0], 0.1) if lunch is not None else None)
+                or ((self._day_out_option(p, now, spend, shop.place) if (p.i + now // DAY) % 2 == 0 else None)
+                    or self._park_option(p, now, 90)),
             ]
         else:  # evening
             left = max(30, bed - m) if m < bed else 30
+            treat = ((DINNER_OUT_WEEKEND if (now // DAY) % 7 in (4, 5) else 0.0)
+                     + (DINNER_OUT_HUNGRY if hungry and low else 0.0))
             opts = [
                 Option("Dinner at home" if meal else "Relax at home", home_act, home, at_home(left), 0,
                        {"family": 0.3}, relax_gains, 0.25),
                 Option("Dinner out", "eat_out", self._pick(p, "eat_out", now, 60), 60, DINNER_COST,
-                       {"social": 0.3, "thrift": -0.4}, ACT["eat_out"][0], -0.1),
+                       {"social": 0.3, "thrift": -0.4}, ACT["eat_out"][0], -0.1 + treat),
                 self._hang_option(sim, p, now, 120),
                 Option("Early night", "sleep", home, 0, 0, {"health": 0.4}, {"energy": 30}, 0.0),
             ]
+        if p.out_day != now // DAY:  # no outing yet today: going out appeals
+            weekend = (now // DAY) % 7 in (4, 5)  # Friday and Saturday evenings
+            bonus = (OUTING_BONUS if kind == "day_off" and OUT_FROM <= m < OUT_UNTIL else
+                     OUTING_BONUS / 2 if kind == "after_work" else
+                     (OUTING_BONUS if weekend else OUTING_BONUS / 2) if kind == "evening" and m < OUT_LATE else 0.0)
+            if bonus:
+                if p.age >= 65 and p.job is None:
+                    bonus += RETIRED_OUTING
+                for o in opts:
+                    if o.place is not None and (o.activity == "stroll" or o.place != home) and o.activity != "sleep":
+                        o.base += bonus
         return opts
+
+    def _child_options(self, p, now: int, kind: str, home, home_act: str, relax_gains: dict, meal: bool, at_home,
+                       bed: int) -> list[Option]:
+        """A child's 4 options (under PLAY_AGE): home or dinner, play at home, play in the park (or outside round
+        the block; an early night in the evening), draw and read at home. Free, and never an errand."""
+        m = now % DAY
+        play = {"fun": 0.3, "social": 0.3}
+        if kind == "evening":
+            left = max(30, bed - m) if m < bed else 30
+            return [
+                Option("Dinner at home" if meal else "Relax at home", home_act, home, at_home(left), 0,
+                       {"family": 0.3}, relax_gains, 0.25),
+                Option("Play at home", "play_home", home, min(left, 60), 0, play, ACT["play_home"][0], 0.1),
+                Option("Draw and read at home", "draw_home", home, min(left, 60), 0, {"diligence": 0.3},
+                       ACT["draw_home"][0], 0.05),
+                Option("Early night", "sleep", home, 0, 0, {"health": 0.4}, {"energy": 30}, 0.0),
+            ]
+        stay = 90 if kind == "after_work" else 120
+        out = 60 if kind == "after_work" else 90
+        park = self._pick(p, "park", now, out)
+        outside = (Option("Play in the park", "play", park, out, 0, {"social": 0.4, "adventure": 0.3},
+                          ACT["play"][0], 0.1) if park is not None else
+                   Option("Play outside", "stroll", home, 2 * STROLL_MINUTES, 0, {"adventure": 0.3},
+                          ACT["stroll"][0], 0.05))
+        if kind == "after_work":
+            first = Option("Go home for dinner" if meal else "Go home and relax", home_act, home, at_home(stay), 0,
+                           {"family": 0.3}, relax_gains, 0.2)
+        else:
+            first = Option("Dinner at home" if meal else "Stay home", home_act, home, at_home(stay), 0,
+                           {"family": 0.3}, relax_gains, 0.15)
+        return [
+            first,
+            Option("Play at home", "play_home", home, stay, 0, play, ACT["play_home"][0], 0.1),
+            outside,
+            Option("Draw and read at home", "draw_home", home, stay, 0, {"diligence": 0.3}, ACT["draw_home"][0],
+                   0.05),
+        ]
 
     def _park_option(self, p, now: int, minutes: int) -> Option:
         park = self._pick(p, "park", now, minutes)
@@ -915,8 +1046,9 @@ class Folk:
         return Option("A walk round the block", "stroll", self.home_place(p), 2 * STROLL_MINUTES, 0,
                       {"health": 0.4}, ACT["stroll"][0], 0.05)
 
-    def _day_out_option(self, p, now: int, spend: int) -> Option | None:
-        """A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or None."""
+    def _day_out_option(self, p, now: int, spend: int, avoid=None) -> Option | None:
+        """A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or None; never at
+        `avoid` (the place the shopping option already goes to)."""
         home = self.home_place(p)
         if home is None:
             return None
@@ -935,6 +1067,8 @@ class Folk:
             cands.sort()
             got = self._fav_cache[ck] = [pid for _, pid in cands]
         for pid in got:
+            if pid == avoid:
+                continue
             place = self.town.places[pid]
             act, label, cost, age = DAY_OUT[(place.kind, place.style)]
             if p.age >= age and self._usable(pid, now, DAY_OUT_MINUTES):
@@ -1040,6 +1174,8 @@ class Folk:
     def _play(self, sim, p, now: int, opt: Option) -> None:
         if opt.place is None:
             opt = Option("Go home and relax", "relax_home", self.home_place(p), 60)
+        if opt.activity == "stroll" or (opt.activity not in HOME_ACTS and opt.place != self.home_place(p)):
+            p.out_day = now // DAY  # an outing today
         if opt.cost > 0:
             payer = self._payer(p) or p
             payer.money -= opt.cost
@@ -1073,7 +1209,7 @@ class Folk:
         rolls = [PICKPOCKET]
         if activity in ("shopping", "buy_groceries"):
             rolls.insert(0, BARGAIN)
-        if activity in ("walk_park", "stroll") and getattr(sim, "weather", None) == "rain":
+        if activity in ("walk_park", "stroll", "play") and getattr(sim, "weather", None) == "rain":
             rolls.append(RAINED_OUT)
         for what, valence, chance, money, fun in rolls:
             prob = _dice().odds(chance, valence, p.luck)

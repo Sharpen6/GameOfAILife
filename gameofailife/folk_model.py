@@ -69,7 +69,7 @@ class Person:
     __slots__ = ("id", "name", "age", "alive", "died", "luck", "health", "reputation", "money", "savings",
                  "owns_car", "job", "household_id", "inside", "activity", "activity_place", "state",
                  "relationships", "life", "memory", "traits", "sex",
-                 "i", "hh", "gone", "trip", "next_tick", "worked_day", "fav", "choices", "inbox", "commute",
+                 "i", "hh", "gone", "trip", "next_tick", "worked_day", "out_day", "fav", "choices", "inbox", "commute",
                  "skill", "role", "_needs", "_nt")
 
     clock = None  # the simulation's Clock, set by Folk.__init__ (lazy needs settle to clock.tick)
@@ -107,6 +107,7 @@ class Person:
         self.trip = None  # Trip while travelling
         self.next_tick = 0
         self.worked_day = -1
+        self.out_day = -1  # the day of their last outing (folk.OUTING_BONUS)
         self.fav = {}  # LEISURE key -> [place ids] nearest first
         self.choices = []  # last CHOICES_KEEP {time, kind, options, choice, by}
         self.inbox = []  # last INBOX_KEEP messages

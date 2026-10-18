@@ -876,13 +876,21 @@ def lonely_fork(sim: Simulation, agent: Agent) -> Fork | None:
     return Fork(agent.id, "lonely", "You haven't talked to anyone in a while. What do you do?", opts, sim.clock.tick)
 
 
+CHILD_AGE = 13  # free_time: under this age a child plays, never hangs out at a cafe alone
+
+
 def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
     """When bored (fun under 40), for an adult idle at home for a while (FIXLISTS 8) or, for a child, cooped up at home
     (cooped_up), from 08:00 to 21:00 off shift and outside the work fork's window; on a Saturday evening the
-    family's evening (family_fork) comes first."""
+    family's evening (family_fork) comes first. Nobody kept home by an illness goes out for fun (as the townsfolk);
+    a child under CHILD_AGE plays (`_play`) rather than hang out at a cafe, and draws and builds at home rather
+    than work on a side project (the same steps, tags and odds)."""
     hour = sim.clock.hour
     if not (8 <= hour < 21) or sim.on_shift_now(agent) or _curfew(sim, agent, 1) or in_work_window(sim, agent):
         return None
+    from . import life  # lazy: life imports this module
+    if not life.can_work(sim, agent):
+        return None  # off sick or on the ward: they rest
     family = family_fork(sim, agent)  # Saturday evening: the family first (FIXLISTS 6)
     if family:
         return family
@@ -890,9 +898,10 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if agent.needs["fun"] >= 40 and not idle and (agent.is_adult or cooped_up(sim, agent) <= 0):
         return None
     park = _park(sim, agent)
-    short = _short_of(agent, 6)
+    child = agent.age < CHILD_AGE
+    short = child or _short_of(agent, 6)
     cafe = _open_place(sim, agent, ("cafe",), HANG_OUT_MINUTES) if not short else None  # open for all of it
-    if short:  # a child without the $6: off to play instead
+    if short:  # a young child, or a child without the $6: off to play instead
         out = _play(sim, agent)
     elif cafe:
         out = Option(f"Hang out at {cafe.name}", [("hang_out", cafe.id)], cost=6, tags={"social": 0.8, "thrift": -0.3},
@@ -908,7 +917,8 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
                outcomes=[Outcome("unwind", "Properly unwinds", 0.5, +1, {"fun": 6}, group="relax"),
                          Outcome("restless", "Gets restless and bored", 0.3, -1, {"fun": -6}, group="relax")]),
         out,
-        Option("Work on a side project", [("side_project", "home")], tags={"diligence": 0.6, "adventure": 0.5, "social": -0.3},
+        Option("Draw and build at home" if child else "Work on a side project", [("side_project", "home")],
+               tags={"diligence": 0.6, "adventure": 0.5, "social": -0.3},
                gains={"fun": 25},
                outcomes=[Outcome("breakthrough", "Makes a breakthrough", 0.15, +1,
                                  {"fun": 15, "money": 50} if agent.is_adult else {"fun": 20}, group="project"),

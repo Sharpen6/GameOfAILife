@@ -82,6 +82,7 @@
       this.trip = null; // Trip while travelling
       this.next_tick = 0;
       this.worked_day = -1;
+      this.out_day = -1; // the day of their last outing (folk.OUTING_BONUS)
       this.fav = {}; // LEISURE key -> [place ids] nearest first
       this.choices = []; // last CHOICES_KEEP {time, kind, options, choice, by}
       this.inbox = []; // last INBOX_KEEP messages
