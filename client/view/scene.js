@@ -718,11 +718,16 @@
     let spriteMP = 0;
     scene.spriteCap = 16e6;
     const recKey = rec => CV.spriteKey(rec.B.kp, rec.decor ? null : scene.looks[rec.p.id], scene.season);
+    // the browser records canvas draws and rasterises them when the canvas is first read: a one-pixel read makes
+    // that happen inside the build (and its budget) instead of in the first frame that draws it
+    const flush = c => { try { c.getContext("2d").getImageData(0, 0, 1, 1); } catch (e) { /* a tainted or lost canvas */ } };
+    CV.flushCanvas = CV.flushCanvas || flush;
     function buildSprite(rec, key) {
       const p = rec.p, look = rec.decor ? {} : scene.looks[p.id] || {};
       const t0 = performance.now();
       const s = rec.B.variant == null ? art.building(p, look, scene.season)
         : art.building(CV.canonPlace ? CV.canonPlace(rec.B.kp) : Object.assign({}, rec.B.kp, { id: rec.B.sid, x: 0, y: 0, entry: p.entry ? [p.entry[0] - p.x, p.entry[1] - p.y] : null }), look, scene.season);
+      flush(s.c);
       const e = { c: s.c, s, used: frameNo, mp: s.c.width * s.c.height, inPlace: rec.B.variant == null, season: scene.season, ms: performance.now() - t0 };
       sprites.set(key, e); spriteMP += e.mp; scene.stats.spriteBuilds++;
       evictSprites();
@@ -756,15 +761,17 @@
       return null;
     }
     // Build queued sprites, nearest first, within ms (and at least one when nothing else was built this frame).
+    let avgSprite = 2;
     function buildQueued(budget, ms) {
       const jobs = [...spriteQueue.entries()].filter(([, j]) => j.f >= frameNo - 1).sort((a, b) => a[1].d - b[1].d);
       let spent = 0;
       for (const [k, j] of jobs) {
         if (sprites.has(k)) { spriteQueue.delete(k); continue; }
-        if (spent >= ms || (budget.builds > 0 && budget.left() <= 0)) break;
+        if (spent >= ms || (budget.builds > 0 && budget.left() < Math.min(4, avgSprite))) break;
         const a = performance.now();
         budget.run(() => buildSprite(j.rec, k));
-        spent += performance.now() - a;
+        const dt = performance.now() - a;
+        spent += dt; avgSprite = avgSprite * 0.8 + dt * 0.2;
         spriteQueue.delete(k);
       }
       for (const [k, j] of spriteQueue) if (j.f < frameNo - 1) spriteQueue.delete(k);
@@ -965,6 +972,8 @@
     }
     function occlusionOf() {
       if (occlusion) return occlusion;
+      // a big town draws its lamp and porch pools without masks (view.md 3.3.7's lazy occlusion is cut, V1a)
+      if (BIG) return (occlusion = { lamps: lampPts.map(() => false), lampImg: [], porch: new Map(), porchImg: new Map() });
       const lamps = [], lampImg = [];
       lampPts.forEach(([lx, ly]) => {
         const d = proj.depth(lx, ly), top = proj.toWorld(lx, ly, 39), p = proj.toWorld(lx, ly, 0);
@@ -996,10 +1005,25 @@
       let m = levels.get(level); if (!m) levels.set(level, m = new Map());
       const key = cx + "," + cy;
       let ch = m.get(key);
-      if ((!ch || (ch.stale && staleOk)) && mayBuild()) { ch = { c: BIG ? budget.run(() => renderChunk(level, cx, cy)) : renderChunk(level, cx, cy), used: 0 }; m.set(key, ch); scene.stats.built++; evict(); }
+      if ((!ch || (ch.stale && staleOk)) && mayBuild()) {
+        const a = performance.now();
+        ch = { c: BIG ? budget.run(() => renderChunk(level, cx, cy)) : renderChunk(level, cx, cy), used: 0 }; m.set(key, ch); scene.stats.built++;
+        scene.stats.chunkMs = performance.now() - a; evict();
+      }
       else if (ch && ch.stale) staleN++;
       if (ch) ch.used = frameNo;
       return ch;
+    }
+    // the near ground cache in device px, and a trim to cap (the low view's share of the chunk budget)
+    const nearPx = () => { let t = 0; for (const m of levels.values()) for (const v of m.values()) t += v.c.width * v.c.height; return t; };
+    function trimNear(cap) {
+      for (;;) {
+        let total = 0, old = null;
+        for (const m of levels.values()) for (const [k, v] of m) { total += v.c.width * v.c.height; if (v.used < frameNo && (!old || v.used < old[2].used)) old = [m, k, v]; }
+        scene.stats.cacheMP = total / 1e6;
+        if (total <= cap || !old) return;
+        old[0].delete(old[1]);
+      }
     }
     function evict() {
       const budget = scene.chunkBudget || 12e6;
@@ -1018,6 +1042,11 @@
     function renderChunk(level, cx, cy) {
       const size = Math.round(CH * level);
       const c = CV.canvas(size, size), q = c.getContext("2d");
+      if (level < 1 && BIG) { // a big town paints its smaller levels directly, unfiltered (tiles sit on even px)
+        paintChunk(q, cx, cy, level);
+        flush(c);
+        return c;
+      }
       if (level < 1) {
         const m1 = levels.get(1), have = m1 && m1.get(cx + "," + cy);
         let src = have && !have.stale && have.c;
@@ -1030,15 +1059,18 @@
         }
         q.imageSmoothingEnabled = true; q.imageSmoothingQuality = "high";
         q.drawImage(src, 0, 0, CH, CH, 0, 0, size, size);
+        if (BIG) flush(c);
         return c;
       }
       paintChunk(q, cx, cy);
+      if (BIG) flush(c);
       return c;
     }
-    function paintChunk(q, cx, cy) {
+    function paintChunk(q, cx, cy, k) {
       const wx0 = B.x0 + cx * CH, wy0 = B.y0 + cy * CH;
+      k = k || 1;
       q.imageSmoothingEnabled = false;
-      q.setTransform(1, 0, 0, 1, -wx0, -wy0);
+      q.setTransform(k, 0, 0, k, -wx0 * k, -wy0 * k);
       const off = art.tileOffset, iso = proj.kind === "iso";
       const front = iso ? proj.faces : [];
       let tx0 = 0, ty0 = 0, tx1 = W - 1, ty1 = H - 1;
@@ -1064,8 +1096,9 @@
       }
       // building shadows lie on the ground, cast to the east-north-east
       q.fillStyle = "rgba(8,16,8,0.22)";
+      const nearChunk = p => { if (!BIG) return true; const c0 = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2); return c0[0] > wx0 - 400 && c0[0] < wx0 + CH + 400 && c0[1] > wy0 - 300 && c0[1] < wy0 + CH + 300; };
       for (const p of places) {
-        if (p.kind === "park") continue;
+        if (p.kind === "park" || !nearChunk(p)) continue;
         const fl = p.floors || 1;
         const hgt = Math.min(2.6, 0.45 + fl * (p.style === "house" ? 0.45 : 0.32) + (p.style === "big_house" ? 0.3 : 0));
         const b = CV.bodyOf(p);
@@ -1076,7 +1109,7 @@
       }
       // pools and the fountain basin are ground too
       for (const p of places) {
-        if (p.style !== "big_house") continue;
+        if (p.style !== "big_house" || !nearChunk(p)) continue;
         const b = CV.bodyOf(p);
         if (b.pool) { const look = scene.looks[p.id]; art.pool(q, b.pool, look ? look.stage | 0 : 0, 0, 0, scene.season); }
       }
@@ -1167,13 +1200,36 @@
     function blit(img, sx, sy, sw, sh, wx, wy, v) {
       const dx0 = Math.round(wx * v.S + v.ox), dy0 = Math.round(wy * v.S + v.oy);
       const dx1 = Math.round((wx + sw) * v.S + v.ox), dy1 = Math.round((wy + sh) * v.S + v.oy);
-      if (dx1 > dx0 && dy1 > dy0) g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      if (dx1 <= dx0 || dy1 <= dy0) return;
+      // a big town at device scale < 0.75 draws from half-size copies (one smoothed 2:1 draw each, made under the
+      // budget): the frame then copies nearly 1:1 instead of filtering four times the pixels
+      const m = v.mip ? mipOf(img) : null;
+      if (v.mip && !m) scene.stats.mipMiss++;
+      if (m) g.drawImage(m, sx / 2, sy / 2, sw / 2, sh / 2, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      else g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
     }
+    let mips = new WeakMap(), mipFrame = -1, mipN = 0;
+    function mipOf(img) {
+      let m = mips.get(img);
+      if (m) return m;
+      if (mipFrame !== frameNo) { mipFrame = frameNo; mipN = 0; }
+      if (!img.width || (mipN > 0 && budget.left() <= 0)) return null;
+      mipN++;
+      budget.run(() => {
+        m = CV.canvas(Math.max(1, Math.ceil(img.width / 2)), Math.max(1, Math.ceil(img.height / 2)));
+        const q = m.getContext("2d"); q.imageSmoothingEnabled = true;
+        q.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width / 2, img.height / 2);
+        flush(m);
+      });
+      mips.set(img, m);
+      return m;
+    }
+    scene.clearMips = () => { mips = new WeakMap(); };
 
     scene.draw = function (now) {
       const t0 = performance.now();
       frameNo++; scene.stats.frames = frameNo;
-      if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; }
+      if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; scene.stats.mipMiss = 0; scene.spriteCap = scene.spriteCapSet || (isPhone() ? 8e6 : 16e6); }
       if (dirty || !statics.length) BIG ? budget.run(buildStatics) : buildStatics();
       if (!lampGlow) { lampGlow = makeGlow(54, 27, "#ffd890", 0.5); porchGlow = makeGlow(22, 12, "#ffd890", 0.6); }
       const v = scene.view(), S = v.S;
@@ -1183,13 +1239,14 @@
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
       // ground: the smallest cached level that is still at least the device scale
-      const level = S > 0.5 ? 1 : S > 0.25 ? 0.5 : 0.25;
-      g.imageSmoothingEnabled = S < level;
+      // (a big town keeps the half level up to 0.75: a zoom on its way scales it up rather than filtering 4x the px)
+      const level = BIG ? (S >= 0.75 ? 1 : S > 0.25 ? 0.5 : 0.25) : S > 0.5 ? 1 : S > 0.25 ? 0.5 : 0.25;
+      g.imageSmoothingEnabled = S < level || (BIG && S < 1 && S !== level);
       let builds = 0; const mayBuild = BIG ? () => budget.may() : () => builds++ < BUILDS_PER_FRAME || frameNo < 4 || scene.eager;
       const nx = Math.ceil((B.x1 - B.x0) / CH), ny = Math.ceil((B.y1 - B.y0) / CH);
       const cx0 = Math.max(0, Math.floor((v.x0 - B.x0) / CH)), cx1 = Math.min(nx - 1, Math.floor((v.x1 - B.x0) / CH));
       const cy0 = Math.max(0, Math.floor((v.y0 - B.y0) / CH)), cy1 = Math.min(ny - 1, Math.floor((v.y1 - B.y0) / CH));
-      let nch = 0;
+      let nch = 0; staleN = 0;
       for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
         let ch = chunk(level, cx, cy, mayBuild), lv = level;
         if (!ch) for (const alt of [0.5, 1, 0.25]) { const m = levels.get(alt); const c2 = m && m.get(cx + "," + cy); if (c2) { ch = c2; lv = alt; break; } }
@@ -1202,7 +1259,7 @@
       }
       g.imageSmoothingEnabled = false;
       groundOverlays(v, now);
-      const tItems = performance.now(); scene.stats.groundMs = tItems - t0;
+      const tItems = performance.now(); scene.stats.groundMs = tItems - t0; scene.stats.nearStale = staleN;
       // items: visible statics merged with the sorted movers; x-ray what covers the target
       g.imageSmoothingEnabled = S < 1;
       const night = scene.nightAlpha(scene.minute);
@@ -1216,6 +1273,10 @@
       const vv = { S, ox: v.ox, oy: v.oy, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, lod: "near", level, night };
       for (const src of moverSources) if (src.items) src.items(vv, dyn);
       const merged = dyn.length ? ms.concat(dyn).sort((a, b) => a.depth - b.depth) : ms;
+      v.mip = BIG && S < 0.75;
+      // a big town draws its sprites unfiltered: the half copies land 1:1 at 0.5, and between the steps (a zoom on
+      // its way) the unfiltered draw costs a quarter of the filtered one in software
+      if (BIG) g.imageSmoothingEnabled = false;
       // the depth band (view.md 3.3.5): only statics whose ground point can show on screen
       let iEnd = statics.length;
       if (BIG) {
@@ -1246,6 +1307,7 @@
         n++;
       }
       scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
+      if (BIG && chunks && frameNo % 30 === 0) { chunks.begin(); chunks.trim(lowCap() - nearPx()); }
       if (BIG) { const a = performance.now(); buildQueued(budget, 4); scene.stats.spriteMs = performance.now() - a; }
       smoke(v, now);
       // rain: an overcast wash, so a still frame reads as wet weather too
@@ -1347,10 +1409,29 @@
     };
     const chunks = CV.makeChunks ? CV.makeChunks(scene, lowPainter) : null;
     scene.chunks = chunks;
+    // a phone: the view's 6 MP near budget (coarse pointer, narrow), or scene.phone when the host says
+    const isPhone = () => scene.phone != null ? !!scene.phone : (scene.chunkBudget || 12e6) <= 6e6;
+    const lowCap = () => scene.chunkCap || (isPhone() ? 10e6 : 24e6);
+    scene.isPhone = isPhone;
+    // What the region view is doing (view.md 3.2, the smoke tests and the HUD): lod, level, caches, the budget.
+    scene.debug = () => {
+      const st = scene.stats;
+      return { big: BIG, lod: scene.lodNow || lodOf(scene.cam.zoom), level: scene.lodNow === "near" ? null : scene.levelNow || null,
+        zoom: scene.cam.zoom, phone: isPhone(), frames: frameNo, drawMs: st.draw || 0, buildMs: st.buildMs || 0, groundMs: st.groundMs || 0,
+        itemsMs: st.itemsMs || 0, labelsMs: st.labelsMs || 0, spriteMs: st.spriteMs || 0,
+        chunks: chunks ? chunks.size() : 0, chunkMP: chunks ? chunks.mp / 1e6 : 0, chunkCapMP: lowCap() / 1e6, pending: chunks ? chunks.pending : 0,
+        chunksBuilt: chunks ? chunks.built : 0, nearMP: nearPx() / 1e6, cacheMP: ((chunks ? chunks.mp : 0) + nearPx()) / 1e6,
+        sprites: sprites.size, spriteMP: spriteMP / 1e6, spriteCapMP: scene.spriteCap / 1e6, queue: spriteQueue.size, spriteBuilds: st.spriteBuilds || 0,
+        staleSprites: st.staleSprites || 0, items: st.items || 0, boxes: st.boxes || 0, runs: st.runs || 0, splitRuns: st.splitRuns || 0,
+        nearStale: scene.lodNow === "near" ? (st.nearStale || 0) + (st.mipMiss || 0) : 0, mipMiss: st.mipMiss || 0, statics_builds: st.statics_builds || 0, staticsMs: st.staticsMs || 0, placeUpdates: st.placeUpdates || 0, buildings: R.buildings.length };
+    };
+    let lastLowView = null;
     function drawLow(v, lod, now) {
       const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom);
       scene.levelNow = lv;
-      chunks.cap = scene.chunkCap || (scene.phone ? 10e6 : 24e6);
+      // the chunk budget (24 MP, 10 on phones) is shared with the near ground cache, which keeps a quarter of it
+      trimNear(lowCap() / 4);
+      chunks.cap = Math.max(lowCap() / 2, lowCap() - nearPx());
       chunks.begin();
       g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
@@ -1386,7 +1467,10 @@
       if (far) { groundOverlays(v, now); for (const src of moverSources) if (src.marks) src.marks(g, vv, lod); }
       chunks.refresh(budget);
       // sprites for the view (a mid u chunk re-bakes with them): nearest first, within 4 ms
-      if (!far && budget.left() > 0) {
+      // (only while the camera rests: a zoom on its way has no use for them and a big one costs a frame)
+      const still = lastLowView && lastLowView[0] === v.S && lastLowView[1] === v.ox && lastLowView[2] === v.oy;
+      lastLowView = [v.S, v.ox, v.oy];
+      if (!far && still && budget.left() > 0) {
         for (const o of inRect(v.x0, v.y0, v.x1, v.y1)) if (o.big) spriteOf(o);
         buildQueued(budget, 4);
       }
@@ -1504,8 +1588,9 @@
       // a see-through building's glows fade with it, where it is see-through
       const ghosted = rec => gh && gh.set.has(rec);
       const glow = (rec, img, wx, wy) => { if (ghosted(rec)) ghostGlow(img, wx, wy, v, gh.rect, base, 0.35); else blit(img, 0, 0, img.width, img.height, wx, wy, v); g.globalAlpha = base; };
+      const offView = rec => BIG && rec.big && (rec.wx0 > v.x1 || rec.wy0 > v.y1 || rec.wx1 < v.x0 || rec.wy1 < v.y0);
       for (const rec of buildings) {
-        if (!lit.has(rec.p.id)) continue;
+        if (!lit.has(rec.p.id) || offView(rec)) continue;
         const gl = glowOf(rec, lit.get(rec.p.id));
         if (!gl || gl.wx > v.x1 || gl.wy > v.y1 || gl.wx + gl.c.width < v.x0 || gl.wy + gl.c.height < v.y0) continue;
         glow(rec, gl.c, gl.wx, gl.wy);
@@ -1520,6 +1605,7 @@
           blit(img, 0, 0, img.width, img.height, p[0] - 48, p[1] - 25, v);
         });
         for (const rec of buildings) {
+          if (offView(rec)) continue;
           const b = rec.b, vis = occ.porch.get(rec) || [], imgs = occ.porchImg.get(rec) || [];
           [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) glow(rec, img, q[0] - 22, q[1] - 12); });
         }
@@ -1529,15 +1615,16 @@
           const spr = art.headlights(m.lights), gx = m.cx - spr.ax, gy = m.cy - spr.ay, w = spr.c.width, h = spr.c.height;
           if (gx > v.x1 || gy > v.y1 || gx + w < v.x0 || gy + h < v.y0) continue;
           if (!hlScratch) hlScratch = CV.canvas(w, h);
-          const img = maskedGlow(spr.c, gx, gy, m.depth, null, hlScratch) || spr.c;
+          const img = (!BIG && maskedGlow(spr.c, gx, gy, m.depth, null, hlScratch)) || spr.c;
           blit(img, 0, 0, w, h, gx, gy, v);
         }
       }
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       // bulbs, neon and beacons sit on top at full strength
       const dot = (wx, wy, w, h, col) => { const x = Math.round(wx * S + v.ox), y = Math.round(wy * S + v.oy); g.fillStyle = col; g.fillRect(x - Math.round(w * S / 2), y, Math.max(1, Math.round(w * S)), Math.max(1, Math.round(h * S))); };
-      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k]) return; const p = proj.toWorld(lx, ly, 0); dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
+      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k]) return; const p = proj.toWorld(lx, ly, 0); if (BIG && (p[0] < v.x0 - 16 || p[0] > v.x1 + 16 || p[1] < v.y0 || p[1] > v.y1 + 50)) return; dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
       for (const rec of buildings) {
+        if (offView(rec)) continue;
         const b = rec.b;
         if (b.neon) { g.fillStyle = `rgba(255,90,140,${0.35 * night})`; g.fillRect(Math.round(b.neon[0] * S + v.ox) - 3, Math.round(b.neon[1] * S + v.oy) - 3, Math.round(b.neon[2] * S) + 6, Math.round(b.neon[3] * S) + 6); }
         if (b.beacon && Math.floor(now / 700) % 2 === 0) dot(b.beacon[0], b.beacon[1], 3, 3, `rgba(255,60,60,${night})`);

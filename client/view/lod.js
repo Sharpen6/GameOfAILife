@@ -48,8 +48,10 @@
     // Run a chunk's bake for up to YIELD_MS (one build of the budget). True when the chunk is complete.
     function work(e, budget) {
       if (!e.job) e.job = Object.assign({ i: 0 }, painter.job(e.layer, e.level, e.wx0, e.wy0, e.span, e));
-      const J = e.job, t0 = performance.now(), lim = budget && budget.unlimited ? 1e9 : YIELD_MS;
-      budget.run(() => { while (J.i < J.steps.length) { J.steps[J.i++](); if (performance.now() - t0 >= lim) break; } });
+      const J = e.job, t0 = performance.now(), lim = budget && budget.unlimited ? 1e9 : Math.max(1, Math.min(YIELD_MS, budget.left()));
+      // each step's draws are rasterised before the clock is read (a one-pixel read), so the yield is honest
+      const flush = CV.flushCanvas || (() => {});
+      budget.run(() => { while (J.i < J.steps.length) { J.steps[J.i++](); flush(J.c); if (performance.now() - t0 >= lim) break; } });
       if (J.i < J.steps.length) return false;
       if (e.c) C.mp -= e.c.width * e.c.height;
       e.c = J.c; e.job = null; e.stale = false; e.tag = J.tag != null ? J.tag : null; C.built++;
@@ -57,11 +59,14 @@
       evict();
       return true;
     }
-    function evict() {
-      if (C.mp <= C.cap) return;
+    function evict(cap) {
+      cap = cap == null ? C.cap : cap;
+      if (C.mp <= cap) return;
       const old = [...map.values()].filter(e => e.c && e.used < C.frame).sort((a, b) => a.used - b.used);
-      for (const e of old) { if (C.mp <= C.cap) break; C.mp -= e.c.width * e.c.height; map.delete(e.k); }
+      for (const e of old) { if (C.mp <= cap) break; C.mp -= e.c.width * e.c.height; map.delete(e.k); }
     }
+    // Drop chunks not drawn this frame (oldest first) until the cache is at most cap px (the near view's share).
+    C.trim = cap => evict(Math.max(0, cap));
     // The chunk to draw at (layer, level, cx, cy): its own canvas if complete (stale or not), else the bake runs
     // when the budget allows (missing chunks first); returns the entry (e.c may still be null).
     C.want = function (layer, level, cx, cy, budget) {
@@ -84,13 +89,13 @@
       const dx1 = Math.round((e.wx0 + e.span) * v.S + v.ox), dy1 = Math.round((e.wy0 + e.span) * v.S + v.oy);
       if (e.c) { g.drawImage(e.c, 0, 0, e.c.width, e.c.height, dx0, dy0, dx1 - dx0, dy1 - dy0); return true; }
       const o = painter.origin();
-      for (const l2 of [1, 0.5, 0.25, 0.125, 0.0625]) {
-        if (l2 === e.level) continue;
+      // coarser levels first (one draw), then finer ones (up to four)
+      for (const l2 of [0.0625, 0.125, 0.25, 0.5, 1].filter(l => l < e.level).reverse().concat([0.0625, 0.125, 0.25, 0.5, 1].filter(l => l > e.level))) {
         const sp2 = CH / l2;
         // the other level's chunks under this one's rect (one when coarser, several when finer)
         const ax0 = Math.floor((e.wx0 - o.x0) / sp2), ay0 = Math.floor((e.wy0 - o.y0) / sp2);
         const ax1 = Math.floor((e.wx0 + e.span - 1e-6 - o.x0) / sp2), ay1 = Math.floor((e.wy0 + e.span - 1e-6 - o.y0) / sp2);
-        if ((ax1 - ax0 + 1) * (ay1 - ay0 + 1) > 16) continue;
+        if ((ax1 - ax0 + 1) * (ay1 - ay0 + 1) > 4) continue; // (sixteen scaled 512 px draws cost a frame in software)
         let any = false;
         for (let cy = ay0; cy <= ay1; cy++) for (let cx = ax0; cx <= ax1; cx++) {
           const f = map.get(keyOf(e.layer, l2, cx, cy));
