@@ -16,6 +16,8 @@ const G = require("./engine.cjs").load();
 function rehearse(sim, days = 22) {
   const FL = G.folk_life, MPD = G.clock.MINUTES_PER_DAY, { r2 } = G.rng;
   const folk = sim.folk;
+  folk.luck_log = []; // F2a's Folk has one; people.log_roll fills it
+  sim.lots.get(sim.homes.get(folk.households[0].home_id).place).condition = 5.0; // one derelict home: damp and chills
   for (let day = 0; day < days; day++) {
     const weekday = day % 7;
     sim.clock.tick = day * MPD;
@@ -77,6 +79,9 @@ function rehearse(sim, days = 22) {
   out.books = folk.households.map(hh => [hh.id, hh.arrears, hh.clean_sundays, hh.gone, hh.last_funds]);
   out.homes = [...sim.homes.values()].map(h => [h.id, h.household, h.owner, h.listing, h.rent]);
   out.events = sim.events.map(ev => ev.text);
+  out.memory = folk.people.map(p => [...p.memory]);
+  out.luck = folk.luck_log.map(row => [...row]);
+  out.positions = folk.people.map(p => [...p.position()]);
   return out;
 }
 

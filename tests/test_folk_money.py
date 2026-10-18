@@ -67,6 +67,8 @@ def rehearse(sim, days: int = 22) -> dict:
     on day 5; birthdays on day 10; every workday's shift pay, Friday pensions and Sunday books. Line by line with
     rehearse in port/tools/parity_folk_gen.cjs."""
     folk = sim.folk
+    folk.luck_log = []  # F2a's Folk has one; people.log_roll fills it
+    sim.lots[sim.homes[folk.households[0].home_id].place].condition = 5.0  # one derelict home: damp and chills
     for day in range(days):
         weekday = day % 7
         sim.clock.tick = day * MINUTES_PER_DAY
@@ -116,6 +118,9 @@ def rehearse(sim, days: int = 22) -> dict:
     out["books"] = [[hh.id, hh.arrears, hh.clean_sundays, hh.gone, hh.last_funds] for hh in folk.households]
     out["homes"] = [[h.id, h.household, h.owner, h.listing, h.rent] for h in sim.homes.values()]
     out["events"] = [ev["text"] for ev in sim.events]
+    out["memory"] = [list(p.memory) for p in folk.people]
+    out["luck"] = [list(row) for row in folk.luck_log]
+    out["positions"] = [list(p.position()) for p in folk.people]
     return out
 
 
@@ -222,6 +227,28 @@ class ArrearsTest(unittest.TestCase):
             self.assertEqual(sim.homes[hh.home_id].household, hh.id)
         check_households(self, sim)
 
+    def test_forced_move_refreshes_commutes(self):
+        sim = SimStub(1)
+        hh = self._broke(sim)
+        sim.folk.wheel = None  # as F2a's Folk: folk.on_job_change is reached
+        seen = []
+        real = folk_life._folk_fn
+        folk_life._folk_fn = lambda name: (lambda s, p: seen.append((p.id, s.folk.household(p.household_id).home_id))
+                                           if name == "on_job_change" else real(name))
+        try:
+            old_home = hh.home_id
+            for week in range(3):
+                sim.clock.tick = (6 + 7 * week) * MINUTES_PER_DAY + 23 * 60
+                folk_life.weekly(sim)
+        finally:
+            folk_life._folk_fn = real
+        self.assertNotEqual(hh.home_id, old_home)
+        mem = folk_life.members(sim.folk, hh)
+        for p in mem:  # each one's commute from the new home (other households in the red may move too)
+            self.assertIn((p.id, hh.home_id), seen)
+        for pid, home_id in seen:
+            self.assertEqual(sim.folk.household(sim.folk.person(pid).household_id).home_id, home_id, pid)
+
     def test_no_cheaper_home_means_leaving_town(self):
         sim = SimStub(1)
         hh = self._broke(sim)
@@ -273,6 +300,25 @@ class HouseholdTest(unittest.TestCase):
         self.assertGreater(split_ok, 5)
         self.assertGreater(left, 5)
 
+    def test_owners_who_move_out_sell(self):
+        sim = SimStub(1)
+        folk = sim.folk
+        src = next(hh for hh in folk.households if sim.homes[hh.home_id].owner == hh.id
+                   and len(folk_life.members(folk, hh)) == 1 and folk_life.adults(folk, hh))
+        p = folk_life.members(folk, src)[0]
+        home = sim.homes[src.home_id]
+        proceeds = housing.sale_proceeds(sim, home.id)
+        self.assertGreater(proceeds, 0)
+        host = next(q for q in folk.people if q.age >= 25 and q.household_id != p.household_id and not q.gone)
+        before = worth(p)
+        folk_life.join(sim, p, host)
+        self.assertEqual(p.household_id, host.household_id)
+        self.assertTrue(src.gone)
+        self.assertEqual(home.owner, "market")
+        self.assertIsNone(home.household)
+        self.assertEqual(worth(p) - before, cents(proceeds))  # the home's value goes with its owner
+        check_households(self, sim)
+
     def test_new_household_takes_a_vacant_rental(self):
         sim = SimStub(1)
         folk = sim.folk
@@ -316,6 +362,7 @@ class NightlyTest(unittest.TestCase):
     def test_damp_and_emergencies(self):
         sim = SimStub(1)
         folk = sim.folk
+        folk.luck_log = []  # F2a's Folk has one; people.log_roll fills it
         owned = [hh for hh in folk.households if sim.homes[hh.home_id].owner == hh.id]
         self.assertGreater(len(owned), 20)
         hh = owned[0]
@@ -330,8 +377,13 @@ class NightlyTest(unittest.TestCase):
         self.nights(sim, 2, 21)
         tags = [ev["tag"] for ev in sim.events]
         self.assertGreater(tags.count("emergency"), 5)
-        fixed = [ev for ev in sim.events if ev["tag"] == "emergency_settled" and " is fixed" in ev["text"]]
+        self.assertNotIn("emergency_settled", tags)  # importance 0: memory only (PLAN 2.8)
+        fixed = [p.id for p in folk.people if any(" is fixed." in m for m in p.memory)]
         self.assertGreater(len(fixed), 0)
+        whats = {row[3] for row in folk.luck_log}  # every luck-shifted roll is logged (life.md 5.11)
+        self.assertEqual(whats, {"damp_chill", "home_emergency"})
+        for row in folk.luck_log:
+            self.assertTrue(row[1].startswith("f"), row)
         for ev in sim.events:  # folk news names folk only: every agent a townsperson
             for a in ev["agents"] + ([ev["agent"]] if ev["agent"] else []):
                 self.assertTrue(a.startswith("f"), ev)
@@ -359,7 +411,8 @@ class NodeParityTest(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stdout[-2000:] + out.stderr[-2000:])
         node = json.loads(out.stdout.strip().splitlines()[-1])
         py = json.loads(json.dumps(got))
-        for key in ("gone", "books", "homes", "events", "households"):
+        self.assertEqual({row[3] for row in py["luck"]}, {"damp_chill", "home_emergency"})
+        for key in ("gone", "books", "homes", "events", "households", "memory", "luck", "positions"):
             self.assertEqual(node[key], py[key], key)
         for a, b in zip(node["people"], py["people"]):
             self.assertEqual(a, b, a["id"])
