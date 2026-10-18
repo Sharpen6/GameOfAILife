@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art specimens</title>
+<style>
+  html, body { margin: 0; background: #1b2028; color: #dfe6ee; font: 12px/1.4 system-ui, sans-serif; }
+  #bar { position: sticky; top: 0; padding: 6px 10px; background: #11151d; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  #sheet { display: block; margin: 8px; image-rendering: pixelated; }
+  select, label { font: inherit; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <b>Art specimens</b>
+  <label>Season <select id="season"><option>summer</option><option>spring</option><option>autumn</option><option>winter</option></select></label>
+  <label>Stage <select id="stage"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
+  <label>View <select id="proj"><option value="iso">iso</option><option value="flat">flat</option></select></label>
+  <span id="info"></span>
+</div>
+<canvas id="sheet"></canvas>
+<script src="../view/proj.js"></script>
+<script src="../view/art.js"></script>
+<script src="../view/buildings.js"></script>
+<script src="../view/towers.js"></script>
+<script src="../view/rail_art.js"></script>
+<script src="../view/actors.js"></script>
+<script>
+"use strict";
+// The V2 specimen sheet: every building style (a sample place of each, as the region and Millbrook use them) at one
+// stage and season, every ground tile code, the train cars, folk sheets and vehicles. tests/browser/art_specimens.cjs
+// drives the same page with its own places (window.SPEC_PLACES) and checks the sprites.
+(function () {
+  const CV = window.CityView;
+  const STYLES = ["house", "shop", "row_houses", "big_house", "warehouse", "restaurant", "apartments", "tower",
+    "residential_tower", "cafe", "factory", "station", "school", "market", "city_hall", "hospital", "arcade", "bank",
+    "corner_shop", "diner", "bakery", "noodle_bar", "stadium", "cinema", "hotel", "library", "police", "fire_station",
+    "mall", "clubhouse"];
+  const KIND = { house: "home", big_house: "home", row_houses: "home", apartments: "home", residential_tower: "home",
+    tower: "office", shop: "shop", restaurant: "cafe", cafe: "cafe", diner: "cafe", bakery: "cafe", noodle_bar: "cafe",
+    warehouse: "works", factory: "works", station: "station", school: "school", market: "market", corner_shop: "market",
+    city_hall: "townhall", hospital: "hospital", arcade: "shop", bank: "bank", stadium: "venue", cinema: "venue",
+    hotel: "venue", library: "townhall", police: "townhall", fire_station: "townhall", mall: "shop", clubhouse: "venue" };
+  const SIZE = { house: [3, 3, 1], shop: [4, 3, 2], row_houses: [8, 3, 2], big_house: [5, 4, 2], warehouse: [5, 4, 1],
+    restaurant: [4, 3, 2], apartments: [6, 4, 6], tower: [5, 5, 24], residential_tower: [6, 5, 14], cafe: [4, 2, 1],
+    factory: [10, 6, 2], station: [10, 2, 1], school: [10, 6, 2], market: [6, 4, 1], city_hall: [8, 5, 4],
+    hospital: [10, 7, 6], arcade: [10, 6, 4], bank: [6, 5, 6], corner_shop: [4, 3, 1], diner: [4, 2, 1],
+    bakery: [4, 3, 1], noodle_bar: [4, 3, 2], stadium: [12, 9, 3], cinema: [8, 5, 2], hotel: [9, 6, 14],
+    library: [8, 5, 2], police: [6, 4, 2], fire_station: [6, 4, 2], mall: [12, 8, 2], clubhouse: [5, 3, 2] };
+  // A sample region place of a style: away from Millbrook (so it has a variant), door on the south side.
+  function sample(style, k) {
+    const [w, h, floors] = SIZE[style] || [4, 3, 2];
+    const x = 100 + 13 * (k || 0), y = 60;
+    return { id: style + "_spec_" + (k || 0), name: (style === "tower" && k === 1 ? "Brightline Tech" : "Harbour " + style), kind: KIND[style] || "shop", style,
+      x, y, w, h, floors, face: "s", entry: [x + (w >> 1), y + h], variant: (k || 0) % 8 };
+  }
+  function draw() {
+    const season = document.getElementById("season").value, stage = +document.getElementById("stage").value;
+    const proj = CV.makeProj(document.getElementById("proj").value, 256, 192, 0), art = CV.makeArt(proj);
+    const places = (window.SPEC_PLACES || STYLES.map(s => sample(s, 0)));
+    const sprites = places.map(p => {
+      const c = CV.canonPlace(p), look = p.kind === "home" ? { stage, units: [{}, { vacant: true }, {}, {}] } : {};
+      const t0 = performance.now(), b = art.building(c, look, season);
+      return { p, b, ms: performance.now() - t0 };
+    });
+    const tiles = Object.keys(TILE_DEMO).map(code => { const R = TILE_DEMO[code]; return [code, CV.groundTileOf(art, CV.groundKey(R, 1, 1, season))]; });
+    const cols = 6, cellW = Math.max(...sprites.map(s => s.b.c.width)) + 12, cellH = Math.max(...sprites.map(s => s.b.c.height)) + 22;
+    const rows = Math.ceil(sprites.length / cols);
+    const sheet = document.getElementById("sheet"), extraH = 260;
+    sheet.width = cols * cellW; sheet.height = rows * cellH + extraH;
+    const g = sheet.getContext("2d");
+    g.fillStyle = "#2a3140"; g.fillRect(0, 0, sheet.width, sheet.height);
+    sprites.forEach((s, i) => {
+      const cx = (i % cols) * cellW, cy = Math.floor(i / cols) * cellH;
+      g.fillStyle = "#344055"; g.fillRect(cx + 2, cy + 2, cellW - 4, cellH - 4);
+      g.drawImage(s.b.c, cx + 6, cy + cellH - 18 - s.b.c.height);
+      g.fillStyle = "#dfe6ee"; g.fillText(`${s.p.style} ${s.ms.toFixed(1)} ms`, cx + 6, cy + cellH - 6);
+    });
+    let x = 6, y = rows * cellH + 8;
+    for (const [code, t] of tiles) { g.drawImage(t, x, y); g.fillStyle = "#dfe6ee"; g.fillText(code, x + 2, y + 10); x += t.width + 4; if (x > sheet.width - 70) { x = 6; y += t.height + 6; } }
+    y += 64; x = 6;
+    const cars = ["head", "car", "car", "tail"].map((k, i) => art.trainCar("#d23a3a", i % 2 ? "s" : "e", k, i === 2));
+    for (const c of cars) { g.drawImage(c.c, x, y); x += c.c.width; }
+    for (let v = 0; v < 24; v++) { const s = art.folkSheet(v, v % 5 === 4); g.drawImage(s.c, 0, 0, 16, 30, x, y + 20, 16, 30); x += 18; }
+    for (const k of ["car", "van", "truck", "taxi"]) { const c = art.car("#3a6ad6", k, 0); g.drawImage(c.c, x, y); x += 90; }
+    document.getElementById("info").textContent = `${sprites.length} styles, sprites ${(sprites.reduce((a, s) => a + s.b.c.width * s.b.c.height, 0) / 1e6).toFixed(2)} MP`;
+  }
+  // One 3 x 3 town per tile code, with the code in the middle and neighbours that give it a run.
+  const mk = rows => ({ w: 3, h: 3, tiles: rows, millbrook: [-10, -10, 1, 1] });
+  const TILE_DEMO = { ".": mk(["...", "...", "..."]), "#": mk(["...", "###", "..."]), "B": mk(["BBB", "BBB", "BBB"]),
+    "D": mk(["DDD", "DDD", "DDD"]), "P": mk(["PPP", "PPP", "PPP"]), "T": mk(["...", ".T.", "..."]), "e": mk([".B.", ".e.", ".#."]),
+    "~": mk(["~~~", "~~~", "..."]), "b": mk(["~#~", "~b~", "~#~"]), "x": mk([".#.", "=x=", ".#."]), "F": mk(["FFF", "FFF", "FFF"]),
+    "=": mk(["...", "===", "SSS"]), "r": mk(["~~~", "=r=", "~~~"]), "S": mk(["SSS", "SSS", "==="]), "H": mk(["HHH", "HHH", "..."]),
+    "h": mk(["~~~", "hhh", "hhh"]) };
+  window.SpecSheet = { draw, sample, STYLES, TILE_DEMO };
+  for (const id of ["season", "stage", "proj"]) document.getElementById(id).addEventListener("change", draw);
+  draw();
+})();
+</script>
+</body>
+</html>
