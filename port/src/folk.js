@@ -28,7 +28,7 @@
   const CPU_KEEP = 1440; // ticks of timings kept for the perf report
   const WARD = "ward";
   const FREE = ["relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-    "idle", "stroll"]; // activities that can be interrupted (is_free)
+    "idle", "stroll", "movie", "golf", "read"]; // activities that can be interrupted (is_free)
 
   // activity -> [need gains over the whole stay, outdoors]. Decay is folk_model's (DECAY_SCALE by activity).
   const ACT = {
@@ -47,6 +47,9 @@
     hang_out: [{ social: 40, fun: 25 }, false],
     walk_park: [{ fun: 30, social: 4 }, true],
     stroll: [{ fun: 15 }, true],
+    movie: [{ fun: 45, social: 10 }, false],
+    golf: [{ fun: 40, social: 15 }, false],
+    read: [{ fun: 25 }, false],
     ward: [{ hunger: 40 }, false],
     idle: [{}, false],
   };
@@ -62,6 +65,14 @@
   };
   const GROCERY_COST = 35, COFFEE_COST = 4, MEAL_COST = 14, DINNER_COST = 20, HANG_COST = 8;
   const GROCERY_MEALS = 10;
+  // A day out (folk.md 5 day_off d), by "kind/style": [activity, label, cost or null for the shopping spend, min age]
+  const DAY_OUT = {
+    "shop/mall": ["shopping", "A day at the mall", null, 0],
+    "venue/cinema": ["movie", "See a film", 12, 0],
+    "venue/clubhouse": ["golf", "A round of golf", 40, 40],
+    "townhall/library": ["read", "Read at the library", 0, 0],
+  };
+  const DAY_OUT_WALK = 40, DAY_OUT_CAR = 25, DAY_OUT_MINUTES = 150; // reach from home, and the stay
   // Outcomes of an outing (folk.md 5), keyed dice into the luck log: [what, valence, chance, money, fun]
   const BARGAIN = ["bargain", 1, 0.05, 15, 0]; // shopping or groceries
   const PICKPOCKET = ["pickpocket", -1, 0.003, -60, 0]; // any outing
@@ -701,7 +712,8 @@
           new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
             { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05),
           this._hang_option(sim, p, now, 120),
-          this._park_option(p, now, 90),
+          ((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend) : null) ||
+            this._park_option(p, now, 90),
         ];
       } else { // evening
         const left = m < bed ? Math.max(30, bed - m) : 30;
@@ -724,6 +736,36 @@
       }
       return new Option("A walk round the block", "stroll", this.home_place(p), 2 * STROLL_MINUTES, 0,
         { health: 0.4 }, ACT.stroll[0], 0.05);
+    }
+
+    // A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or null.
+    _day_out_option(p, now, spend) {
+      const home = this.home_place(p);
+      if (home === null) return null;
+      const car = this._has_car(p);
+      const ck = `${home}|day_out|${car}`;
+      let got = this._fav_cache.get(ck);
+      if (got === undefined) {
+        const net = ft().net(this.town);
+        const cands = [];
+        for (const [pid, place] of this.town.places) {
+          if (!(`${place.kind}/${place.style}` in DAY_OUT) || !this.allowed(pid)) continue;
+          const w = net.minutes(home, pid, "walk");
+          if (w <= DAY_OUT_WALK || (car && net.minutes(home, pid, "car") <= DAY_OUT_CAR)) cands.push([w, pid]);
+        }
+        cands.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+        got = cands.map(c => c[1]);
+        this._fav_cache.set(ck, got);
+      }
+      for (const pid of got) {
+        const place = this.town.places.get(pid);
+        const [act, label, cost, age] = DAY_OUT[`${place.kind}/${place.style}`];
+        if (p.age >= age && this._usable(pid, now, DAY_OUT_MINUTES)) {
+          return new Option(label, act, pid, DAY_OUT_MINUTES, cost === null ? spend : cost,
+            { adventure: 0.4, thrift: -0.2 }, ACT[act][0], 0.1);
+        }
+      }
+      return null;
     }
 
     _hang_option(sim, p, now, minutes) {
@@ -1425,7 +1467,7 @@
   }
 
   G.folk = {
-    BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
+    DAY_OUT, DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES, BARGAIN, PICKPOCKET, RAINED_OUT, DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
     GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,

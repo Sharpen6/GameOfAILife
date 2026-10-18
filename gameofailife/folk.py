@@ -44,7 +44,7 @@ UNAVAILABLE = -9.0  # the score of an option whose place is shut or full
 CPU_KEEP = 1440  # ticks of CPU timings kept for the perf report
 WARD = "ward"
 FREE = ("relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-        "idle", "stroll")  # activities that can be interrupted (is_free)
+        "idle", "stroll", "movie", "golf", "read")  # activities that can be interrupted (is_free)
 
 # activity -> (need gains over the whole stay, outdoors). Decay is folk_model's (DECAY_SCALE by activity).
 ACT = {
@@ -63,6 +63,9 @@ ACT = {
     "hang_out": ({"social": 40, "fun": 25}, False),
     "walk_park": ({"fun": 30, "social": 4}, True),
     "stroll": ({"fun": 15}, True),
+    "movie": ({"fun": 45, "social": 10}, False),
+    "golf": ({"fun": 40, "social": 15}, False),
+    "read": ({"fun": 25}, False),
     "ward": ({"hunger": 40}, False),
     "idle": ({}, False),
 }
@@ -77,6 +80,12 @@ LEISURE = {  # favourite key -> (place kind, styles or None for any)
     "park": ("park", None),
 }
 GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST = 35, 4, 14, 20, 8
+# A day out (folk.md 5 day_off d), by (kind, style): (activity, label, cost or None for the shopping spend, min age)
+DAY_OUT = {("shop", "mall"): ("shopping", "A day at the mall", None, 0),
+           ("venue", "cinema"): ("movie", "See a film", 12, 0),
+           ("venue", "clubhouse"): ("golf", "A round of golf", 40, 40),
+           ("townhall", "library"): ("read", "Read at the library", 0, 0)}
+DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES = 40, 25, 150  # reach from home, and the stay
 GROCERY_MEALS = 10
 # Outcomes of an outing (folk.md 5), keyed dice into the luck log: (what, valence, chance, money, fun)
 BARGAIN = ("bargain", 1, 0.05, 15, 0)  # shopping or groceries
@@ -694,7 +703,8 @@ class Folk:
                 Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
                        {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05),
                 self._hang_option(sim, p, now, 120),
-                self._park_option(p, now, 90),
+                ((self._day_out_option(p, now, spend) if (p.i + now // DAY) % 2 == 0 else None)
+                 or self._park_option(p, now, 90)),
             ]
         else:  # evening
             left = max(30, bed - m) if m < bed else 30
@@ -714,6 +724,33 @@ class Folk:
                           ACT["walk_park"][0], 0.1)
         return Option("A walk round the block", "stroll", self.home_place(p), 2 * STROLL_MINUTES, 0,
                       {"health": 0.4}, ACT["stroll"][0], 0.05)
+
+    def _day_out_option(self, p, now: int, spend: int) -> Option | None:
+        """A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or None."""
+        home = self.home_place(p)
+        if home is None:
+            return None
+        car = self._has_car(p)
+        ck = (home, "day_out", car)
+        got = self._fav_cache.get(ck)
+        if got is None:
+            net = folk_transit.net(self.town)
+            cands = []
+            for pid, place in self.town.places.items():
+                if (place.kind, place.style) not in DAY_OUT or not self.allowed(pid):
+                    continue
+                w = net.minutes(home, pid, "walk")
+                if w <= DAY_OUT_WALK or (car and net.minutes(home, pid, "car") <= DAY_OUT_CAR):
+                    cands.append((w, pid))
+            cands.sort()
+            got = self._fav_cache[ck] = [pid for _, pid in cands]
+        for pid in got:
+            place = self.town.places[pid]
+            act, label, cost, age = DAY_OUT[(place.kind, place.style)]
+            if p.age >= age and self._usable(pid, now, DAY_OUT_MINUTES):
+                return Option(label, act, pid, DAY_OUT_MINUTES, spend if cost is None else cost,
+                              {"adventure": 0.4, "thrift": -0.2}, ACT[act][0], 0.1)
+        return None
 
     def _hang_option(self, sim, p, now: int, minutes: int) -> Option:
         cafe = self._pick(p, "coffee", now, minutes) or self._pick(p, "eat_out", now, minutes)
