@@ -18,6 +18,7 @@ module functions below are the folk side of life.md 3.2's contract.
 
 from __future__ import annotations
 
+import importlib
 import time
 from collections import deque
 
@@ -104,29 +105,34 @@ PICKPOCKET = ("pickpocket", -1, 0.003, -60, 0)  # any outing
 RAINED_OUT = ("rained_out", -1, 0.5, 0, -10)  # a park walk or stroll in the rain
 
 
+_LAZY: dict = {}  # name -> module: folk's imports that would be cycles at load time, each looked up once
+
+
+def _lazy(name: str):
+    got = _LAZY.get(name)
+    if got is None:
+        got = _LAZY[name] = importlib.import_module(f"{__package__}.{name}")
+    return got
+
+
 def _dice():
-    from . import dice  # L1's module
-    return dice
+    return _lazy("dice")  # L1's module
 
 
 def _people():
-    from . import people
-    return people
+    return _lazy("people")
 
 
 def _life():
-    from . import life
-    return life
+    return _lazy("life")
 
 
 def _career():
-    from . import career
-    return career
+    return _lazy("career")
 
 
 def _folk_life():
-    from . import folk_life
-    return folk_life
+    return _lazy("folk_life")
 
 
 def urgency(level: float) -> float:
@@ -921,8 +927,8 @@ class Folk:
         thrift = traits.get("thrift", 0.5)
         m = now % DAY
         rate = TRAVEL_COST * (NIGHT_TRAVEL if m >= NIGHT_FROM * 60 or m < NIGHT_UNTIL * 60 else 1)
-        here = self.where.get(p.i) or self.home_place(p)
         home = self.home_place(p)
+        here = self.where.get(p.i) or home
         car = self._has_car(p)
         direct = self._trip_minutes(here, home, car)
         scores = []
@@ -941,10 +947,11 @@ class Folk:
             if opt.cost > 0:
                 afford = -opt.cost / max(own, 50) * thrift if opt.cost <= own else -2.0
             score = opt.base + STYLE * style + need + afford
-            if opt.place != home or opt.activity == "stroll":
-                extra = self._trip_minutes(here, opt.place, car) + self._trip_minutes(opt.place, home, car) - direct
+            if opt.activity == "stroll" or opt.place != home:
                 if opt.activity == "stroll":
                     extra = 2 * STROLL_MINUTES
+                else:
+                    extra = self._trip_minutes(here, opt.place, car) + self._trip_minutes(opt.place, home, car) - direct
                 if extra > 0:
                     score -= extra * rate
             scores.append(round(score, 3))
@@ -981,11 +988,11 @@ class Folk:
         opts = self.options(sim, p, now, kind)
         scores = self.score_options(sim, p, opts, now)
         order = sorted(range(4), key=lambda k: (-scores[k], k))
-        rr = _dice().stream(sim.dice_seed, NS_FOLK, p.i, now)
         if scores[order[0]] - scores[order[1]] >= OBVIOUS_MARGIN:
             pick, by = order[0], "habit"
             self.counters["habit"] += 1
         else:
+            rr = _dice().stream(sim.dice_seed, NS_FOLK, p.i, now)  # keyed: made only when the noise decides
             best, pick = None, 0
             for k in range(4):
                 s = scores[k] + rr.uniform(0, NOISE)
@@ -1399,10 +1406,9 @@ class Folk:
 
 def _folk_life_or_none():
     try:
-        from . import folk_life
+        return _lazy("folk_life")
     except ImportError:
         return None
-    return folk_life
 
 
 def _folk_of(sim) -> Folk | None:

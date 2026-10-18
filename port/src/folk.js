@@ -937,8 +937,8 @@
       const thrift = "thrift" in traits ? traits.thrift : 0.5;
       const m = now % DAY;
       const rate = TRAVEL_COST * (m >= NIGHT_FROM * 60 || m < NIGHT_UNTIL * 60 ? NIGHT_TRAVEL : 1);
-      const here = this.where.get(p.i) || this.home_place(p);
       const home = this.home_place(p);
+      const here = this.where.get(p.i) || home;
       const car = this._has_car(p);
       const direct = this._trip_minutes(here, home, car);
       const scores = [];
@@ -954,9 +954,9 @@
         let afford = 0.0;
         if (opt.cost > 0) afford = opt.cost <= own ? -opt.cost / Math.max(own, 50) * thrift : -2.0;
         let score = opt.base + STYLE * style + need + afford;
-        if (opt.place !== home || opt.activity === "stroll") {
-          let extra = this._trip_minutes(here, opt.place, car) + this._trip_minutes(opt.place, home, car) - direct;
-          if (opt.activity === "stroll") extra = 2 * STROLL_MINUTES;
+        if (opt.activity === "stroll" || opt.place !== home) {
+          const extra = opt.activity === "stroll" ? 2 * STROLL_MINUTES
+            : this._trip_minutes(here, opt.place, car) + this._trip_minutes(opt.place, home, car) - direct;
           if (extra > 0) score -= extra * rate;
         }
         scores.push(G.py.pyRound(score, 3));
@@ -996,13 +996,13 @@
       const opts = this.options(sim, p, now, kind);
       const scores = this.score_options(sim, p, opts, now);
       const order = [0, 1, 2, 3].sort((a, b) => scores[b] - scores[a] || a - b);
-      const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now);
       let pick, by;
       if (scores[order[0]] - scores[order[1]] >= OBVIOUS_MARGIN) {
         pick = order[0];
         by = "habit";
         this.counters.habit += 1;
       } else {
+        const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now); // keyed: made only when the noise decides
         let best = null;
         pick = 0;
         for (let k = 0; k < 4; k++) {
