@@ -492,7 +492,8 @@ class HookTest(unittest.TestCase):
                 mock.patch.object(self.sim.stats, "reset_day", side_effect=reset):
             self.at(1, -1)
             self.sim.step()  # midnight
-        self.assertIn("old_age", order)
+        # v3 (L2): no old-age roll at midnight any more; life's daily rolls (mortality among them) run in each
+        # person's own slot minute (life.tick), so nothing but v2's old-age roll, if any, comes before nightly.
         nightly = order.index("nightly")
         self.assertEqual(order[nightly:nightly + 2], ["nightly", "reset"])
         self.assertTrue(all(what == "old_age" for what in order[:nightly]))

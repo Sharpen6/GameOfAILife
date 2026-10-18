@@ -526,6 +526,13 @@
       _agenda(sim, life.ward_until, "discharge", p.id, days);
       return;
     }
+    if (days <= 1 && why === "very unwell") {
+      // v2's ambulance for health below 25 (sim._next): an afternoon on the `hospital` activity.
+      sim.event(`${p.name} feels very unwell, and an ambulance takes them to `
+        + `${sim.town.places.get("hospital").name}.`, p, null, { tag: "hospital" });
+      sim.start_plan(p, [["hospital", "hospital"]], "ambulance"); // free; the hospital's fee stays
+      return;
+    }
     if (p.trip !== null || p.riding !== null) {
       _agenda(sim, t + 10, "hospital", p.id, [days, why]); // off the bus first
       return;
@@ -660,7 +667,7 @@
 
   function _family(sim, p, day) {
     const life = p.life;
-    if (p.is_adult && _children(sim, p).some(c => c.age === 0)) p.adjust("energy", -BABY_ENERGY);
+    if (p.is_adult && _named(sim, p) && _children(sim, p).some(c => c.age === 0)) p.adjust("energy", -BABY_ENERGY); // named parents of a newborn
     if (life.pregnant !== null || !(p.age >= 20 && p.age < 45) || _sex(p) !== "f") return;
     const other = _partner(sim, p);
     if (other === null || other.age < ADULT_AGE) {

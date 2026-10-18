@@ -590,6 +590,13 @@ def hospitalise(sim, p, days: int, why: str) -> None:
         _event(sim, p, f"{p.name} is taken to hospital ({why}).", "hospital", importance=1)
         _agenda(sim, life.ward_until, "discharge", p.id, days)
         return
+    if days <= 1 and why == "very unwell":
+        # v2's ambulance for health below 25 (sim._next): an afternoon on the `hospital` activity, its $50 fee paid
+        # by sim._end_activity.
+        sim.event(f"{p.name} feels very unwell, and an ambulance takes them to "
+                  f"{sim.town.places['hospital'].name}.", p, tag="hospital")
+        sim.start_plan(p, [("hospital", "hospital")], "ambulance")  # free; the hospital's fee stays
+        return
     if p.trip is not None or p.riding is not None:
         _agenda(sim, t + 10, "hospital", p.id, (days, why))  # off the bus first
         return
@@ -732,8 +739,8 @@ def _family(sim, p, day: int) -> None:
     """Wanting a child (every 30 days) and conception (daily, no luck) for a partnered woman 20-44; a new baby's
     parents tire."""
     life = p.life
-    if p.is_adult and any(c.age == 0 for c in _children(sim, p)):
-        p.adjust("energy", -BABY_ENERGY)
+    if p.is_adult and _named(sim, p) and any(c.age == 0 for c in _children(sim, p)):
+        p.adjust("energy", -BABY_ENERGY)  # named parents of a newborn (folk needs are folk's own)
     if life.pregnant is not None or not (20 <= p.age < 45) or _sex(p) != "f":
         return
     other = _partner(sim, p)

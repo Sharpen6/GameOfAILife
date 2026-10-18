@@ -1520,7 +1520,7 @@ def new_household(sim, members: list, home_id: str, how: str) -> Household | Non
     if not members:
         return None
     if members[0].id not in sim.agents:
-        return sim.folk.new_household(sim, members, home_id, how)
+        return sim.folk.new_household([m.id for m in members], home_id, how)
     home = sim.homes.get(home_id)
     if home is None or home.household is not None:
         return None

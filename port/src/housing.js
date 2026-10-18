@@ -1478,7 +1478,7 @@
   // home is not vacant.
   function new_household(sim, members, home_id, how) {
     if (!members.length) return null;
-    if (!sim.agents.has(members[0].id)) return sim.folk.new_household(sim, members, home_id, how);
+    if (!sim.agents.has(members[0].id)) return sim.folk.new_household(members.map(m => m.id), home_id, how);
     const home = sim.homes.get(home_id);
     if (home === undefined || home.household !== null) return null;
     const base = G.py.lastName(members[0].name).toLowerCase();
