@@ -207,7 +207,7 @@
         if (kind === "carpark") // the aisles run out through the verge to the street at each end
           for (let y = inner[1]; y < inner[3]; y++) if ((y - inner[1]) % 3 === 1) for (const x of [rx, rx + rw - 1]) {
             const j = y * W + x, nx = x === rx ? x - 1 : x + 1;
-            if (x >= 0 && x < W && useOf[j] === USE.verge && at(nx, y) === "#") { useOf[j] = USE.park; useK[j] = 1; }
+            if (x >= 0 && x < W && useOf[j] === USE.verge && R.isStreet(nx, y)) { useOf[j] = USE.park; useK[j] = 1; }
           }
       }
     }
@@ -334,7 +334,7 @@
       const [ex, ey] = p.entry || [p.x, p.y];
       const out = [];
       for (const [x, y] of own) {
-        const road = SIDES.filter(([, dx, dy]) => at(x + dx, y + dy) === "#")
+        const road = SIDES.filter(([, dx, dy]) => R.isStreet(x + dx, y + dy))
           .sort((a, b) => proj.depth(x + b[1] + 0.5, y + b[2] + 0.5) - proj.depth(x + a[1] + 0.5, y + a[2] + 0.5));
         if (!road.length) continue;
         const t = { x, y, road: road[0][0], depth: proj.depth(x + 0.5, y + 0.5), drive: driveOf[y * W + x] === i, near: Math.abs(x - ex) + Math.abs(y - ey) };
@@ -589,7 +589,7 @@
         const w = proj.toWorld(lx, ly), d = proj.depth(lx, ly), x0 = w[0] - 2, y0 = w[1] - 41, x1 = w[0] + 9, y1 = w[1];
         return boardRects.some(r => d > r.depth && x0 < r.x1 && x1 > r.x0 && y0 < r.y1 && y1 > r.y0);
       };
-      const lampOk = (x, y, bx, by, lx, ly) => at(x, y) === "#" && at(bx, by) !== "#" && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx) && !coversBoard(lx, ly);
+      const lampOk = (x, y, bx, by, lx, ly) => R.isStreet(x, y) && !R.isStreet(bx, by) && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx) && !coversBoard(lx, ly);
       for (const ry of town.road_rows) for (let x0 = 2; x0 < W; x0 += 4) {
         const x = [x0, x0 + 1, x0 - 1].find(a => a >= 0 && a < W && lampOk(a, ry, a, ry - 1, a + 0.5, ry + 0.07));
         if (x == null) continue;
@@ -654,7 +654,7 @@
             const h = hash(`md${x},${y}`);
             if (h % 11 === 0) addSprite(list, art.tree(scene.season, "bush", (h >>> 4) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "bush", (h >>> 4) % 4);
             else if (h % 29 === 1) addSprite(list, art.tree(scene.season, "round", (h >>> 4) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "round", (h >>> 4) % 6);
-            const road = at(x, y + 1) === "#" || at(x + 1, y) === "#" || at(x, y - 1) === "#" || at(x - 1, y) === "#";
+            const road = R.isStreet(x, y + 1) || R.isStreet(x + 1, y) || R.isStreet(x, y - 1) || R.isStreet(x - 1, y);
             if (road && proj.depth(x, y) > sd) { sd = proj.depth(x, y); sign = [x, y]; }
           });
           if (sign) addSprite(list, art.landSign(), sign[0] + 0.5, sign[1] + 0.5, proj.depth(sign[0] + 0.5, sign[1] + 0.5), "s");
@@ -1308,7 +1308,7 @@
       }
       scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
       if (BIG && chunks && frameNo % 30 === 0) { chunks.begin(); chunks.trim(lowCap() - nearPx()); }
-      if (BIG) { const a = performance.now(); buildQueued(budget, 4); scene.stats.spriteMs = performance.now() - a; }
+      if (BIG) { const a = performance.now(); buildQueued(budget, 4); scene.stats.spriteMs = performance.now() - a; const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy]; if (st && !spriteQueue.size && !scene.stats.boxes) prefetch(); }
       smoke(v, now);
       // rain: an overcast wash, so a still frame reads as wet weather too
       const raining = scene.weather === "rain" || scene.weather === "storm";
@@ -1425,7 +1425,9 @@
         staleSprites: st.staleSprites || 0, items: st.items || 0, boxes: st.boxes || 0, runs: st.runs || 0, splitRuns: st.splitRuns || 0,
         nearStale: scene.lodNow === "near" ? (st.nearStale || 0) + (st.mipMiss || 0) : 0, mipMiss: st.mipMiss || 0, statics_builds: st.statics_builds || 0, staticsMs: st.staticsMs || 0, placeUpdates: st.placeUpdates || 0, buildings: R.buildings.length };
     };
-    let lastLowView = null;
+    let lastLowView = null, lastNearView = null;
+    // idle prefetch: the far levels over the whole map, so a zoom out finds them baked
+    const prefetch = () => { const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
     function drawLow(v, lod, now) {
       const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom);
       scene.levelNow = lv;
@@ -1474,6 +1476,7 @@
         for (const o of inRect(v.x0, v.y0, v.x1, v.y1)) if (o.big) spriteOf(o);
         buildQueued(budget, 4);
       }
+      if (still && !chunks.pending) prefetch();
       scene.stats.items = 0; scene.stats.chunks = n; scene.stats.boxes = 0;
       scene.stats.buildMs = budget.spent;
       labels(v, now);
@@ -1486,7 +1489,7 @@
       for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
         if (x < 0 || y < 0 || x >= W || y >= H) continue;
         const k = y * W + x;
-        if (placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && tiles[y][x] !== "#" && tiles[y][x] !== "~"))) out.push([x, y]);
+        if (placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && !R.isStreet(x, y) && tiles[y][x] !== "~"))) out.push([x, y]);
       }
       if (lot) for (const [x, y] of lotTiles[i]) if (dist(p, x, y) > 1) out.push([x, y]);
       return out;
@@ -2038,7 +2041,7 @@
     scene.bounds = () => B;
     scene.buildings = () => { if (dirty) buildStatics(); return buildings; };
     scene.buildingOf = id => scene.buildings().find(r => r.p.id === id) || null;
-    scene.isRoad = (x, y) => at(x, y) === "#";
+    scene.isRoad = (x, y) => R.isStreet(x, y);
     scene.driveOf = id => { const i = placeById.get(id); for (let k = 0; k < N; k++) if (driveOf[k] === i) return [k % W, Math.floor(k / W)]; return null; };
     scene.prewarm = () => { scene.eager = true; };
     // The V1a-V1b seam (view.md 4.5): a mover source {items(v, out), marks(g, v, lod), pick(wx, wy, r) -> hit | null}.

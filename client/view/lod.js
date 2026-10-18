@@ -83,6 +83,19 @@
         work(e, budget);
       }
     };
+    // Idle prefetch (view.md 3.2): bake one missing chunk of (layer, level) over the world rect r = {x0, y0, x1,
+    // y1}, when the budget has room left this frame. True when it baked (or worked on) one.
+    C.prefetch = function (layer, level, r, budget) {
+      if (budget.left() < 3) return false;
+      const [cx0, cy0, cx1, cy1] = C.range(level, r);
+      for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+        const e = map.get(keyOf(layer, level, cx, cy));
+        if (e && e.c && !e.stale) continue;
+        work(entry(layer, level, cx, cy), budget);
+        return true;
+      }
+      return false;
+    };
     // Draw a chunk into g at view v (S, ox, oy); a missing one falls back to any cached level of the layer.
     C.draw = function (g, e, v) {
       const dx0 = Math.round(e.wx0 * v.S + v.ox), dy0 = Math.round(e.wy0 * v.S + v.oy);
