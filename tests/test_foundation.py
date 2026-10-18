@@ -261,7 +261,7 @@ class ForkMessageTest(unittest.TestCase):
             checked += 1
             self.assertEqual(len(msg["options"]), 4)
             for i, opt in enumerate(msg["options"]):
-                self.assertLessEqual(set(opt), {"index", "label", "cost", "travel_minutes", "household"})
+                self.assertLessEqual(set(opt), {"index", "label", "cost", "travel_minutes", "household", "home"})
                 self.assertEqual(opt["index"], i)
                 self.assertEqual("household" in opt, fork.options[i].household_pays)
                 if "travel_minutes" in opt:

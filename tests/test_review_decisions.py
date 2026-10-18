@@ -415,7 +415,7 @@ class TestOneLateAnswer(Case):
         for _ in range(5):
             self.assertEqual(self.sim.answer(fork.id, late, "again", controller="bot"),
                              {"accepted": False, "error": "too late"})
-        self.assertEqual(dana.profile.traits[tag], 0.54)  # moved once: 0.5 + 0.04
+        self.assertEqual(dana.profile.traits[tag], 0.53)  # moved once: 0.5 + 0.04 x (1 - the options' mean 0.25), v3 D 17
         self.assertEqual(len(dana.profile.learned), 1)
         self.assertEqual(fork.late_answer, {"choice": late, "reason": "first"})
 

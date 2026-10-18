@@ -91,6 +91,7 @@
   const MEET = ["hang_out", "play"]; // activities an invite meets at: the host waits doing it, the guest comes to do it
   const MEET_TILES = 3; // how near two people outdoors must be for a first meeting (_meet_someone)
   const IDLE_FUN = 1.6; // how much faster fun drains while sitting idle (FIXLISTS 8)
+  const RECENT_FORKS = 8; // decisions the fork message's `you.recent` carries, with what came of each
   const DAY_OFF_WAKE = 8 * 60; // the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
   const NEWS_EVERY = { fender: 30 * G.clock.MINUTES_PER_DAY }; // outcome id -> the least time between two of one person's in the news
 
@@ -940,7 +941,11 @@
       const here = this.town.places.get(agent.inside || "");
       const needs = {};
       for (const [k, v] of Object.entries(agent.needs)) needs[k] = pyRound(v);
-      return {
+      const payer = !agent.is_adult ? this._payer_for(agent, Infinity) : agent;
+      const recent = agent.forks.slice(-RECENT_FORKS).map(f => ({ id: f.id, time: f.time, kind: f.kind,
+        question: f.question, label: f.options[f.choice], by: f.decided_by, happened: f.happened.slice() })); // what came of each, keyed by fork id (FIXLISTS 2)
+      const extra = this.speed ? { minutes_per_second: G.clock.TICKS_PER_REAL_SECOND * this.speed } : {};
+      return Object.assign({
         type: "fork", fork_id: fork.id, agent_id: agent.id, kind: fork.kind,
         question: fork.question, options, time: this.clock.stamp(),
         deadline_seconds: ANSWER_SECONDS, weather: this.weather, season: this.clock.season,
@@ -950,8 +955,10 @@
           where: agent.inside || "outside", groceries_at_home: hh.groceries,
           goal: agent.goal, recent_memory: agent.memory.slice(-5),
           savings: G.rng.r2(agent.savings), where_name: here ? here.name : "outside",
-          home_name: this.homes.get(hh.home_id).name }, G.housing.fork_you(this, agent)),
-      };
+          home_name: this.homes.get(hh.home_id).name }, G.housing.fork_you(this, agent),
+        { today: G.forks.today_line(this, agent), recent,
+          payer: payer !== agent ? { name: payer.name, money: pyRound(payer.money, 2) } : null }),
+      }, extra);
     }
 
     // A controller's answer. Applies within 5s; within 10s it only teaches the profile.
@@ -991,7 +998,17 @@
     _learn(agent, fork, choice, reason) {
       const opt = fork.options[choice];
       const note = `${fork.kind}: chose '${opt.label}'` + (reason ? ` because ${reason}` : "");
-      agent.profile.learn(opt.tags, cut(note, 200));
+      // What the choice says beyond the fork's options on average (FIXLISTS 9): picking one of four thrifty ways
+      // teaches no thrift. (The cap and the slow drift back to the start are agent.js's.)
+      const tags = {};
+      const keys = new Set();
+      for (const o of fork.options) for (const k of Object.keys(o.tags)) keys.add(k);
+      for (const k of [...keys].sort()) {
+        let total = 0.0;
+        for (const o of fork.options) total += getd(o.tags, k, 0.0);
+        tags[k] = getd(opt.tags, k, 0.0) - total / fork.options.length;
+      }
+      agent.profile.learn(tags, cut(note, 200));
       if (!agent.profile.prompt_edited) agent.profile.prompt = agent.profile.describe(agent);
     }
 

@@ -426,6 +426,204 @@ class Invites(unittest.TestCase):
         self.assertIn("Ari declines my invite to", tom.memory[-1])
 
 
+class ScheduleLine(unittest.TestCase):
+    """Item 11: the fork message says what today holds, and no free-time or lonely fork opens in the work window."""
+
+    def test_today_line(self):
+        sim = Simulation(1)
+        dana = sim.agents["dana"]
+        job = dana.job
+        day = min(job.workdays)
+        hours = f"{job.start_hour:02d}:00-{job.end_hour:02d}:00"
+        at(sim, day, job.start_hour - 1, 14)
+        self.assertEqual(forks.today_line(sim, dana), f"work {hours} (in 46 min)")
+        off = next(d for d in range(7) if d not in job.workdays)
+        at(sim, off, 11)
+        nxt = next(d for d in range(1, 8) if (off + d) % 7 in job.workdays)
+        label = "tomorrow" if nxt == 1 else ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[(off + nxt) % 7]
+        self.assertEqual(forks.today_line(sim, dana), f"Day off; next shift {label} {job.start_hour:02d}:00")
+        fork = forks.sleep_fork(sim, dana) or forks.free_time_fork(sim, dana) or forks.hunger_fork(sim, dana)
+        dana.needs["hunger"] = 5
+        fork = fork or forks.hunger_fork(sim, dana)
+        msg = sim.fork_message(dana, fork)
+        self.assertEqual(msg["you"]["today"], forks.today_line(sim, dana))
+        from examples import claude_controller as cc
+        self.assertIn(f"Today: Day off; next shift {label}", cc.decision_page(msg))
+        kid = next(a for a in sim.agents.values() if not a.is_adult and a.job)
+        self.assertTrue(forks.today_line(sim, kid).startswith(("Day off; next school", "school ")))
+
+    def test_no_free_time_or_lonely_inside_the_work_window(self):
+        sim = Simulation(1)
+        checked = 0
+        for a in sim.living():
+            if not a.job or not a.is_adult:
+                continue
+            at(sim, min(a.job.workdays), a.job.start_hour, 0)
+            sim.clock.tick -= forks.work_lead(sim, a) - 5
+            a.inside, a.worked_today = sim.home_of(a), -1
+            if not forks.in_work_window(sim, a):
+                continue
+            a.needs["social"], a.needs["fun"], a.idle_home = 5, 5, 10 ** 4
+            self.assertIsNone(forks.lonely_fork(sim, a), a.id)
+            self.assertIsNone(forks.free_time_fork(sim, a), a.id)
+            checked += 1
+        self.assertGreater(checked, 20)
+
+
+def pupil_fork(sim, kid):
+    at(sim, min(kid.job.workdays), kid.job.start_hour - 1, 20)
+    kid.inside, kid.worked_today = sim.home_of(kid), -1
+    (kid.x, kid.y) = sim.town.places[kid.inside].entry
+    return forks.work_fork(sim, kid)
+
+
+class ChildrensPages(unittest.TestCase):
+    """Item 12: a pupil's page reads like school, offers no coffee, and says the family pays."""
+
+    def test_no_coffee_for_pupils(self):
+        sim = Simulation(1)
+        kids = [a for a in sim.living() if not a.is_adult and a.job and a.job.hourly_wage == 0]
+        self.assertGreater(len(kids), 5)
+        for kid in kids:
+            for minute in range(kid.job.start_hour * 60 - 60, kid.job.start_hour * 60 + 1, 5):
+                at(sim, min(kid.job.workdays), 0, minute)
+                kid.inside, kid.worked_today = sim.home_of(kid), -1
+                fork = forks.work_fork(sim, kid)
+                if fork is None:
+                    continue
+                slot = fork.options[2]
+                self.assertNotIn("coffee", slot.label.lower(), (kid.id, slot.label))
+                self.assertIn(slot.steps[0], [("coffee", "home"), ("snack", None)], kid.id)
+                self.assertEqual(slot.cost if slot.steps[0][0] == "coffee" else 0, 0)
+
+    def test_the_page_reads_like_school(self):
+        from examples import claude_controller as cc
+        sim = Simulation(1)
+        kid = next(a for a in sim.living() if not a.is_adult and a.job and a.job.hourly_wage == 0)
+        kid.money = 0.0
+        fork = pupil_fork(sim, kid)
+        msg = json.loads(json.dumps(sim.fork_message(kid, fork)))
+        self.assertIsNotNone(msg["you"]["payer"])
+        payer = sim._payer_for(kid, float("inf"))
+        self.assertEqual(msg["you"]["payer"]["name"], payer.name)
+        about = {"attributes": kid.attributes()}
+        page = cc.decision_page(msg, about)
+        self.assertIn(f"School {kid.job.start_hour}:00-{kid.job.end_hour}:00, doing well ", page)
+        self.assertNotIn("Job:", page)
+        self.assertNotIn("Standing at work", page)
+        self.assertNotIn("at work", page.split("RIGHT NOW")[0])
+        self.assertIn("your family pays", page)
+        msg["options"][1]["cost"] = 2
+        self.assertIn(f", which {payer.name.split()[0]} pays", cc.decision_page(msg, about))
+        adult = sim.agents["dana"]
+        self.assertIsNone(sim.fork_message(adult, fork)["you"]["payer"])
+
+
+class ThenLines(unittest.TestCase):
+    """Item 13: "Then:" rows come from the city's own record of each decision (keyed by fork id), habit marked."""
+
+    def test_recent_comes_from_the_record(self):
+        run = Played(1, seconds=3.0, ids={"dana"})
+        run.run(MINUTES_PER_DAY + 600)
+        dana = run.sim.agents["dana"]
+        msg = list(run.asked.values())[-1]
+        recent = msg["you"]["recent"]
+        self.assertTrue(recent)
+        record = {f["id"]: f for f in dana.forks}
+        for r in recent:
+            self.assertEqual(r["label"], record[r["id"]]["options"][record[r["id"]]["choice"]])
+            self.assertEqual(r["by"], record[r["id"]]["decided_by"])
+        self.assertTrue(any(r["happened"] for r in recent))
+
+    def test_rows_and_habit(self):
+        from examples import claude_controller as cc
+        recent = [{"id": "f1", "time": "Day 2 Tue 07:10", "question": "How do you go?", "label": "Walk",
+                   "by": "habit", "happened": ["Arrives late."]},
+                  {"id": "f2", "time": "Day 2 Tue 18:00", "question": "You're hungry. What do you do?",
+                   "label": "Cook at home", "by": "model", "happened": []}]
+        self.assertEqual(cc.recent_decisions(recent), [
+            "- 2 Tue 07:10: How do you go -> Walk (out of habit). Then: Arrives late.",
+            "- 2 Tue 18:00: You're hungry. What do you do -> Cook at home. Then: nothing notable."])
+        page = cc.decision_page({"question": "?", "options": [], "you": {"recent": recent}})
+        self.assertIn("Walk (out of habit). Then: Arrives late.", page)
+
+
+class Wording(unittest.TestCase):
+    """Item 15: the way home on options at home, "really" before verbs, a daytime question when worn out."""
+
+    def test_home_options(self):
+        from examples import claude_controller as cc
+        sim = Simulation(1)
+        at(sim, 6, 11)
+        tom = sim.agents["tom"]
+        tom.needs["fun"] = 10
+        tom.inside, (tom.x, tom.y) = None, sim.town.places["bakery"].entry
+        fork = forks.free_time_fork(sim, tom)
+        msg = sim.fork_message(tom, fork)
+        relax = [o for o in msg["options"] if o["label"] == "Relax at home"][0]
+        self.assertTrue(relax.get("home"))
+        line = cc.option_line(relax, "a")
+        self.assertNotIn("min away", line)
+        if relax.get("travel_minutes") is not None:
+            self.assertIn(f"home in {relax['travel_minutes']} min", line)
+        self.assertTrue(all(not o.get("home") for o in msg["options"] if o["label"].startswith("Walk in")))
+
+    def test_really_before_verbs(self):
+        from examples import claude_controller as cc
+        words = cc.personality({"social": 0.05, "thrift": 0.95, "diligence": 0.5})
+        self.assertIn("really enjoys time alone", words)
+        self.assertIn("very careful with money", words)
+        self.assertNotIn("very enjoys", words)
+        self.assertIn("works hard at school", cc.personality({"diligence": 0.75}, pupil=True))
+
+    def test_a_daytime_question_when_worn_out(self):
+        sim = Simulation(1)
+        tom = sim.agents["tom"]
+        tom.needs["energy"] = 5
+        tom.inside = sim.home_of(tom)
+        at(sim, 6, 14)
+        day = forks.sleep_fork(sim, tom)
+        at(sim, 6, 23)
+        night = forks.sleep_fork(sim, tom)
+        self.assertNotIn("late", day.question)
+        self.assertEqual(night.question, "It's late and you're tired. What now?")
+
+
+class Arcade(unittest.TestCase):
+    """Item 16: weekend free time can be a wander round the Arcade."""
+
+    def test_buy_something_nice_at_the_weekend(self):
+        sim = Simulation(1)
+        tom = sim.agents["tom"]
+        tom.needs["fun"], tom.money = 10, 200.0
+        tom.inside = sim.home_of(tom)
+        at(sim, 5, 11)  # Saturday
+        fork = forks.free_time_fork(sim, tom)
+        nice = [o for o in fork.options if o.label.startswith("Buy something nice at")]
+        self.assertEqual(len(nice), 1)
+        self.assertEqual(sim.town.places[nice[0].steps[0][1]].kind, "shop")
+        self.assertEqual(len({o.label for o in fork.options}), 4)
+        at(sim, 2, 11)  # Wednesday
+        self.assertFalse([o for o in forks.free_time_fork(sim, tom).options if o.label.startswith("Buy something")])
+
+
+class TraitDrift(unittest.TestCase):
+    """Item 17 (the call site): a choice teaches what sets it apart from the fork's other options, not its own tags."""
+
+    def test_learning_is_relative_to_the_options(self):
+        sim = Simulation(1)
+        dana = sim.agents["dana"]
+        opts = [forks.Option(f"Thrifty {i}", [("rest", "home")], tags={"thrift": 1.0, "social": 0.4 * i})
+                for i in range(4)]
+        fork = forks.Fork("dana", "test", "Which thrifty way?", opts, sim.clock.tick)
+        before = dict(dana.profile.traits)
+        sim._learn(dana, fork, 3, "")
+        self.assertEqual(dana.profile.traits["thrift"], before["thrift"])  # all four were thrifty
+        self.assertAlmostEqual(dana.profile.traits["social"], round(before["social"] + 0.04 * (1.2 - 0.6), 3))
+        sim._learn(dana, fork, 0, "")
+        self.assertLess(dana.profile.traits["social"], round(before["social"] + 0.04 * 0.6, 3))
+
+
 def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
     """port/tools/parity_decisions.cjs in Python (the JS port's dice, through test_port's DiceSim)."""
     from tests.test_port import DiceSim
@@ -436,7 +634,7 @@ def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
     for a in sim.agents.values():
         sim.claim(a.id, "fake")
     due, asked = [], 0
-    out = {"events": [], "forks": [], "hours": []}
+    out = {"events": [], "forks": [], "hours": [], "asks": []}
     end = sim.clock.tick + days * MINUTES_PER_DAY
     while sim.clock.tick < end:
         clock.t += 1 / (TICKS_PER_REAL_SECOND * 8)
@@ -451,6 +649,10 @@ def python_played(seed: int, days: int, dice: int, seconds: float) -> dict:
         for _, msg in outbox:
             if msg["type"] != "fork":
                 continue
+            you = msg["you"]
+            out["asks"].append([sim.clock.tick, msg["agent_id"], msg["kind"], msg["question"], you["today"], you["payer"],
+                                [[r["kind"], r["label"], r["by"], r["happened"]] for r in you["recent"]],
+                                [[o.get("home", False), o.get("travel_minutes")] for o in msg["options"]]])
             s = msg["profile_scores"]
             pick = s.index(max(s))
             asked += 1
@@ -474,11 +676,14 @@ class DecisionsParity(unittest.TestCase):
         py = python_played(1, 7, 5, 3.0)
         ids = lambda rows: [re.sub(r" f\d+ ", " f# ", r, count=1) for r in rows]  # noqa: E731
         for name, a, b in (("events", py["events"], js["events"]), ("forks", ids(py["forks"]), ids(js["forks"])),
-                           ("hours", py["hours"], [json.loads(h) for h in js["hours"]])):
+                           ("hours", py["hours"], [json.loads(h) for h in js["hours"]]),
+                           ("asks", json.loads(json.dumps(py["asks"])), [json.loads(h) for h in js["asks"]])):
             at = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
             self.assertEqual(a[at:at + 1], b[at:at + 1], f"{name} differ first at #{at} (Python first)")
             self.assertEqual(len(a), len(b), name)
         self.assertTrue(any("instead" in f for f in py["forks"]))
+        self.assertGreater(len(py["asks"]), 200)
+        self.assertTrue(any(a[5] for a in py["asks"]))  # a child's payer
 
 
 if __name__ == "__main__":

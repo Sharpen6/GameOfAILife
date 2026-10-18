@@ -90,6 +90,8 @@ class Option:
             out["travel_minutes"] = minutes
         if self.household_pays:
             out["household"] = True
+        if next((where for _, where in self.steps if where is not None), None) == "home":
+            out["home"] = True  # it happens at home: any minutes are the way home (FIXLISTS 16)
         return out
 
 
@@ -218,6 +220,29 @@ def in_work_window(sim: Simulation, agent: Agent) -> bool:
     leisure fork starts then."""
     start = sim._shift_start_tick(agent)
     return start is not None and sim.clock.tick >= start - work_lead(sim, agent)
+
+
+def today_line(sim: Simulation, agent: Agent) -> str:
+    """The fork message's `you.today` (FIXLISTS 10): "work 09:00-17:00 (in 46 min)", "work 09:00-17:00 (started 5
+    min ago)", "work done; next shift Wed 09:00", "Day off; next shift Tue 16:00", or "No work or school"."""
+    from .clock import DAY_NAMES
+
+    job = agent.job
+    if not job or not job.workdays:
+        return "No work or school"
+    what = "school" if job.hourly_wage == 0 else "work"
+    hours = f"{job.start_hour:02d}:00-{job.end_hour:02d}:00"
+    m, today = sim.clock.minute_of_day, sim.clock.weekday
+    if today in job.workdays and m < job.end_hour * 60 and agent.worked_today != sim.clock.day:
+        if m < job.start_hour * 60:
+            return f"{what} {hours} (in {job.start_hour * 60 - m} min)"
+        return f"{what} {hours} (started {m - job.start_hour * 60} min ago)"
+    if today in job.workdays and agent.worked_today == sim.clock.day and m < job.end_hour * 60:
+        return f"{what} {hours} (there now)" if agent.activity == "work" else f"{what} {hours} (not going today)"
+    nxt = next(d for d in range(1, 8) if (today + d) % 7 in job.workdays)
+    label = "tomorrow" if nxt == 1 else DAY_NAMES[(today + nxt) % 7]
+    done = f"{what} done" if today in job.workdays else "Day off"
+    return f"{done}; next {'school' if what == 'school' else 'shift'} {label} {job.start_hour:02d}:00"
 
 
 def _family_away(sim: Simulation, agent: Agent) -> Agent | None:
@@ -503,7 +528,17 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     at_work = cafe is not None and cafe.id == job.place_id
     way = (sim.walk_minutes(agent, cafe.id) + (0 if at_work else sim.town.walk_minutes(cafe.entry, job.place_id))
            if cafe else None)
-    if (cafe and (way <= walk_minutes + COFFEE_DETOUR or way + COFFEE_MINUTES <= home_trip)
+    if school and not agent.is_adult:  # no cafe stop for a pupil (FIXLISTS 11): breakfast at home, else a bite
+        if home_trip <= minutes_to_start:
+            coffee = Option("Have breakfast at home, then go", [("coffee", "home"), ("work", "job")], vehicle="walk",
+                            base=0.35, tags={"health": 0.3, "family": 0.3, "diligence": -0.3},
+                            gains={"energy": 5, "hunger": 20},
+                            outcomes=[_late(0.0), Outcome("spill", "Spills milk all over the table", 0.05, -1,
+                                                          {"fun": -3})])
+            coffee_trip = home_trip
+        else:
+            coffee, coffee_trip = _bite_first(usual, usual_late), usual_trip + SNACK_MINUTES
+    elif (cafe and (way <= walk_minutes + COFFEE_DETOUR or way + COFFEE_MINUTES <= home_trip)
             and (way if at_work else way + COFFEE_MINUTES) <= minutes_to_start):
         coffee = Option("Have a coffee at work" if at_work else f"Grab a coffee at {cafe.name} first",
                         [("coffee", cafe.id), ("work", "job")], cost=4,
@@ -566,7 +601,9 @@ def sleep_fork(sim: Simulation, agent: Agent) -> Fork | None:
                tags={"health": 0.3, "adventure": -0.2, "social": -0.3}, gains={"fun": 15, "energy": 50},
                outcomes=[Outcome("great_chapter", "Reads a gripping chapter", 0.5, +1, {"fun": 6})]),
     ]
-    return Fork(agent.id, "sleep", "It's late and you're tired. What now?", opts, sim.clock.tick)
+    late = hour >= 21 or hour < 5  # worn out in the daytime is another question (FIXLISTS 16)
+    return Fork(agent.id, "sleep", "It's late and you're tired. What now?" if late else
+                "You're worn out and can barely keep your eyes open. What now?", opts, sim.clock.tick)
 
 
 def hunger_fork(sim: Simulation, agent: Agent) -> Fork | None:
@@ -869,6 +906,14 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
                                  {"fun": 15, "money": 50} if agent.is_adult else {"fun": 20}, group="project"),
                          Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, {"fun": -6}, group="project")]),
     ]
+    shop = (_open_place(sim, agent, ("shop",), SHOP_MINUTES)
+            if sim.clock.is_weekend and agent.is_adult and agent.money >= 40 else None)
+    if shop:  # a weekend wander round the shops (FIXLISTS 18): in place of the side project
+        opts[3] = Option(f"Buy something nice at {shop.name}", [("shopping", shop.id), ("relax_home", "home")], cost=40,
+                         tags={"thrift": -1.0, "adventure": 0.5, "social": 0.2}, gains={"fun": 35},
+                         outcomes=[Outcome("love_it", "Loves the purchase", 0.6, +1, {"fun": 15}, group="purchase"),
+                                   Outcome("regret", "Regrets the spending", 0.3, -1, {"fun": -8}, group="purchase"),
+                                   _meet_new(0.08)])
     return Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick)
 
 

@@ -730,7 +730,8 @@ Characters without a controller play their profile default.)
 | `you.recent_memory`| Last 5 memory strings. |
 
 While a fork is open the character's `state` and `activity` are `"deciding"`
-and the character stands still.
+and the character stands still, except at a work fork, where they set off at
+once (see [Decisions](#decisions) below).
 
 Some options move money besides their `cost`. In a `groceries` fork,
 `"Ask <name> to do the shopping"` shows `cost` 0, but if that person is free
@@ -745,6 +746,45 @@ when the household acts on it: otherwise the event says the household was too
 late, and nothing is paid. A `"Take the No. <line> bus to work"` (or `to school`) option shows
 the fare as its `cost` ($2 for ages 18 to 64, else 0), but the fare is paid only
 when the character boards a bus, and not at all if they end up walking.
+
+#### Decisions
+
+These fork message keys, and the rules around them, describe how a character
+decides and lives with the clock running while the controller thinks.
+
+| Field | Meaning |
+|-------|---------|
+| `minutes_per_second` | Game minutes that go by per real second at the server's current speed (19.2 at speed 8). Present only when the server has told the simulation its speed (`sim.speed`); absent when paused or unknown. A page can say "every second you take, about 19 minutes go by". |
+| `options[i].home` | `true` when the option's first stop is the character's home. Its `travel_minutes`, if any, is the way home ("home in 12 min"), not a trip out. |
+| `you.today` | What today holds, from the job's hours and `workdays`: `"work 09:00-17:00 (in 46 min)"`, `"work 09:00-17:00 (started 5 min ago)"`, `"work 09:00-17:00 (there now)"`, `"work 09:00-17:00 (not going today)"`, `"work done; next shift tomorrow 09:00"`, `"Day off; next shift Tue 16:00"`, or `"No work or school"`. For a pupil the word is `school` (`"Day off; next school Mon 08:00"`). |
+| `you.recent` | The character's last 8 decided forks, oldest first, from the same record as [`get_decisions`](#get_decisions): `{"id", "time", "kind", "question", "label", "by", "happened"}`, where `label` is the option played, `by` is `model`, `habit`, `default` or `timeout`, and `happened` lists what came of it (the same strings as a decided fork's `happened`, which fills in as outcomes land, so a fork just decided may still show `[]`). |
+| `you.payer` | For a child: `{"name", "money"}` of the household adult who pays for what the child can't cover (the one with the most money), else `null` (an adult, or a child with no adult at home). |
+
+A work fork no longer freezes the character. As it is asked, the character
+sets off on the option that matches their usual way to work (the profile's
+provisional plan; option 0 when none matches). When the answer lands (or the
+5-second window runs out), the decision is re-timed from where the character
+now is: already at work means the way they went stands; otherwise the chosen
+option plays if it is still on time, else the fastest option still on time (or
+the fastest of all), and the decided fork's `reason` gets a note such as
+`"already at work by then: Walk to work instead"` or `"too late for that by
+then: Run to work instead"`. Hidden outcomes are rolled once, for the option
+actually played, with its lateness odds re-timed for the minutes left. Other
+forks still wait with the character standing, but a fork still open when it is
+time to leave for work is decided by its profile default (`by` `"timeout"`,
+reason `"Time to leave for work; played the default."`).
+
+Other rules in v3: no `lonely` or `free_time` fork opens inside a work fork's
+window (from when the work fork can open until the shift starts); a pupil's
+work fork offers breakfast at home (or a bite on the way out), never a cafe; a
+`free_time` fork on Saturday from 17:00 to 20:00 can be the family's evening
+(`"Treat <names> to dinner at <place>"`, only when a member is free and no child
+under 10 would be left at home alone); a weekend `free_time` fork can offer
+`"Buy something nice at <shop>"` ($40); a payday fork offers `"Buy <goal>
+now"` when the cash on hand covers what is left of the goal (the goal is then
+cleared, with a `goal_reached` event); and an invite's `"Ignore the message"`
+scores below `"Decline politely"`, whose answer goes into the host's memory
+(`"<name> declines my invite to <place>."`).
 
 ### `message`
 

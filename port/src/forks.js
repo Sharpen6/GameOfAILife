@@ -83,6 +83,7 @@
       const out = { index, label: this.label, cost: pyRound(this.cost, 2) };
       if (minutes !== null && minutes !== undefined) out.travel_minutes = minutes;
       if (this.household_pays) out.household = true;
+      if ((this.steps.find(s => (s[1] ?? null) !== null)?.[1] ?? null) === "home") out.home = true; // it happens at home: any minutes are the way home (FIXLISTS 16)
       return out;
     }
   }
@@ -211,6 +212,29 @@
   function in_work_window(sim, agent) {
     const start = sim._shift_start_tick(agent);
     return start !== null && sim.clock.tick >= start - work_lead(sim, agent);
+  }
+
+  // The fork message's `you.today` (FIXLISTS 10): "work 09:00-17:00 (in 46 min)", "work 09:00-17:00 (started 5 min
+  // ago)", "work done; next shift Wed 09:00", "Day off; next shift Tue 16:00", or "No work or school".
+  function today_line(sim, agent) {
+    const DAY_NAMES = G.clock.DAY_NAMES;
+    const job = agent.job;
+    if (!job || !job.workdays.length) return "No work or school";
+    const what = job.hourly_wage === 0 ? "school" : "work";
+    const hours = `${pad2(job.start_hour)}:00-${pad2(job.end_hour)}:00`;
+    const m = sim.clock.minute_of_day, today = sim.clock.weekday;
+    if (job.workdays.includes(today) && m < job.end_hour * 60 && agent.worked_today !== sim.clock.day) {
+      if (m < job.start_hour * 60) return `${what} ${hours} (in ${job.start_hour * 60 - m} min)`;
+      return `${what} ${hours} (started ${m - job.start_hour * 60} min ago)`;
+    }
+    if (job.workdays.includes(today) && agent.worked_today === sim.clock.day && m < job.end_hour * 60) {
+      return agent.activity === "work" ? `${what} ${hours} (there now)` : `${what} ${hours} (not going today)`;
+    }
+    let nxt = 1;
+    while (!job.workdays.includes((today + nxt) % 7)) nxt += 1;
+    const label = nxt === 1 ? "tomorrow" : DAY_NAMES[(today + nxt) % 7];
+    const done = job.workdays.includes(today) ? `${what} done` : "Day off";
+    return `${done}; next ${what === "school" ? "school" : "shift"} ${label} ${pad2(job.start_hour)}:00`;
   }
 
   // The closest family member or partner outside the household (someone to phone), or null.
@@ -500,7 +524,19 @@
     const way = cafe ? (sim.walk_minutes(agent, cafe.id) + (at_work ? 0
       : sim.town.walk_minutes(cafe.entry, job.place_id))) : null;
     let coffee, coffee_trip;
-    if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= home_trip)
+    if (school && !agent.is_adult) { // no cafe stop for a pupil (FIXLISTS 11): breakfast at home, else a bite
+      if (home_trip <= minutes_to_start) {
+        coffee = new Option("Have breakfast at home, then go", [["coffee", "home"], ["work", "job"]], { vehicle: "walk",
+          base: 0.35, tags: { health: 0.3, family: 0.3, diligence: -0.3 },
+          gains: { energy: 5, hunger: 20 },
+          outcomes: [_late(0.0), new Outcome("spill", "Spills milk all over the table", 0.05, -1,
+            { fun: -3 })] });
+        coffee_trip = home_trip;
+      } else {
+        coffee = _bite_first(usual, usual_late);
+        coffee_trip = usual_trip + SNACK_MINUTES;
+      }
+    } else if (cafe && (way <= walk_minutes + COFFEE_DETOUR || way + COFFEE_MINUTES <= home_trip)
       && (at_work ? way : way + COFFEE_MINUTES) <= minutes_to_start) {
       coffee = new Option(at_work ? "Have a coffee at work" : `Grab a coffee at ${cafe.name} first`,
         [["coffee", cafe.id], ["work", "job"]], { cost: 4,
@@ -560,7 +596,9 @@
         { tags: { health: 0.3, adventure: -0.2, social: -0.3 }, gains: { fun: 15, energy: 50 },
           outcomes: [new Outcome("great_chapter", "Reads a gripping chapter", 0.5, +1, { fun: 6 })] }),
     ];
-    return new Fork(agent.id, "sleep", "It's late and you're tired. What now?", opts, sim.clock.tick);
+    const late = hour >= 21 || hour < 5; // worn out in the daytime is another question (FIXLISTS 16)
+    return new Fork(agent.id, "sleep", late ? "It's late and you're tired. What now?"
+      : "You're worn out and can barely keep your eyes open. What now?", opts, sim.clock.tick);
   }
 
   function hunger_fork(sim, agent) {
@@ -859,6 +897,14 @@
           agent.is_adult ? { fun: 15, money: 50 } : { fun: 20 }, "project"),
         new Outcome("stuck", "Gets stuck and frustrated", 0.3, -1, { fun: -6 }, "project")] }),
     ];
+    const shop = sim.clock.is_weekend && agent.is_adult && agent.money >= 40
+      ? _open_place(sim, agent, ["shop"], SHOP_MINUTES) : null;
+    if (shop) { // a weekend wander round the shops (FIXLISTS 18): in place of the side project
+      opts[3] = new Option(`Buy something nice at ${shop.name}`, [["shopping", shop.id], ["relax_home", "home"]], { cost: 40,
+        tags: { thrift: -1.0, adventure: 0.5, social: 0.2 }, gains: { fun: 35 },
+        outcomes: [new Outcome("love_it", "Loves the purchase", 0.6, +1, { fun: 15 }, "purchase"),
+          new Outcome("regret", "Regrets the spending", 0.3, -1, { fun: -8 }, "purchase"), _meet_new(0.08)] });
+    }
     return new Fork(agent.id, "free_time", "You have some free time and feel a bit bored. What do you do?", opts, sim.clock.tick);
   }
 
@@ -901,7 +947,7 @@
     HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, SNACK_MINUTES, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
     LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, WOKE_GAP, SHIFT_SOON, MAX_OUTING_MINUTES, TRAVEL_KINDS, TRAVEL_COST,
     NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, COOPED_KINDS, COOPED_UP, COOPED_HOURS, Outcome, Option, Fork, luck_odds,
-    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, retime_late, personal, names, in_work_window, _family_away, _walk_friend, _housemate_home,
+    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, retime_late, personal, names, today_line, in_work_window, _family_away, _walk_friend, _housemate_home,
     _dinner_party, _dinner_out, family_fork, IDLE_HOME, IDLE_SPREAD, OUTDOOR, RAIN_PENALTY, BEDTIME, WEEKEND_BED,
     DINNER_FROM, DINNER_UNTIL, LONELY_IDLE_COOLDOWN, _curfew,
     _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,

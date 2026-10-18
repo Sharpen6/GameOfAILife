@@ -1,7 +1,8 @@
 // Node side of tests/test_run_fixes.py's DecisionsParity: a city whose 60 people are all played by a fake
 // controller that answers every fork SECONDS after it is asked at speed 8 (the profile's favourite, and every third
 // answer the next option round), with the Python engine's dice, so the two engines' think-time plans can be
-// compared: every event, decided fork (with its reason) and hourly agent row.
+// compared: every event, decided fork (with its reason), hourly agent row and fork message (its `you.today`,
+// `you.payer`, `you.recent` and each option's `home` and minutes).
 //
 //   node port/tools/parity_decisions.cjs SEED DAYS DICE SECONDS
 "use strict";
@@ -14,7 +15,7 @@ function played(seed, days, dice, seconds) {
   const per_tick = 1 / (G.clock.TICKS_PER_REAL_SECOND * 8);
   const due = [];
   let asked = 0;
-  const out = { events: [], forks: [], hours: [] };
+  const out = { events: [], forks: [], hours: [], asks: [] };
   const end = sim.clock.tick + days * G.clock.MINUTES_PER_DAY;
   while (sim.clock.tick < end) {
     clock.t += per_tick;
@@ -28,6 +29,10 @@ function played(seed, days, dice, seconds) {
     for (const f of forks) out.forks.push(`${f.tick} ${f.id} ${f.agent} ${f.kind} ${f.choice} ${f.decided_by} ${f.reason} ${f.happened.join("|")}`);
     for (const [, msg] of outbox) {
       if (msg.type !== "fork") continue;
+      const you = msg.you;
+      out.asks.push(JSON.stringify([sim.clock.tick, msg.agent_id, msg.kind, msg.question, you.today, you.payer,
+        you.recent.map(r => [r.kind, r.label, r.by, r.happened]),
+        msg.options.map(o => [o.home || false, o.travel_minutes === undefined ? null : o.travel_minutes])]));
       const s = msg.profile_scores;
       let pick = s.indexOf(Math.max(...s));
       asked += 1;

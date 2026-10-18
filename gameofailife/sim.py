@@ -20,9 +20,9 @@ from typing import Callable
 
 from . import chronicle, housing, stats, transit, travel
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
-from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
+from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, TICKS_PER_REAL_SECOND, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
-                    default_scores, luck_odds, names, personal, retime_late, work_lead)
+                    default_scores, luck_odds, names, personal, retime_late, today_line, work_lead)
 from .rng import r2
 from .town import PARK, TownMap, build_map
 from .transit import BUS_FARE, FLIGHTS
@@ -105,6 +105,7 @@ WANDER_EVERY = 1  # minutes per tile of a stroll in the park (walking pace, so a
 MEET = ("hang_out", "play")  # activities an invite meets at: the host waits doing it, the guest comes to do it
 MEET_TILES = 3  # how near two people outdoors must be for a first meeting (_meet_someone)
 IDLE_FUN = 1.6  # how much faster fun drains while sitting idle (FIXLISTS 8)
+RECENT_FORKS = 8  # decisions the fork message's `you.recent` carries, with what came of each
 DAY_OFF_WAKE = 8 * 60  # the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
 NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
 
@@ -880,6 +881,11 @@ class Simulation:
         for i, opt in enumerate(fork.options):
             options.append(opt.public(i, self._option_minutes(agent, opt)))
         here = self.town.places.get(agent.inside or "")
+        payer = self._payer_for(agent, float("inf")) if not agent.is_adult else agent
+        extra = {"minutes_per_second": TICKS_PER_REAL_SECOND * self.speed} if getattr(self, "speed", 0) else {}
+        recent = [{"id": f["id"], "time": f["time"], "kind": f["kind"], "question": f["question"],
+                   "label": f["options"][f["choice"]], "by": f["decided_by"], "happened": list(f["happened"])}
+                  for f in agent.forks[-RECENT_FORKS:]]  # what came of each, keyed by fork id (FIXLISTS 2)
         return {
             "type": "fork", "fork_id": fork.id, "agent_id": agent.id, "kind": fork.kind,
             "question": fork.question, "options": options, "time": self.clock.stamp(),
@@ -890,7 +896,10 @@ class Simulation:
                     "where": agent.inside or "outside", "groceries_at_home": hh.groceries,
                     "goal": agent.goal, "recent_memory": agent.memory[-5:],
                     "savings": r2(agent.savings), "where_name": here.name if here else "outside",
-                    "home_name": self.homes[hh.home_id].name, **housing.fork_you(self, agent)},
+                    "home_name": self.homes[hh.home_id].name, **housing.fork_you(self, agent),
+                    "today": today_line(self, agent), "recent": recent,
+                    "payer": ({"name": payer.name, "money": round(payer.money, 2)} if payer is not agent else None)},
+            **extra,
         }
 
     def answer(self, fork_id: str, choice: int, reason: str = "", controller: str | None = None) -> dict:
@@ -930,7 +939,15 @@ class Simulation:
     def _learn(self, agent: Agent, fork: Fork, choice: int, reason: str) -> None:
         opt = fork.options[choice]
         note = f"{fork.kind}: chose '{opt.label}'" + (f" because {reason}" if reason else "")
-        agent.profile.learn(opt.tags, note[:200])
+        # What the choice says beyond the fork's options on average (FIXLISTS 9): picking one of four thrifty ways
+        # teaches no thrift. (The cap and the slow drift back to the start are agent.py's.)
+        tags = {}
+        for k in sorted({k for o in fork.options for k in o.tags}):
+            total = 0.0
+            for o in fork.options:
+                total += o.tags.get(k, 0.0)
+            tags[k] = opt.tags.get(k, 0.0) - total / len(fork.options)
+        agent.profile.learn(tags, note[:200])
         if not agent.profile.prompt_edited:
             agent.profile.prompt = agent.profile.describe(agent)
 
