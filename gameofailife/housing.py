@@ -332,14 +332,9 @@ def _folk_commute_cost(p) -> int:
 
 
 def _fare(age: int) -> int:
-    try:
-        from . import rail  # R2's module; lazy (PLAN 2.16)
-    except ImportError:
-        rail = None
-    f = getattr(rail, "fare", None)
-    if f is not None:
-        return f(age)
-    return 3 if 18 <= age < 65 else 0  # region.md 6.7 until rail.py lands
+    from . import rail  # R2's module; lazy (PLAN 2.16)
+
+    return rail.fare(age)
 # --- end region ---
 
 

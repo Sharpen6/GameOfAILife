@@ -326,11 +326,7 @@
     return job.workdays.length * per;
   }
 
-  function _fare(age) {
-    const f = G.rail && G.rail.fare;
-    if (f) return f(age);
-    return age >= 18 && age < 65 ? 3 : 0; // region.md 6.7 until rail.js lands
-  }
+  const _fare = age => G.rail.fare(age); // R2's module, read at call time
   // --- end region ---
 
   // --- helpers ------------------------------------------------------------------
