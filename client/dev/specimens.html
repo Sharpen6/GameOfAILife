@@ -17,6 +17,7 @@
   <label>Season <select id="season"><option>summer</option><option>spring</option><option>autumn</option><option>winter</option></select></label>
   <label>Stage <select id="stage"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option></select></label>
   <label>View <select id="proj"><option value="iso">iso</option><option value="flat">flat</option></select></label>
+  <label><input type="checkbox" id="night"> Night</label>
   <span id="info"></span>
 </div>
 <canvas id="sheet"></canvas>
@@ -56,7 +57,7 @@
       x, y, w, h, floors, face: "s", entry: [x + (w >> 1), y + h], variant: (k || 0) % 8 };
   }
   function draw() {
-    const season = document.getElementById("season").value, stage = +document.getElementById("stage").value;
+    const season = document.getElementById("season").value, stage = +document.getElementById("stage").value, night = document.getElementById("night").checked;
     const proj = CV.makeProj(document.getElementById("proj").value, 256, 192, 0), art = CV.makeArt(proj);
     const places = (window.SPEC_PLACES || STYLES.map(s => sample(s, 0)));
     const sprites = places.map(p => {
@@ -74,7 +75,16 @@
     sprites.forEach((s, i) => {
       const cx = (i % cols) * cellW, cy = Math.floor(i / cols) * cellH;
       g.fillStyle = "#344055"; g.fillRect(cx + 2, cy + 2, cellW - 4, cellH - 4);
-      g.drawImage(s.b.c, cx + 6, cy + cellH - 18 - s.b.c.height);
+      const sx = cx + 6, sy = cy + cellH - 18 - s.b.c.height;
+      if (!night) g.drawImage(s.b.c, sx, sy);
+      else { // the sprite dimmed, then its glow (its usual share of windows lit) and its beacon
+        const t = CV.canvas(s.b.c.width, s.b.c.height), tg = t.getContext("2d");
+        tg.drawImage(s.b.c, 0, 0); tg.globalCompositeOperation = "source-atop"; tg.fillStyle = "rgba(10,16,40,0.6)"; tg.fillRect(0, 0, t.width, t.height);
+        g.drawImage(t, sx, sy);
+        const gl = art.glow(s.b);
+        if (gl) { g.save(); g.globalCompositeOperation = "lighter"; g.drawImage(gl.c, sx + gl.wx - s.b.ox, sy + gl.wy - s.b.oy); g.restore(); }
+        if (s.b.beacon) { g.fillStyle = "#ff3030"; g.fillRect(sx + Math.round(s.b.beacon[0] - s.b.ox) - 1, sy + Math.round(s.b.beacon[1] - s.b.oy) - 1, 3, 3); }
+      }
       g.fillStyle = "#dfe6ee"; g.fillText(`${s.p.style} ${s.ms.toFixed(1)} ms`, cx + 6, cy + cellH - 6);
     });
     let x = 6, y = rows * cellH + 8;
@@ -94,7 +104,7 @@
     "=": mk(["...", "===", "SSS"]), "r": mk(["~~~", "=r=", "~~~"]), "S": mk(["SSS", "SSS", "==="]), "H": mk(["HHH", "HHH", "..."]),
     "h": mk(["~~~", "hhh", "hhh"]) };
   window.SpecSheet = { draw, sample, STYLES, TILE_DEMO };
-  for (const id of ["season", "stage", "proj"]) document.getElementById(id).addEventListener("change", draw);
+  for (const id of ["season", "stage", "proj", "night"]) document.getElementById(id).addEventListener("change", draw);
   draw();
 })();
 </script>

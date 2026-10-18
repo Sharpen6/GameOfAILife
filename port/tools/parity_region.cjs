@@ -2,7 +2,8 @@
 // test to compare with gameofailife.region.
 //
 //   node port/tools/parity_region.cjs SEED     map_json, priced home_specs, job_slots, lot_conditions, rent_at and
-//                                              car_extra samples, district_at on a grid, build time
+//                                              car_extra samples, district_at on a grid and at each place's
+//                                              entry and corners, build time
 "use strict";
 const G = require("./engine.cjs").load();
 
@@ -16,6 +17,8 @@ function region(seed) {
   const parking = Array.from(m.places.keys(), pid => G.region.car_extra(m, pid));
   const districts = [];
   for (let y = 0; y < m.h; y += 7) for (let x = 0; x < m.w; x += 5) districts.push(m.district_at(x, y));
+  const place_districts = Array.from(m.places.values(), p => [m.district_at(p.entry[0], p.entry[1]),
+    m.district_at(p.x, p.y), m.district_at(p.x + p.w - 1, p.y + p.h - 1)]);
   const frozen = [[0, 0], [68, 49], [69, 0], [0, 50], [200, 100]].map(([x, y]) => m.in_frozen(x, y));
   const walk = [], street = [];
   for (let i = 0; i < m.w * m.h; i += 97) {
@@ -25,7 +28,7 @@ function region(seed) {
   return {
     world: m.world, map: m.map_json(), home_specs: m.home_specs, job_slots: m.job_slots,
     lot_conditions: m.lot_conditions, millbrook_ids: Array.from(m.millbrook_ids).sort(), rents, parking,
-    districts, frozen, walk, street, warm_next: m.warm_next(), build_ms,
+    districts, place_districts, frozen, walk, street, warm_next: m.warm_next(), build_ms,
     millbrook: { world: G.town.build_map(seed).world, in_frozen: G.town.build_map(seed).in_frozen(200, 100),
                  car_extra: G.region.car_extra(G.town.build_map(seed), "cafe") },
   };

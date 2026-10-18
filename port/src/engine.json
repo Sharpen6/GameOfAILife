@@ -1,6 +1,6 @@
 {
-  "engine": ["py.js", "rng.js", "clock.js", "agent.js", "town.js", "region.js", "transit.js", "travel.js", "chronicle.js",
-             "stats.js", "housing.js", "forks.js", "housing_forks.js", "cast.js", "sim.js"],
+  "engine": ["py.js", "rng.js", "clock.js", "agent.js", "town.js", "region.js", "roads.js", "transit.js", "rail.js",
+             "travel.js", "chronicle.js", "stats.js", "housing.js", "forks.js", "housing_forks.js", "cast.js", "sim.js"],
   "host": ["host.js"],
   "guard": ["guard.js"],
   "page": ["page.js"]
