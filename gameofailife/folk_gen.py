@@ -430,6 +430,8 @@ def populate(folk, sim, n: int) -> None:
     """Fill `folk.people` and `folk.households` with n townsfolk in the region's homes (folk.md 4)."""
     isolated = bool(getattr(folk, "isolated", False))
     sim.folk = folk  # people.person(sim, "f<i>") must find the people being made (make_folk assigns it after)
+    if getattr(folk, "sim", None) is None:
+        folk.sim = sim
     seed = sim.seed
     geo = Geo(sim)
     taken = named_names(sim)
@@ -1084,6 +1086,7 @@ class GenFolk:
         self.people = []
         self.households = []
         self.seekers = 0
+        self.sim = None
 
     def person(self, pid):
         if isinstance(pid, str) and len(pid) > 1 and pid[0] == "f" and pid[1:].isdigit():
