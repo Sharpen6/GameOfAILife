@@ -19,7 +19,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gameofailife import chronicle, forks, housing, housing_forks, sim as sim_module, stats, transit, travel, ws
+from gameofailife import (chronicle, forks, housing, housing_forks, people, sim as sim_module, social_forks, stats,
+                          transit, travel, ws)
 from gameofailife.cast import CAST_SIZE
 from gameofailife.clock import MINUTES_PER_DAY, TICKS_PER_REAL_SECOND
 from gameofailife.forks import Fork, Option, Outcome, default_scores, payday_fork
@@ -783,7 +784,10 @@ class ForkShapeTest(unittest.TestCase):
                         labels = [o.label for o in fork.options]
                         if len(labels) != 4 or len(set(labels)) != 4:
                             self.fail(f"seed {seed} {sim.clock.stamp()} {agent.id} {fork.kind}: {labels}")
-                        self.assertEqual(fork.kind, name.rpartition(".")[2].removesuffix("_fork"))
+                        if name == "people.pending_fork":  # v3 L1: life's prompts build their own kinds
+                            self.assertIn(fork.kind, people.PROMPTS)
+                        else:
+                            self.assertEqual(fork.kind, name.rpartition(".")[2].removesuffix("_fork"))
         self.assertLessEqual(self.P0_KINDS, set(seen), seen)
 
     def test_forks_the_run_built_have_four_options_and_the_major_flag(self):
@@ -791,7 +795,8 @@ class ForkShapeTest(unittest.TestCase):
         self.assertLessEqual({"work", "hunger", "sleep", "free_time"}, {f.kind for f in built})
         for fork in built:
             labels = [o.label for o in fork.options]
-            if len(set(labels)) != 4 or fork.major != (fork.kind in housing_forks.MAJOR_KINDS):
+            major = fork.kind in housing_forks.MAJOR_KINDS or fork.kind in social_forks.KINDS  # v3 L1: social are major
+            if len(set(labels)) != 4 or fork.major != major:
                 self.fail(f"{fork.kind} {fork.id}: {labels}, major {fork.major}")
 
 

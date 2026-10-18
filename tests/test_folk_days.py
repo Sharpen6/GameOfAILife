@@ -362,13 +362,28 @@ class SettleTest(unittest.TestCase):
     """needs/mood/x/y read lazily mid-trip and mid-shift equal a fresh settle from the last step's state."""
 
     def test_settle_equality(self):
+        from unittest import mock
+
         sim = make_world(SEEDS[0], 300)
         f = sim.folk
         seen_trip = seen_shift = 0
         snap = {}
+        touched = set()  # people whose needs another rule moved (a talk's social gain, L1) since the last check
+        real_adjust = Person.adjust
+
+        def adjust(p, need, delta):
+            touched.add(p.i)
+            real_adjust(p, need, delta)
+
+        patch = mock.patch.object(Person, "adjust", adjust)
+        patch.start()
+        self.addCleanup(patch.stop)
         for _ in range(DAY):
             sim.step()
             tick = sim.clock.tick
+            for i in touched:
+                snap.pop(i, None)  # a fresh settle from the old snapshot cannot know of the change: snapshot again
+            touched.clear()
             for p in f.people:
                 if not p.alive or p.gone:
                     continue
@@ -436,10 +451,16 @@ class ApiTest(unittest.TestCase):
         cafe = next(pid for pid, pl in sim.town.places.items() if pl.kind == "cafe" and pl.is_open(14.5)
                     and f.allowed(pid))
         self.assertTrue(folk.send_to(sim, p, cafe, "hang_out", 60))
-        for _ in range(200):
-            sim.step()
-            if p.inside == cafe:
-                break
+        from unittest import mock
+
+        from gameofailife import social
+        # A friend's outing may take a free townsperson along on the way (L1's pick_companion, F2a's send_to
+        # interrupting the trip): kept out here, so the walk to this cafe is send_to's alone.
+        with mock.patch.object(social, "pick_companion", lambda *args: None):
+            for _ in range(200):
+                sim.step()
+                if p.inside == cafe:
+                    break
         self.assertEqual(p.inside, cafe)
         self.assertIn(p.i, f.present(cafe))
         busy = [q for q in f.living() if q.activity == "work"]

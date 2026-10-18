@@ -187,7 +187,7 @@ class RunningCityTest(unittest.TestCase):
 
     def test_the_mean_tick_is_under_0_4_ms_at_60_people(self):
         run = self.runs[SEED]
-        self.assertEqual(len(run.sim.agents), 60)
+        self.assertEqual(len(run.sim.agents) - run.sim.life.counts["births"], 60)  # v3 L2: a named baby joins agents
         self.assertLess(run.cpu / run.ticks * 1000, 0.4)
 
 
