@@ -107,7 +107,8 @@
       this.luck_log = []; // the last 5000 luck changes (folk_life appends and trims)
       this.counters = { steps: 0, choices: 0, habit: 0, shifts: 0, school_days: 0, trips: 0, boardings: 0,
         train_trips: 0, late: 0, sick_days: 0, starved: 0 };
-      this.today = { boardings: 0, train_trips: 0 };
+      this.today = { boardings: 0, train_trips: 0, lines: {} }; // since midnight
+      this._lines = null; // train id -> line id
       this.cpu = []; // ms per tick, the last CPU_KEEP
       this.cpu_total = 0.0;
       this.ticks = 0;
@@ -148,6 +149,32 @@
     }
 
     get(pid) { return this.person(pid); }
+
+    _line_of(train_id) {
+      let m = this._lines;
+      if (m === null) {
+        m = this._lines = new Map();
+        for (const ln of ((this.town.rail || {}).lines || [])) for (const t of ln.trains) m.set(t, ln.id);
+      }
+      return m.has(train_id) ? m.get(train_id) : train_id;
+    }
+
+    // The townsfolk's part of `stats.region` (stats.region_block): how many, how commuters (workers and pupils)
+    // go, and today's train boardings in all and by line.
+    region_parts(sim) {
+      const commute = {};
+      let folk = 0;
+      for (const p of this.people) {
+        if (!p.alive || p.gone) continue;
+        folk += 1;
+        if (p.job !== null && p.commute !== null && p.commute !== undefined) {
+          const mode = p.commute[2];
+          commute[mode] = (commute[mode] || 0) + 1;
+        }
+      }
+      return { folk, commute, train_riders_today: this.today.boardings,
+        train_lines_today: Object.assign({}, this.today.lines), bus_riders_today: 0 };
+    }
 
     living() { return this.people.filter(p => p.alive && !p.gone); }
 
@@ -207,7 +234,7 @@
     tick(sim) {
       const t0 = (typeof performance !== "undefined" ? performance : Date).now();
       const now = sim.clock.tick;
-      if (now % DAY === 0) this.today = { boardings: 0, train_trips: 0 };
+      if (now % DAY === 0) this.today = { boardings: 0, train_trips: 0, lines: {} };
       const b = this.wheel.get(now);
       if (b !== undefined) {
         this.wheel.delete(now);
@@ -523,6 +550,13 @@
         this.counters.train_trips += 1;
         this.today.boardings += rides;
         this.today.train_trips += 1;
+        const per = this.today.lines;
+        for (const leg of legs) {
+          if (leg[0] === fm().RIDE) {
+            const line = this._line_of(leg[3]);
+            per[line] = (per[line] || 0) + 1;
+          }
+        }
         const fare = ft().fare(p.age);
         if (fare) p.money -= fare;
       }

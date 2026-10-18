@@ -137,7 +137,8 @@ class Folk:
         self.luck_log = deque(maxlen=5000)
         self.counters = {"steps": 0, "choices": 0, "habit": 0, "shifts": 0, "school_days": 0, "trips": 0,
                          "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0}
-        self.today = {"boardings": 0, "train_trips": 0}
+        self.today = {"boardings": 0, "train_trips": 0, "lines": {}}  # since midnight
+        self._lines = None  # train id -> line id
         self.cpu = deque(maxlen=CPU_KEEP)  # process_time per tick, seconds
         self.cpu_total = 0.0
         self.ticks = 0
@@ -177,6 +178,27 @@ class Folk:
         return self.people[i] if 0 <= i < len(self.people) else None
 
     get = person
+
+    def _line_of(self, train_id):
+        m = self._lines
+        if m is None:
+            m = self._lines = {t: ln["id"] for ln in ((self.town.rail or {}).get("lines") or []) for t in ln["trains"]}
+        return m.get(train_id, train_id)
+
+    def region_parts(self, sim) -> dict:
+        """The townsfolk's part of `stats.region` (stats.region_block): how many, how commuters (workers and
+        pupils) go, and today's train boardings in all and by line."""
+        commute: dict[str, int] = {}
+        folk = 0
+        for p in self.people:
+            if not p.alive or p.gone:
+                continue
+            folk += 1
+            if p.job is not None and p.commute is not None:
+                mode = p.commute[2]
+                commute[mode] = commute.get(mode, 0) + 1
+        return {"folk": folk, "commute": commute, "train_riders_today": self.today["boardings"],
+                "train_lines_today": dict(self.today["lines"]), "bus_riders_today": 0}
 
     def living(self) -> list:
         return [p for p in self.people if p.alive and not p.gone]
@@ -239,7 +261,7 @@ class Folk:
         t0 = time.process_time()
         now = sim.clock.tick
         if now % DAY == 0:
-            self.today = {"boardings": 0, "train_trips": 0}
+            self.today = {"boardings": 0, "train_trips": 0, "lines": {}}
         b = self.wheel.pop(now, None)
         if b:
             people = self.people
@@ -524,6 +546,11 @@ class Folk:
             self.counters["train_trips"] += 1
             self.today["boardings"] += rides
             self.today["train_trips"] += 1
+            per = self.today["lines"]
+            for leg in legs:
+                if leg[0] == RIDE:
+                    line = self._line_of(leg[3])
+                    per[line] = per.get(line, 0) + 1
             fare = folk_transit.fare(p.age)
             if fare:
                 p.money -= fare
