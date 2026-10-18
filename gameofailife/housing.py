@@ -1499,15 +1499,11 @@ def afford_score(sim, agent: Agent, opt) -> float:
     cost = opt.cost
     if cost <= 0:
         return 0.0
-    # --- region --- (people.household / people.traits take a townsperson too; v2's lookups until L1's lands)
-    try:
-        from . import people  # L1's module; lazy (PLAN 2.16)
-    except ImportError:
-        people = None
-    household, traits = getattr(people, "household", None), getattr(people, "traits", None)
-    hh = household(sim, agent) if household else _household(sim, agent.household_id)
-    own = traits(agent) if traits else agent.profile.traits if agent.profile is not None else agent.traits
-    thrift = own["thrift"] * (3 if hh.tight_until > sim.clock.tick else 1)
+    from . import people  # L1's module; lazy (PLAN 2.16)
+
+    # --- region --- (people.household / people.traits take a townsperson too)
+    hh = people.household(sim, agent)
+    thrift = people.traits(agent)["thrift"] * (3 if hh.tight_until > sim.clock.tick else 1)
     # --- end region ---
     if getattr(opt, "household_pays", False):
         spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh)

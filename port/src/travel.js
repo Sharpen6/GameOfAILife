@@ -21,6 +21,8 @@
   const TAXI_MIN_WALK = 40; // the work fork offers a taxi to an adult without a car only when the walk is longer than this
   const USUAL = "usual"; // Option.vehicle and start_plan's vehicle meaning "the usual way, trip by trip" (trip_mode)
   const SHORT_WALK = 8; // minutes: a walk this short from home leaves the car on the driveway
+  // --- region ---
+  const MAX_OUTING_MINUTES = 40; // region world: a place beyond Millbrook qualifies only within this walk (Rule R)
 
   // The bus trip the character would make to a place leaving now: [minutes door to door, line, board stop,
   // alight stop], or null when they are inside it or no bus saves transit.MIN_SAVING minutes over walking.
@@ -179,16 +181,35 @@
   // open `stay` minutes later (the review fix's `_open_on_arrival`). The best one has the lowest
   // walk(origin, place) + walk(meet, place), ties by id. `origin` defaults to the character; `origin` and
   // `meet` may each be a character (another Agent), a Place, a place id or an [x, y] tile.
-  function nearest(sim, agent, kinds, origin = null, meet = null, stay = 0) {
+  //
+  // Rule R (region world, region.md 6.3): a character standing in the frozen rectangle (Millbrook) is offered
+  // only Millbrook's places; elsewhere a place beyond Millbrook also qualifies when it is within `max_minutes`
+  // on foot (default MAX_OUTING_MINUTES). In the millbrook world nothing changes.
+  function nearest(sim, agent, kinds, origin = null, meet = null, stay = 0, max_minutes = null) {
     if (typeof kinds === "string") kinds = [kinds];
     const here = _spot(sim, agent);
     const start = origin === null ? null : _spot(sim, origin);
     const end = meet === null ? null : _spot(sim, meet);
     let best = null, best_key = null;
+    // --- region ---
+    const town = sim.town;
+    const region = town.world === "region";
+    let local = false, cap = 0, ids = null;
+    if (region) {
+      local = town.in_frozen(here[0][0], here[0][1]);
+      cap = max_minutes === null ? MAX_OUTING_MINUTES : max_minutes;
+      ids = town.millbrook_ids;
+    }
+    // --- end region ---
     for (const place of sim.town.places.values()) {
       if (!kinds.includes(place.kind)) continue;
+      // --- region ---
+      const far = region && !ids.has(place.id);
+      if (far && (local || _manhattan(here[0], place.entry) > cap)) continue; // Rule R; no walk is shorter than Manhattan
+      // --- end region ---
       const walk = _walk(sim, here, place);
       if (walk >= UNREACHABLE) continue;
+      if (far && walk > cap) continue; // --- region ---
       const arrive = sim.clock.hour + walk / 60;
       if (!(place.is_open(arrive) && place.is_open(arrive + stay / 60))) continue;
       let score = start === null ? walk : _walk(sim, start, place);
@@ -203,9 +224,27 @@
     return best;
   }
 
+  // --- region ---
+  const _manhattan = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
+
+  // Rule R for a builder that names a place directly (region.md 6.3, PLAN 2.9): true in the millbrook world
+  // and for Millbrook's places; a place beyond Millbrook only for a character outside the frozen rectangle and
+  // within `max_minutes` on foot (default MAX_OUTING_MINUTES). An unknown place id is never visitable.
+  function named_may_visit(sim, agent, place_id, max_minutes = null) {
+    const town = sim.town;
+    const place = town.places.get(place_id);
+    if (place === undefined) return false;
+    if (town.world !== "region" || town.millbrook_ids.has(place_id)) return true;
+    const here = _spot(sim, agent);
+    if (town.in_frozen(here[0][0], here[0][1])) return false;
+    const cap = max_minutes === null ? MAX_OUTING_MINUTES : max_minutes;
+    return _manhattan(here[0], place.entry) <= cap && _walk(sim, here, place) <= cap;
+  }
+  // --- end region ---
+
   G.travel = {
     SPEEDS, TAXI_FARE, TRIP_COST, UNREACHABLE, ROAD_MODES, LIGHT_WAIT, BUS_MIN_WALK, TAXI_MIN_WALK, USUAL, SHORT_WALK,
     bus_trip, travel_minutes, leg_minutes, _minutes, usual_mode, commute_minutes, weekly_commute_cost, car_place,
-    car_here, trip_mode, _spot, _walk, nearest,
+    car_here, trip_mode, _spot, _walk, nearest, MAX_OUTING_MINUTES, _manhattan, named_may_visit,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -18,15 +18,21 @@ Until F3's hooks land, the region town (region.build_region) is swapped into a m
 from __future__ import annotations
 
 import inspect
+import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from gameofailife import housing, travel
 from gameofailife.agent import Job, Profile
 from gameofailife.clock import MINUTES_PER_DAY
+from gameofailife.rng import r2
 from gameofailife.sim import Simulation
 
 SLOW = os.environ.get("GOAL_SLOW") == "1"
@@ -325,13 +331,14 @@ class RegionHomesTest(unittest.TestCase):
                 self.assertEqual([e["text"] for e in mb.events], [e["text"] for e in sim.events], (name, day))
 
 
-def scripted_folk(sim: Simulation):
+def scripted_folk(sim: Simulation, house_id: str | None = None, work: str | None = None):
     """A townsfolk household in a region house it owns: Ada (34, no car, the train to work, five days), Ben (40, his
     car, six days) and Cal (9)."""
     from gameofailife.folk_model import FolkHousehold, Person
 
-    house = next(h for h in sim.homes.values() if not housing.is_v2_home(h.id) and h.tier == "house")
-    work = next(p.id for p in sim.town.places.values() if p.kind == "office")
+    house = sim.homes[house_id] if house_id else next(h for h in sim.homes.values()
+                                                       if not housing.is_v2_home(h.id) and h.tier == "house")
+    work = work or next(p.id for p in sim.town.places.values() if p.kind == "office")
     hh = FolkHousehold("fh0", house.id, 0.0, member_ids=["f0", "f1", "f2"], j=0)
     ada, ben, cal = Person(0, "Ada Moss", 34, "f", 0), Person(1, "Ben Moss", 40, "m", 0), Person(2, "Cal Moss", 9, "m", 0)
     ada.job, ada.commute, ada.money, ada.savings = Job("clerk", work, 22.0, 9, 17, (0, 1, 2, 3, 4)), (work, 34, "train"), 400.0, 2600.0
@@ -416,6 +423,117 @@ class FolkHouseholdTest(unittest.TestCase):
         self.assertIsNone(home.emergency)
         housing.list_vacancies(sim)
         self.assertIsNone(home.listing)
+
+
+# --- 2b. Node: the JS twins answer the same ---------------------------------------------------------------------
+
+NODE = os.environ.get("NODE") or shutil.which("node")
+PARITY = Path(__file__).resolve().parent.parent / "port" / "tools" / "parity_travel.cjs"
+KIND_SETS = [["cafe"], ["market"], ["shop", "market"], ["park"], ["hospital"], ["school"], ["bank"], ["office"],
+             ["works"], ["townhall"], ["cafe", "shop"]]
+
+
+def parity_spec(sim, n: int = 200) -> dict:
+    """n nearest queries (half from tiles in Millbrook, half from region places' doors, so the walk cap is met),
+    named_may_visit on 60 (character, place) pairs, and the scripted folk household's homes."""
+    town = sim.town
+    inside = [(x, y) for y in range(0, 50, 3) for x in range(0, 69, 3) if town.walkable(x, y)]
+    far = sorted((p for p in town.places.values() if p.id not in town.millbrook_ids and p.kind != "home"),
+                 key=lambda p: p.id)
+    queries = []
+    for k in range(n):
+        if k % 2 == 0:
+            x, y = inside[(k * 37) % len(inside)]
+        else:
+            e = far[(k * 13) % len(far)].entry
+            x, y = e[0] + (k % 5) - 2, e[1]
+            if not town.walkable(x, y):
+                x, y = e
+        queries.append({"agent": k % len(sim.agents), "x": x, "y": y, "tick": (6 + k % 17) * 60 + (k * 7) % 60,
+                        "kinds": KIND_SETS[k % len(KIND_SETS)], "stay": (0, 30, 60)[k % 3],
+                        "max": (None, None, 20, 60)[k % 4]})
+    visits = []
+    for k in range(60):
+        q = queries[(k * 7) % n]
+        visits.append({**q, "place": far[(k * 11) % len(far)].id if k % 3 else sorted(town.millbrook_ids)[k % 39]})
+    house = next(h for h in sim.homes.values() if not housing.is_v2_home(h.id) and h.tier == "house")
+    work = next(p.id for p in town.places.values() if p.kind == "office")
+    other = next(h.id for h in list(sim.homes.values())[37:] if h.id != house.id and h.owner == "market")
+    return {"seed": 1, "queries": queries, "visits": visits, "folk": {"house": house.id, "work": work, "other": other}}
+
+
+def parity_python(spec: dict) -> dict:
+    """What parity_travel.cjs computes, in Python."""
+    sim = region_sim(spec["seed"], patched=True)
+    sim.town.warm()
+    agents = list(sim.agents.values())
+    out = {"nearest": [], "visits": []}
+
+    def place_at(a, q):
+        a.x, a.y, a.inside = q["x"], q["y"], None
+        sim.clock.tick = q["tick"]
+
+    for q in spec["queries"]:
+        a = agents[q["agent"]]
+        place_at(a, q)
+        p = travel.nearest(sim, a, tuple(q["kinds"]), None, None, q["stay"], q["max"])
+        out["nearest"].append(None if p is None else p.id)
+    for v in spec["visits"]:
+        a = agents[v["agent"]]
+        place_at(a, v)
+        out["visits"].append(travel.named_may_visit(sim, a, v["place"], v["max"]))
+    out["listed"] = housing.list_vacancies(sim)
+    out["region_homes"] = [[h.id, h.owner, h.listing, h.rent] for h in sim.homes.values()
+                           if not housing.is_v2_home(h.id)]
+    out["market"] = housing.market_json(sim)
+    hh, house, (ada, ben, cal) = scripted_folk(sim, spec["folk"]["house"], spec["folk"]["work"])
+    other = spec["folk"]["other"]
+    out["folk"] = {
+        "commute": housing.commute(sim, hh), "outgo": housing.weekly_outgo(sim, hh),
+        "income": housing.weekly_income(sim, hh), "living": housing.living(sim, hh),
+        "residents": housing.residents(sim, hh), "name": housing.household_name(sim, hh),
+        "affordable": housing.affordable(sim, hh, other), "upgrade": housing.is_upgrade(sim, hh, other),
+        "weekly_cost": housing.weekly_cost(sim, hh), "page": housing.home_page(sim, house.id)["residents"],
+        "afford": [housing.afford_score(sim, ada, SimpleNamespace(cost=c, household_pays=False, charge=True))
+                   for c in (0, 50, 900, 10 ** 6)],
+    }
+    house.emergency = {"kind": "boiler", "since": 0}
+    house.pending_emergency = {"kind": "roof", "due": 0}
+    sim.lots[house.place].condition = 61.0
+    for day in range(4):
+        sim.clock.tick = day * MINUTES_PER_DAY
+        housing.nightly(sim)
+        housing.tick(sim)
+    out["folk"]["condition"] = sim.lots[house.place].condition
+    out["folk"]["listed_after"] = housing.list_vacancies(sim)
+    v2_places = {row[1] for row in housing.HOME_SPECS}
+    out["lots"] = [[pid, r2(lot.condition)] for pid, lot in sim.lots.items() if pid not in v2_places]
+    return out
+
+
+@needs_region
+@unittest.skipUnless(NODE, "node is not installed")
+class NodeParityTest(unittest.TestCase):
+    """region.md 11 R1b 2: the JS nearest answers 200 queries as Python does; the JS housing hunks agree too."""
+
+    def test_node_equals_python(self):
+        spec = parity_spec(region_sim(1, patched=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "spec.json"
+            path.write_text(json.dumps(spec))
+            run = subprocess.run([NODE, str(PARITY), str(path)], capture_output=True, text=True, timeout=300)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        js = json.loads(run.stdout)
+        py = json.loads(json.dumps(parity_python(spec)))
+        found = sum(1 for p in py["nearest"] if p is not None)
+        far = sum(1 for p in py["nearest"] if p is not None and p not in region_town(1).millbrook_ids)
+        self.assertGreater(found, 150)
+        self.assertGreater(far, 20)  # the cap branch is exercised
+        for key in ("nearest", "visits", "listed", "region_homes", "market", "folk", "lots"):
+            if key in ("nearest", "visits"):
+                for i, (a, b) in enumerate(zip(py[key], js[key])):
+                    self.assertEqual(a, b, (key, i, spec["queries" if key == "nearest" else "visits"][i]))
+            self.assertEqual(py[key], js[key], key)
 
 
 # --- 5. the cast is offered only the 37 ---------------------------------------------------------------------------
