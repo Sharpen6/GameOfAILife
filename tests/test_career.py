@@ -150,7 +150,8 @@ class ReviewTest(unittest.TestCase):
 
     def test_promotion_senior_then_head(self):
         sim = life_sim()
-        a = next(a for a in sim.agents.values() if career.worker(a) and not a.job.title.startswith(("senior ", "head ")))
+        a = next(a for a in sim.agents.values()
+                 if career.worker(a) and not a.job.title.startswith(("senior ", "head ")))
         title, wage = a.job.title, a.job.hourly_wage
         career.promote(sim, a)
         self.assertEqual(a.job.title, "senior " + title)
