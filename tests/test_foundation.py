@@ -1146,6 +1146,8 @@ class CafeClosingTest(unittest.TestCase):
                 expected.append(minute)
             for kind, builder in (("free_time", forks.free_time_fork), ("lonely", forks.lonely_fork)):
                 fork = builder(self.sim, far)
+                if fork is None and forks.in_work_window(self.sim, far):  # package D item 11: none in that window
+                    continue
                 labels = [o.label for o in fork.options]
                 self.assertEqual(len(set(labels)), 4, labels)
                 going = [step[1] for o in fork.options for step in o.steps if step[0] == "hang_out"]

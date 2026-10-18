@@ -22,7 +22,7 @@ from . import chronicle, housing, stats, transit, travel
 from .agent import NEED_DECAY, NEEDS, Agent, Household, RelationKind
 from .clock import DAYS_PER_SEASON, MINUTES_PER_DAY, SEASONS, Clock
 from .forks import (COOLDOWN, MAJOR_MARGIN, OBVIOUS_MARGIN, RAIN_CHANCE, WORK_LATE, WORK_LEAD, Fork, build_fork,
-                    default_scores, luck_odds, retime_late, work_lead)
+                    default_scores, luck_odds, names, personal, retime_late, work_lead)
 from .rng import r2
 from .town import PARK, TownMap, build_map
 from .transit import BUS_FARE, FLIGHTS
@@ -104,6 +104,8 @@ WANDER = ("walk_park", "play")  # activities that stroll around their park
 WANDER_EVERY = 1  # minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
 MEET = ("hang_out", "play")  # activities an invite meets at: the host waits doing it, the guest comes to do it
 MEET_TILES = 3  # how near two people outdoors must be for a first meeting (_meet_someone)
+IDLE_FUN = 1.6  # how much faster fun drains while sitting idle (FIXLISTS 8)
+DAY_OFF_WAKE = 8 * 60  # the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
 NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
 
 
@@ -373,8 +375,13 @@ class Simulation:
 
     def _decay(self, agent: Agent) -> None:
         scale = DECAY_SCALE.get(agent.activity if agent.state == "busy" else "", {})
+        idle = agent.state == "busy" and agent.activity == "idle"
         for n in NEEDS:
-            agent.adjust(n, -NEED_DECAY[n] * scale.get(n, 1.0))
+            agent.adjust(n, -NEED_DECAY[n] * scale.get(n, 1.0) * (IDLE_FUN if idle and n == "fun" else 1.0))
+        if idle and agent.inside == self.home_of(agent):  # waking minutes idle at home (forks.free_time_fork)
+            agent.idle_home = getattr(agent, "idle_home", 0) + 1  # type: ignore[attr-defined]
+        elif agent.activity == "sleep" or agent.inside is None and agent.state != "deciding":
+            agent.idle_home = 0  # type: ignore[attr-defined]  # asleep, or out of the house
         if agent.needs["hunger"] <= 0:
             agent.health -= 0.03
         if agent.needs["energy"] <= 0:
@@ -575,11 +582,13 @@ class Simulation:
         elif agent.activity == "sleep":
             # Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
             # commute from home (the usual way, the worst bus wait counted) for the long ones.
-            wake = 7 * 60
-            if agent.job:
-                wake = min(wake, agent.job.start_hour * 60 - max(90, (self.commute_minutes(agent) or 0) + 60))
-            wake += self.rng.randrange(0, 25)
             m = self.clock.minute_of_day
+            weekday = (self.clock.weekday + (1 if m >= 12 * 60 else 0)) % 7  # the day they wake up on
+            if not agent.job or weekday not in agent.job.workdays:  # a day off (school: the weekend): a lie-in
+                wake = DAY_OFF_WAKE + personal(agent, 90)
+            else:
+                wake = min(7 * 60, agent.job.start_hour * 60 - max(90, (self.commute_minutes(agent) or 0) + 60))
+            wake += self.rng.randrange(0, 25)
             minutes = (wake - m) % MINUTES_PER_DAY
             if minutes > 11 * 60 or minutes < 60:  # a nap in the daytime
                 minutes = 180
@@ -776,12 +785,18 @@ class Simulation:
 
     def _set_off_thinking(self, agent: Agent, fork: Fork) -> None:
         """While the controller thinks, the work fork's character sets off the usual way at once (FIXLISTS 1: a
-        character who stood still for the answer arrived late): option 0's first step, unpaid, nothing rolled.
+        character who stood still for the answer arrived late): the usual way's first step (by car for a driver,
+        else option 0), unpaid, nothing rolled.
         When the answer lands, _decide re-times it from where they are (_retime). Already at work, the shift
         begins. Other forks wait where they are."""
-        opt = fork.options[0]
-        if fork.kind != "work" or not opt.steps or not self._resolve_place(agent, opt.steps[0][1]):
+        if fork.kind != "work":
             return
+        mode = self.usual_mode(agent)
+        prov = next((i for i in (0, 1) if fork.options[i].vehicle == mode), 0)
+        opt = fork.options[prov]
+        if not opt.steps or not self._resolve_place(agent, opt.steps[0][1]):
+            return
+        agent.provisional = prov  # type: ignore[attr-defined]
         agent.thinking = fork.id  # type: ignore[attr-defined]  # the asked fork whose provisional plan is under way
         agent.provisional_eta = self.clock.tick + (self._option_minutes(agent, opt) or 0)  # type: ignore[attr-defined]
         agent.usual_plan = opt.vehicle == USUAL  # type: ignore[attr-defined]
@@ -834,14 +849,15 @@ class Simulation:
         tick = self.clock.tick
         working = agent.state == "busy" and agent.activity == "work"
         mins = {}
+        prov = getattr(agent, "provisional", 0)
         for i in goes:
-            if i == 0 and self._on_provisional(agent, fork.options[0]):
+            if i == prov and self._on_provisional(agent, fork.options[prov]):
                 mins[i] = 0 if agent.state == "busy" else max(0, getattr(agent, "provisional_eta", tick) - tick)
             else:
                 mins[i] = self._option_minutes(agent, fork.options[i], stays=True) or 0
         left = start - tick
         if working:
-            played = 0
+            played = prov
         elif mins[choice] <= left:
             played = choice
         else:
@@ -942,7 +958,7 @@ class Simulation:
             if note:
                 reason = f"{reason} ({note})" if reason else note[0].upper() + note[1:] + "."
         opt = fork.options[choice]
-        carry = moving and choice == 0 and self._on_provisional(agent, opt)  # already on its first step
+        carry = moving and choice == getattr(agent, "provisional", 0) and self._on_provisional(agent, opt)  # under way
         asked = self.asked_at.get(fork.id)
         seconds = self.now() - asked if asked is not None else None
         fork.status, fork.choice, fork.decided_by, fork.reason = "decided", choice, by, reason
@@ -973,8 +989,10 @@ class Simulation:
             agent.paid = None  # type: ignore[attr-defined]  # the step it pays for has begun
         if not carry:
             agent.state = "idle"
-        if fork.kind in COOLDOWN:
-            agent.cooldowns[fork.kind] = self.clock.tick + COOLDOWN[fork.kind]
+        if fork.kind in COOLDOWN:  # longer after a choice that does not help (FIXLISTS 5)
+            agent.cooldowns[fork.kind] = self.clock.tick + opt.extra.get("cooldown", COOLDOWN[fork.kind])
+        if fork.kind == "free_time":
+            agent.idle_home = 0  # type: ignore[attr-defined]
         if any(step[0] == "work" for step in opt.steps) or opt.extra.get("skip_work"):
             agent.worked_today = self.clock.day
         self._apply_extra(agent, fork, opt)
@@ -1164,6 +1182,8 @@ class Simulation:
                 self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent,
                            tag="invite_accepted" if extra["answer"] == "accept" else "invite_declined",
                            agents=[host.id], place=inv["place"])
+                host.remember(self.clock.stamp(), f"{agent.name.split()[0]} {words} my invite to "
+                                                  f"{self.town.places[inv['place']].name}.")  # the host's page (FIXLISTS 14)
                 self._deliver(host, {"type": "invite_answer", "invite_id": inv["id"], "from": agent.id,
                                      "answer": extra["answer"]})
                 if extra["answer"] == "accept":
@@ -1215,13 +1235,25 @@ class Simulation:
             family = []
             for m in self.household(agent).member_ids:
                 other = self.agents[m]
+                other.family_week = self.clock.day // 7  # type: ignore[attr-defined]  # this week's family evening
                 if other is not agent and other.alive and self._interruptible(other):
                     other.plan = [("family_dinner", where)]
                     other.usual_plan = True  # type: ignore[attr-defined]
                     other.state = "idle"
                     family.append(other.id)
-            self.event(f"{agent.name} takes the family out to dinner.", agent, tag="family_dinner", agents=family,
+            place = self.town.places[where].name if where in self.town.places else where
+            who = names([self.agents[m] for m in family]) if family else ""
+            self.event(f"{agent.name} takes {who} out to dinner at {place}." if family else
+                       f"{agent.name} goes out to dinner at {place}.", agent, tag="family_dinner", agents=family,
                        place=where)
+        if "together" in extra:  # time at home together: the other joins in if free (FIXLISTS 5, 6)
+            other = self.agents.get(extra["together"])
+            if other and other.alive and other.inside == self.home_of(other) and self._interruptible(other):
+                other.plan = [(opt.steps[-1][0], "home")]
+                other.state = "idle"
+        if extra.get("buy_goal") and agent.goal:  # bought outright (the cost paid the rest; FIXLISTS 13)
+            self.event(f"{agent.name} finally buys {agent.goal['name']}!", agent, tag="goal_reached")
+            agent.goal = None
         housing.apply_extra(self, agent, fork, opt)  # move, repair, works, belt_tighten, ... (P2)
 
     def _interruptible(self, other: Agent) -> bool:

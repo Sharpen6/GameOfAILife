@@ -40,6 +40,14 @@
   const COOPED_KINDS = ["invite", "lonely", "free_time"]; // forks whose options out of the house gain after a day indoors
   const COOPED_UP = 0.3; // the most a day indoors adds to such an option ...
   const COOPED_HOURS = 12; // ... rising from 0 after this many hours since the character was last out, to COOPED_UP 12 later
+  const IDLE_HOME = 120; // waking minutes idle at home after which an adult's free time comes up whatever their fun ...
+  const IDLE_SPREAD = 60; // ... plus a personal 0-59 (FIXLISTS 8)
+  const OUTDOOR = ["walk_park", "play"]; // activities out in the weather
+  const RAIN_PENALTY = { spring: 0.3, summer: 0.25, autumn: 0.35, winter: 0.5 }; // what rain takes off an outdoor option
+  const BEDTIME = 22 * 60; // the minute the sleep fork can come up on most evenings ...
+  const WEEKEND_BED = 23 * 60; // ... and on Friday and Saturday evenings, plus a personal 0-59 (FIXLISTS 7)
+  const DINNER_FROM = 17, DINNER_UNTIL = 20; // Saturday hours a family dinner out happens in (FIXLISTS 6)
+  const LONELY_IDLE_COOLDOWN = 360; // minutes before the lonely fork returns after a choice that does not help
 
   class Outcome {
     constructor(id, label, p, valence, effects = {}, group = null) {
@@ -119,6 +127,7 @@
     const rate = TRAVEL_COST * (sim.clock.hour >= NIGHT_FROM || sim.clock.hour < NIGHT_UNTIL ? NIGHT_TRAVEL : 1);
     const home = weigh || cooped > 0 ? sim.home_of(agent) : null;
     const direct = weigh ? _trip(sim, agent, home)[0] : 0;
+    const rain = sim.weather === "rain" ? RAIN_PENALTY[sim.clock.season] : 0.0; // outdoor options in the rain (FIXLISTS 12)
     const scores = [];
     for (const opt of fork.options) {
       const style = sum(Object.entries(opt.tags).map(([t, v]) => (getd(agent.profile.traits, t, 0.5) - 0.5) * 2 * v));
@@ -131,6 +140,7 @@
         if (minutes > 0) score -= minutes * rate;
       }
       if (cooped > 0 && _goes_out(sim, agent, opt, home)) score += cooped;
+      if (rain && opt.steps.some(s => OUTDOOR.includes(s[0]))) score -= rain;
       scores.push(pyRound(score, 3));
     }
     return scores;
@@ -182,6 +192,79 @@
   }
 
   // --- helpers ------------------------------------------------------------------
+
+  // A character's own fixed number in 0..span-1 (from their id), so habits like a lie-in differ person to person.
+  function personal(agent, span) {
+    let total = 0;
+    for (let i = 0; i < agent.id.length; i++) total += agent.id.charCodeAt(i) * (i + 1);
+    return total % span;
+  }
+
+  // First names as a list: "Noa", "Noa and Tom", "Noa, Tom and Eli".
+  function names(people) {
+    const first = people.map(p => firstName(p.name));
+    return first.length === 1 ? first[0] : first.slice(0, -1).join(", ") + " and " + first[first.length - 1];
+  }
+
+  // True from the moment today's work fork can open until the shift is under way or missed (FIXLISTS 10): no
+  // leisure fork starts then.
+  function in_work_window(sim, agent) {
+    const start = sim._shift_start_tick(agent);
+    return start !== null && sim.clock.tick >= start - work_lead(sim, agent);
+  }
+
+  // The closest family member or partner outside the household (someone to phone), or null.
+  function _family_away(sim, agent) {
+    const hh = sim.household(agent).member_ids;
+    const pool = [];
+    for (const [oid, r] of agent.relationships) {
+      const other = sim.agents.get(oid);
+      if ((r.kind === "family" || r.kind === "partner") && !hh.includes(oid) && other !== undefined && other !== null
+        && other.alive) pool.push([r.affinity, oid]);
+    }
+    return pool.length ? sim.agents.get(maxBy(pool)[1]) : null;
+  }
+
+  // The friend (outside the household, affinity over 10, the same age group) the character likes most after
+  // `taken`, the one already asked along: someone to ask on a walk (FIXLISTS 5), or null.
+  function _walk_friend(sim, agent, taken) {
+    const hh = sim.household(agent).member_ids;
+    const pool = [];
+    for (const [oid, r] of agent.relationships) {
+      const o = sim.agents.get(oid);
+      if (!hh.includes(oid) && oid !== taken && r.affinity > 10 && o !== undefined && o !== null && o.alive
+        && o.is_adult === agent.is_adult) pool.push([r.affinity, oid]);
+    }
+    return pool.length ? sim.agents.get(maxBy(pool)[1]) : null;
+  }
+
+  // The household member at home and free to spend time with (the one the character likes most), or null.
+  function _housemate_home(sim, agent) {
+    const home = sim.home_of(agent);
+    const pool = [];
+    for (const m of sim.household(agent).member_ids) {
+      const o = sim.agents.get(m);
+      if (m !== agent.id && o.alive && o.inside === home && sim._interruptible(o)) {
+        pool.push([agent.relationships.has(m) ? agent.relationships.get(m).affinity : 0, m]);
+      }
+    }
+    return pool.length ? sim.agents.get(maxBy(pool)[1]) : null;
+  }
+
+  // Who comes to a family dinner out now: the household members free to come (FIXLISTS 6), or null when nobody is,
+  // when it is not Saturday DINNER_FROM-DINNER_UNTIL with time for the meal, or when a child under 10 would be left
+  // at home with no adult.
+  function _dinner_party(sim, agent) {
+    const minute = sim.clock.minute_of_day;
+    if (sim.clock.weekday !== 5 || !(DINNER_FROM * 60 <= minute && minute <= DINNER_UNTIL * 60 - DINNER_MINUTES)) return null;
+    const home = sim.home_of(agent);
+    const others = sim.household(agent).member_ids.filter(m => m !== agent.id && sim.agents.get(m).alive)
+      .map(m => sim.agents.get(m));
+    const party = others.filter(o => sim._interruptible(o));
+    const staying = others.filter(o => !party.includes(o) && o.is_adult && o.inside === home);
+    if (!party.length || others.some(o => o.age < 10 && !party.includes(o) && !staying.length)) return null;
+    return party;
+  }
 
   const _late = p => new Outcome("late", "Arrives late", p, -1, { reputation: -3, memory: "Got in late and the boss noticed." }, "arrival");
 
@@ -313,7 +396,7 @@
     const place = sim.town.places.get(invite.place);
     const rel = relKey(host.id);
     const first = firstName(host.name);
-    const meet = place.kind === "park" ? "play" : "hang_out"; // children ask each other to play in a park
+    const meet = place.kind === "park" ? (agent.is_adult ? "walk_park" : "play") : "hang_out"; // a walk or a game
     const opts = [
       new Option(`Accept and meet ${first} at ${place.name}`, [[meet, place.id]],
         { tags: { social: 1.0, adventure: 0.3 }, gains: { social: 40, fun: 20 },
@@ -321,13 +404,13 @@
             new Outcome("awkward", "Conversation feels awkward", 0.12, -1, { [rel]: -3 }, "hang_out"),
             _meet_new(0.06)],
           extra: { invite: invite.id, answer: "accept" } }),
-      new Option("Decline politely", [["relax_home", "home"]], { tags: { social: -0.5, thrift: 0.2 },
+      new Option("Decline politely", [["relax_home", "home"]], { tags: { social: -0.5, thrift: 0.2 }, base: 0.1,
         gains: { fun: 10 }, outcomes: [new Outcome("brushed_off", `${first} feels brushed off`, 0.35, -1, { [rel]: -3 })],
         extra: { invite: invite.id, answer: "decline" } }),
       new Option("Suggest another day instead", [["relax_home", "home"]], { tags: { diligence: 0.2, social: 0.2 },
         gains: { fun: 10 }, outcomes: [new Outcome("understood", `${first} is happy to wait`, 0.7, +1, { [rel]: 1 })],
         extra: { invite: invite.id, answer: "later" } }),
-      new Option("Ignore the message", [["relax_home", "home"]], { tags: { social: -1.0 },
+      new Option("Ignore the message", [["relax_home", "home"]], { tags: { social: -1.0 }, base: -0.4,
         gains: { fun: 10 }, outcomes: [new Outcome("hurt", `${first} is hurt`, 0.7, -1, { [rel]: -6 })],
         extra: { invite: invite.id, answer: "ignore" } }),
     ];
@@ -450,7 +533,9 @@
   // of waking up (agent.woke_tick, kept by the simulation) nor SHIFT_SOON minutes of a shift (or once it began).
   function sleep_fork(sim, agent) {
     const hour = sim.clock.hour, energy = agent.needs.energy;
-    if (!(hour >= 22 || (hour < 5 && energy < 70) || energy < 18)) return null;
+    const weekend = sim.clock.weekday === 4 || sim.clock.weekday === 5; // Friday and Saturday evenings run later
+    const bed = weekend ? WEEKEND_BED + personal(agent, 60) : BEDTIME;
+    if (!(sim.clock.minute_of_day >= bed || (hour < 5 && energy < 70) || energy < 18)) return null;
     const tick = sim.clock.tick;
     const woke = agent.woke_tick ?? null;
     if (woke !== null && tick - woke < WOKE_GAP) return null;
@@ -528,10 +613,20 @@
     const friend = _best_friend(sim, agent, true, true);
     const amount = Math.min(100, pyRound(agent.money * 0.25 / 10) * 10);
     const goal_name = agent.goal ? agent.goal.name : "savings";
-    const save = new Option(`Put $${fmt(amount)} toward ${goal_name}`, [["relax_home", "home"]],
-      { tags: { thrift: 1.0, diligence: 0.4, adventure: -0.3 }, gains: { fun: 10 },
-        outcomes: [new Outcome("proud", "Feels proud of the progress", 0.6, +1, { fun: 5 })],
-        extra: { save: amount } });
+    const left = agent.goal ? pyRound(agent.goal.target - agent.goal.saved, 2) : 0;
+    let save;
+    if (agent.goal && 0 < left && left <= agent.money) { // the cash on hand covers the rest: buy it now (FIXLISTS 13)
+      save = new Option(`Buy ${goal_name} now`, [["relax_home", "home"]], { cost: left,
+        tags: { thrift: 0.4, adventure: 0.4, diligence: 0.2 }, gains: { fun: 40 }, base: 0.3,
+        outcomes: [new Outcome("love_it", "Loves the purchase", 0.7, +1, { fun: 15 }, "purchase"),
+          new Outcome("regret", "Regrets the spending", 0.15, -1, { fun: -8 }, "purchase")],
+        extra: { buy_goal: true } });
+    } else {
+      save = new Option(`Put $${fmt(amount)} toward ${goal_name}`, [["relax_home", "home"]],
+        { tags: { thrift: 1.0, diligence: 0.4, adventure: -0.3 }, gains: { fun: 10 },
+          outcomes: [new Outcome("proud", "Feels proud of the progress", 0.6, +1, { fun: 5 })],
+          extra: { save: amount } });
+    }
     // The cafe nearest both (with a friend) or nearest the character, open for the whole evening out.
     const cafe = _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES, friend);
     let out;
@@ -563,15 +658,12 @@
         tags: { thrift: -1.0, adventure: 0.3 }, gains: { fun: 30 }, outcomes: bought });
     }
     const family = sim.household(agent).member_ids.some(m => m !== agent.id);
+    const party = family ? _dinner_party(sim, agent) : null; // Saturday evening, with whoever is free (FIXLISTS 6)
     // The family goes to the cafe nearest home (extra["place"], so everyone heads to the same one).
-    const dinner = family ? _open_place(sim, agent, ["cafe"], DINNER_MINUTES, null, sim.home_of(agent)) : null;
+    const dinner = party ? _open_place(sim, agent, ["cafe"], DINNER_MINUTES, null, sim.home_of(agent)) : null;
     let treat;
     if (dinner) {
-      treat = new Option(`Treat the family to dinner at ${dinner.name}`, [["family_dinner", dinner.id]], { cost: 50,
-        tags: { family: 1.0, thrift: -0.4, social: 0.3 }, gains: { hunger: 40, social: 30 },
-        outcomes: [new Outcome("bonding", "A warm family evening", 0.7, +1, { family_bond: 4, fun: 8 }, "dinner"),
-          new Outcome("argument", "An argument at the table", 0.1, -1, { family_bond: -3 }, "dinner")],
-        extra: { family: true, place: dinner.id } });
+      treat = _dinner_out(`Treat ${names(party)} to dinner at ${dinner.name}`, dinner);
     } else if (family) { // every cafe would shut before dinner is over: a takeaway for everyone
       treat = new Option("Order a takeaway feast for the family", [["order_food", "home"], ["relax_home", "home"]],
         { cost: 40, tags: { family: 0.8, thrift: -0.3 }, gains: { hunger: 40, fun: 20 },
@@ -585,6 +677,55 @@
     }
     return new Fork(agent.id, "payday", `It's payday and you have $${fmt(agent.money)}. What do you do with it?`,
       [save, out, buy, treat], sim.clock.tick);
+  }
+
+  // A family dinner out at `cafe` (the household members free to come join, _apply_extra's "family").
+  function _dinner_out(label, cafe) {
+    return new Option(label, [["family_dinner", cafe.id]], { cost: 50,
+      tags: { family: 1.0, thrift: -0.4, social: 0.3 }, gains: { hunger: 40, social: 30 },
+      outcomes: [new Outcome("bonding", "A warm family evening", 0.7, +1, { family_bond: 4, fun: 8 }, "dinner"),
+        new Outcome("argument", "An argument at the table", 0.1, -1, { family_bond: -3 }, "dinner")],
+      extra: { family: true, place: cafe.id } });
+  }
+
+  // Saturday evening with the family (FIXLISTS 6): once a week for a household's adults, when someone is free to come
+  // and no small child would be left alone; the dinner names who comes.
+  function family_fork(sim, agent) {
+    const week = Math.floor(sim.clock.day / 7);
+    if (!agent.is_adult || (agent.family_week ?? -1) === week || sim.on_shift_now(agent)) return null;
+    const party = _dinner_party(sim, agent);
+    if (!party || agent.inside !== sim.home_of(agent) || agent.money < 50) return null;
+    const cafe = _open_place(sim, agent, ["cafe"], DINNER_MINUTES, null, sim.home_of(agent));
+    if (cafe === null) return null;
+    for (const m of sim.household(agent).member_ids) sim.agents.get(m).family_week = week; // one family evening a week, whoever brings it up
+    const who = names(party);
+    const hh = sim.household(agent);
+    let home;
+    if (hh.groceries >= party.length + 1) {
+      home = new Option(`Cook a big dinner for ${who}`, [["eat_home", "home"], ["board_game", "home"]],
+        { tags: { family: 0.9, thrift: 0.6, diligence: 0.3 }, gains: { hunger: 40, social: 20 },
+          outcomes: [new Outcome("tasty", "Makes a really tasty meal", 0.5, +1, { fun: 6, family_bond: 2 }, "cook"),
+            new Outcome("burnt", "Burns the food", 0.08, -1, { fun: -6 }, "cook")],
+          extra: { together: party[0].id } });
+    } else {
+      home = new Option(`Order a takeaway for ${who}`, [["order_food", "home"], ["board_game", "home"]], { cost: 40,
+        tags: { family: 0.8, thrift: -0.3 }, gains: { hunger: 40, social: 20 },
+        outcomes: [new Outcome("feast", "Everyone loves the feast", 0.6, +1, { fun: 6 }, "dinner"),
+          new Outcome("late_delivery", "The delivery is very late", 0.2, -1, { fun: -6 }, "dinner")],
+        extra: { together: party[0].id } });
+    }
+    const opts = [
+      _dinner_out(`Take ${who} out to dinner at ${cafe.name}`, cafe),
+      home,
+      new Option(`A games night at home with ${who}`, [["board_game", "home"]],
+        { tags: { family: 0.7, thrift: 0.5, adventure: -0.2 }, gains: { fun: 25, social: 20 },
+          outcomes: [new Outcome("bonding", "Laughs with the family", 0.5, +1, { family_bond: 2 })],
+          extra: { together: party[0].id } }),
+      new Option("Let everyone do their own thing tonight", [["relax_home", "home"]],
+        { tags: { family: -0.6, thrift: 0.3, social: -0.3 }, gains: { fun: 15 },
+          outcomes: [new Outcome("quiet_night", "A quiet night in", 0.5, +1, { fun: 4 })] }),
+    ];
+    return new Fork(agent.id, "family", "It's Saturday evening and everyone's home. What shall we do?", opts, sim.clock.tick);
   }
 
   function groceries_fork(sim, agent) {
@@ -614,14 +755,15 @@
 
   function lonely_fork(sim, agent) {
     const hour = sim.clock.hour;
-    if (agent.needs.social >= 35 || !(9 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1)) return null;
+    if (agent.needs.social >= 35 || !(9 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1)
+      || in_work_window(sim, agent)) return null;
     const friend = _best_friend(sim, agent);
-    const family = _closest_family(sim, agent);
+    const family = _family_away(sim, agent); // never a phone call to someone in the same home (FIXLISTS 5)
     const opts = [];
     // The cafe nearest both (with a friend to invite) or nearest the character, open for the whole hang-out.
-    const short = _short_of(agent, 6);
+    const short = _short_of(agent, 6) || !agent.is_adult; // children play with friends (FIXLISTS 5)
     const cafe = !short ? _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES, friend) : null;
-    if (short) { // a child without the $6: off to play instead
+    if (short) { // a child: off to play instead
       opts.push(_play(sim, agent));
     } else if (friend && cafe) {
       opts.push(new Option(`Invite ${firstName(friend.name)} to ${cafe.name}`, [["hang_out", cafe.id]], { cost: 6,
@@ -645,25 +787,51 @@
         extra: { call: who.id } }));
     } else {
       opts.push(new Option("Write in a diary", [["read", "home"]], { tags: { social: -0.2 }, gains: { fun: 10 },
-        outcomes: [new Outcome("clarity", "Writing brings some clarity", 0.5, +1, { fun: 5 })] }));
+        outcomes: [new Outcome("clarity", "Writing brings some clarity", 0.5, +1, { fun: 5 })],
+        extra: { cooldown: LONELY_IDLE_COOLDOWN } }));
     }
     const park = _park(sim, agent);
-    opts.push(new Option(`Walk in ${park.name}`, [["walk_park", park.id]], { tags: { health: 0.6, adventure: 0.4 },
-      gains: { fun: 30, social: 5 },
-      outcomes: [_meet_new(0.12), new Outcome("rained_out", "Caught in the rain",
-        RAIN_CHANCE[sim.clock.season] * (sim.weather === "rain" ? 1 : 0), -1, { fun: -8 })] }));
-    opts.push(new Option("Stay home alone", [["relax_home", "home"]], { tags: { social: -1.0, thrift: 0.3 },
-      gains: { fun: 20 },
-      outcomes: [new Outcome("peaceful", "A peaceful evening", 0.5, +1, { fun: 5 }, "stay_home"),
-        new Outcome("lonely", "Feels lonely", 0.4, -1, { social: -5 }, "stay_home")] }));
+    const rained = new Outcome("rained_out", "Caught in the rain",
+      RAIN_CHANCE[sim.clock.season] * (sim.weather === "rain" ? 1 : 0), -1, { fun: -8 });
+    const walker = _walk_friend(sim, agent, getd(opts[0].extra, "invite_to", null));
+    if (walker && agent.is_adult) { // a named friend on the walk (FIXLISTS 5)
+      opts.push(new Option(`Ask ${firstName(walker.name)} to walk in ${park.name}`, [["walk_park", park.id]],
+        { tags: { health: 0.6, adventure: 0.3, social: 0.6 }, gains: { fun: 30, social: 30 },
+          outcomes: [new Outcome("good_walk", `A good walk and talk with ${firstName(walker.name)}`, 0.6, +1,
+            { [relKey(walker.id)]: 4 }), rained],
+          extra: { invite_to: walker.id, place: park.id } }));
+    } else {
+      opts.push(new Option(`Walk in ${park.name}`, [["walk_park", park.id]], { tags: { health: 0.6, adventure: 0.4 },
+        gains: { fun: 30, social: 5 }, outcomes: [_meet_new(0.12), rained] }));
+    }
+    const mate = agent.inside === sim.home_of(agent) ? _housemate_home(sim, agent) : null;
+    if (mate) { // someone at home: time together, not a phone call across the hall (FIXLISTS 5)
+      const rel = relKey(mate.id);
+      const when = hour >= 17 ? "the evening" : "some time";
+      opts.push(new Option(`Spend ${when} with ${firstName(mate.name)}`, [["board_game", "home"]],
+        { tags: { family: 0.8, social: 0.6, thrift: 0.3 }, gains: { social: 30, fun: 20 },
+          outcomes: [new Outcome("together", `A lovely time with ${firstName(mate.name)}`, 0.65, +1,
+            { [rel]: 3, social: 10 }, "together"),
+          new Outcome("bicker", `Bickers with ${firstName(mate.name)}`, 0.1, -1, { [rel]: -3, fun: -4 }, "together")],
+          extra: { together: mate.id } }));
+    } else {
+      opts.push(new Option("Stay home alone", [["relax_home", "home"]], { tags: { social: -1.0, thrift: 0.3 },
+        gains: { fun: 20 },
+        outcomes: [new Outcome("peaceful", "A peaceful evening", 0.5, +1, { fun: 5 }, "stay_home"),
+          new Outcome("lonely", "Feels lonely", 0.4, -1, { social: -5 }, "stay_home")],
+        extra: { cooldown: LONELY_IDLE_COOLDOWN } }));
+    }
     return new Fork(agent.id, "lonely", "You haven't talked to anyone in a while. What do you do?", opts, sim.clock.tick);
   }
 
   // When bored (fun under 40) or, for a child, cooped up at home (cooped_up), from 08:00 to 21:00 off shift.
   function free_time_fork(sim, agent) {
     const hour = sim.clock.hour;
-    if (!(8 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1)) return null;
-    if (agent.needs.fun >= 40 && (agent.is_adult || cooped_up(sim, agent) <= 0)) return null;
+    if (!(8 <= hour && hour < 21) || sim.on_shift_now(agent) || _curfew(sim, agent, 1) || in_work_window(sim, agent)) return null;
+    const family = family_fork(sim, agent); // Saturday evening: the family first (FIXLISTS 6)
+    if (family) return family;
+    const idle = agent.is_adult && (agent.idle_home ?? 0) >= IDLE_HOME + personal(agent, IDLE_SPREAD);
+    if (agent.needs.fun >= 40 && !idle && (agent.is_adult || cooped_up(sim, agent) <= 0)) return null;
     const park = _park(sim, agent);
     const short = _short_of(agent, 6);
     const cafe = !short ? _open_place(sim, agent, ["cafe"], HANG_OUT_MINUTES) : null; // open for all of it
@@ -733,7 +901,9 @@
     HANG_OUT_MINUTES, COFFEE_MINUTES, COFFEE_DETOUR, COFFEE_LATE, SNACK_MINUTES, EAT_OUT_MINUTES, GROCERY_MINUTES, DINNER_MINUTES,
     LATE_BASE_DROP, LATE_ODDS, TAXI_NO_HURRY, WOKE_GAP, SHIFT_SOON, MAX_OUTING_MINUTES, TRAVEL_KINDS, TRAVEL_COST,
     NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, COOPED_KINDS, COOPED_UP, COOPED_HOURS, Outcome, Option, Fork, luck_odds,
-    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, retime_late, _curfew,
+    urgency, default_scores, _trip, extra_travel, cooped_up, _goes_out, _late, _meet_new, _on_time, retime_late, personal, names, in_work_window, _family_away, _walk_friend, _housemate_home,
+    _dinner_party, _dinner_out, family_fork, IDLE_HOME, IDLE_SPREAD, OUTDOOR, RAIN_PENALTY, BEDTIME, WEEKEND_BED,
+    DINNER_FROM, DINNER_UNTIL, LONELY_IDLE_COOLDOWN, _curfew,
     _open_on_arrival, _open_place, _park, _best_friend, _playmate, _play, _short_of, _closest_family, invite_fork,
     work_lead, work_fork, sleep_fork, hunger_fork,
     payday_fork, groceries_fork, lonely_fork, free_time_fork, BUILDERS, COOLDOWN, builders, build_fork,

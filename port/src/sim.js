@@ -90,6 +90,8 @@
   const WANDER_EVERY = 1; // minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
   const MEET = ["hang_out", "play"]; // activities an invite meets at: the host waits doing it, the guest comes to do it
   const MEET_TILES = 3; // how near two people outdoors must be for a first meeting (_meet_someone)
+  const IDLE_FUN = 1.6; // how much faster fun drains while sitting idle (FIXLISTS 8)
+  const DAY_OFF_WAKE = 8 * 60; // the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
   const NEWS_EVERY = { fender: 30 * G.clock.MINUTES_PER_DAY }; // outcome id -> the least time between two of one person's in the news
 
   // One decimal, rounding half up (floor(x * 10 + 0.5) / 10), as the Python twin does.
@@ -367,7 +369,13 @@
     _decay(agent) {
       const { NEEDS, NEED_DECAY } = G.agent;
       const scale = getd(DECAY_SCALE, agent.state === "busy" ? agent.activity : "", {});
-      for (const n of NEEDS) agent.adjust(n, -NEED_DECAY[n] * getd(scale, n, 1.0));
+      const idle = agent.state === "busy" && agent.activity === "idle";
+      for (const n of NEEDS) agent.adjust(n, -NEED_DECAY[n] * getd(scale, n, 1.0) * (idle && n === "fun" ? IDLE_FUN : 1.0));
+      if (idle && agent.inside === this.home_of(agent)) { // waking minutes idle at home (forks.free_time_fork)
+        agent.idle_home = (agent.idle_home ?? 0) + 1;
+      } else if (agent.activity === "sleep" || (agent.inside === null && agent.state !== "deciding")) {
+        agent.idle_home = 0; // asleep, or out of the house
+      }
       if (agent.needs.hunger <= 0) agent.health -= 0.03;
       if (agent.needs.energy <= 0) agent.health -= 0.02;
       if (Math.min(...Object.values(agent.needs)) > 40 && agent.health < 100) agent.health = Math.min(100.0, agent.health + 0.004);
@@ -589,12 +597,15 @@
       } else if (agent.activity === "sleep") {
         // Up with time for breakfast before the shift: 7:00 starters at about 5:30, an hour more than the
         // commute from home (the usual way, the worst bus wait counted) for the long ones.
-        let wake = 7 * 60;
-        if (agent.job) {
-          wake = Math.min(wake, agent.job.start_hour * 60 - Math.max(90, (this.commute_minutes(agent) || 0) + 60));
+        const m = this.clock.minute_of_day;
+        const weekday = (this.clock.weekday + (m >= 12 * 60 ? 1 : 0)) % 7; // the day they wake up on
+        let wake;
+        if (!agent.job || !agent.job.workdays.includes(weekday)) { // a day off (school: the weekend): a lie-in
+          wake = DAY_OFF_WAKE + G.forks.personal(agent, 90);
+        } else {
+          wake = Math.min(7 * 60, agent.job.start_hour * 60 - Math.max(90, (this.commute_minutes(agent) || 0) + 60));
         }
         wake += this.rng.randrange(0, 25);
-        const m = this.clock.minute_of_day;
         let minutes = pyMod(wake - m, G.clock.MINUTES_PER_DAY);
         if (minutes > 11 * 60 || minutes < 60) minutes = 180; // a nap in the daytime
         agent.busy_until = tick + minutes;
@@ -819,13 +830,18 @@
     }
 
     // While the controller thinks, the work fork's character sets off the usual way at once (FIXLISTS 1: a
-    // character who stood still for the answer arrived late): option 0's first step, unpaid, nothing rolled. When
+    // character who stood still for the answer arrived late): the usual way's first step (by car for a driver, else
+    // option 0), unpaid, nothing rolled. When
     // the answer lands, _decide re-times it from where they are (_retime). Already at work, the shift begins. Other
     // forks wait where they are.
     _set_off_thinking(agent, fork) {
       const SPEEDS = G.travel.SPEEDS;
-      const opt = fork.options[0];
-      if (fork.kind !== "work" || !opt.steps.length || !this._resolve_place(agent, opt.steps[0][1])) return;
+      if (fork.kind !== "work") return;
+      const mode = this.usual_mode(agent);
+      const prov = [0, 1].find(i => fork.options[i].vehicle === mode) ?? 0;
+      const opt = fork.options[prov];
+      if (!opt.steps.length || !this._resolve_place(agent, opt.steps[0][1])) return;
+      agent.provisional = prov;
       agent.thinking = fork.id; // the asked fork whose provisional plan is under way
       agent.provisional_eta = this.clock.tick + (this._option_minutes(agent, opt) || 0);
       agent.usual_plan = opt.vehicle === G.travel.USUAL;
@@ -886,8 +902,9 @@
       const tick = this.clock.tick;
       const working = agent.state === "busy" && agent.activity === "work";
       const mins = {};
+      const prov = agent.provisional ?? 0;
       for (const i of goes) {
-        if (i === 0 && this._on_provisional(agent, fork.options[0])) {
+        if (i === prov && this._on_provisional(agent, fork.options[prov])) {
           mins[i] = agent.state === "busy" ? 0 : Math.max(0, (agent.provisional_eta ?? tick) - tick);
         } else {
           mins[i] = this._option_minutes(agent, fork.options[i], true) || 0;
@@ -896,7 +913,7 @@
       const left = start - tick;
       let played;
       if (working) {
-        played = 0;
+        played = prov;
       } else if (mins[choice] <= left) {
         played = choice;
       } else {
@@ -1007,7 +1024,7 @@
         if (note) reason = reason ? `${reason} (${note})` : note[0].toUpperCase() + note.slice(1) + ".";
       }
       const opt = fork.options[choice];
-      const carry = moving && choice === 0 && this._on_provisional(agent, opt); // already on its first step
+      const carry = moving && choice === (agent.provisional ?? 0) && this._on_provisional(agent, opt); // under way
       const asked = this.asked_at.has(fork.id) ? this.asked_at.get(fork.id) : null;
       const seconds = asked !== null ? this.now() - asked : null;
       fork.status = "decided";
@@ -1038,7 +1055,10 @@
       if (carry && agent.state === "busy") agent.paid = null; // the step it pays for has begun
       if (!carry) agent.state = "idle";
       const COOLDOWN = G.forks.COOLDOWN;
-      if (hasOwn(COOLDOWN, fork.kind)) agent.cooldowns[fork.kind] = this.clock.tick + COOLDOWN[fork.kind];
+      if (hasOwn(COOLDOWN, fork.kind)) { // longer after a choice that does not help (FIXLISTS 5)
+        agent.cooldowns[fork.kind] = this.clock.tick + getd(opt.extra, "cooldown", COOLDOWN[fork.kind]);
+      }
+      if (fork.kind === "free_time") agent.idle_home = 0;
       if (opt.steps.some(step => step[0] === "work") || getd(opt.extra, "skip_work", null)) agent.worked_today = this.clock.day;
       this._apply_extra(agent, fork, opt);
       // Roll the hidden outcomes now; most land when the plan is done, some later. Within a group the first hit
@@ -1233,6 +1253,8 @@
           this.event(`${agent.name} ${words} ${firstName(host.name)}'s invite.`, agent, null,
             { tag: extra.answer === "accept" ? "invite_accepted" : "invite_declined",
               agents: [host.id], place: inv.place });
+          host.remember(this.clock.stamp(), `${firstName(agent.name)} ${words} my invite to `
+            + `${this.town.places.get(inv.place).name}.`); // the host's page (FIXLISTS 14)
           this._deliver(host, { type: "invite_answer", invite_id: inv.id, from: agent.id, answer: extra.answer });
           if (extra.answer === "accept") this._host_waits(host, agent, inv.place);
         }
@@ -1289,6 +1311,7 @@
         const family = [];
         for (const m of this.household(agent).member_ids) {
           const other = this.agents.get(m);
+          other.family_week = Math.floor(this.clock.day / 7); // this week's family evening
           if (other !== agent && other.alive && this._interruptible(other)) {
             other.plan = [["family_dinner", where]];
             other.usual_plan = true;
@@ -1296,8 +1319,22 @@
             family.push(other.id);
           }
         }
-        this.event(`${agent.name} takes the family out to dinner.`, agent, null, { tag: "family_dinner", agents: family,
+        const place = this.town.places.has(where) ? this.town.places.get(where).name : where;
+        const who = family.length ? G.forks.names(family.map(m => this.agents.get(m))) : "";
+        this.event(family.length ? `${agent.name} takes ${who} out to dinner at ${place}.`
+          : `${agent.name} goes out to dinner at ${place}.`, agent, null, { tag: "family_dinner", agents: family,
           place: where });
+      }
+      if (hasOwn(extra, "together")) { // time at home together: the other joins in if free (FIXLISTS 5, 6)
+        const other = this.agents.get(extra.together) ?? null;
+        if (other && other.alive && other.inside === this.home_of(other) && this._interruptible(other)) {
+          other.plan = [[opt.steps[opt.steps.length - 1][0], "home"]];
+          other.state = "idle";
+        }
+      }
+      if (getd(extra, "buy_goal", null) && agent.goal) { // bought outright (the cost paid the rest; FIXLISTS 13)
+        this.event(`${agent.name} finally buys ${agent.goal.name}!`, agent, null, { tag: "goal_reached" });
+        agent.goal = null;
       }
       G.housing.apply_extra(this, agent, fork, opt); // move, repair, works, belt_tighten, ... (P2)
     }
