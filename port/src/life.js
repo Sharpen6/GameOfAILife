@@ -30,6 +30,7 @@
   LABELS.sprain = "a sprain";
   for (const c of CHRONIC) LABELS[c] = c.replace("_", " ");
   const SPRAIN = [[7, 14], [0, 3]]; // a v2 outcome costing 8+ health: days, days off
+  const ACCIDENT_AWAKE = 30; // a fracture rolled while asleep happens this many minutes after they wake
   const DOCTOR_FEE = 40.0;
   const DOCTOR_DAYS = 0.7; // a doctor shortens an illness by 30% ...
   const DOCTOR_COMPLICATIONS = 0.5; // ... and halves its complications
@@ -327,6 +328,12 @@
       _discharge(sim, p, arg);
     } else if (kind === "hospital") {
       hospitalise(sim, p, arg[0], arg[1]);
+    } else if (kind === "shock") {
+      G.money.apply_shock(sim, p, arg[0], arg[1], arg[2]);
+    } else if (kind === "career") {
+      G.career.due(sim, p, arg);
+    } else if (kind === "accident") {
+      _accident(sim, p, arg);
     } else if (kind === "bill") {
       const amount = Math.trunc(Math.max(0.0, p.money + p.savings) + 300);
       p.money -= amount;
@@ -389,6 +396,7 @@
       }
     }
     if (life.conditions.length) p.health = Math.min(p.health, ILL_CAP);
+    let struck = false; // a fracture deferred to waking (`_fall_ill`) leaves no condition yet: no catching it too
     if (!life.conditions.length && life.ward_until === 0) {
       const season = SEASON_INDEX[sim.clock.season];
       const weights = [];
@@ -404,6 +412,7 @@
         total += heart * share;
       }
       if (_hit(sim, p, "ill", total * PACE.health / YEAR_DAYS, -1, rr)) {
+        struck = true;
         let x = rr.random() * total;
         let i = 0;
         while (i < weights.length - 1 && x >= weights[i]) {
@@ -415,7 +424,7 @@
       }
     }
     // Catching it at home (life.md 5.5: home .08/.15/.10 a day while a housemate is contagious).
-    if (!life.conditions.length && life.ward_until === 0) {
+    if (!struck && !life.conditions.length && life.ward_until === 0) {
       for (const m of _members(sim, p)) {
         if (m === p || m.life === null) continue;
         const c = m.life.conditions.find(c => c.contagious_until > t);
@@ -457,10 +466,11 @@
     return "died suddenly";
   }
 
+  // An illness or an injury from its row (see life.py): a fracture rolled while `p` sleeps happens ACCIDENT_AWAKE
+  // minutes after they wake (life's agenda, `_accident`).
   function _fall_ill(sim, p, row, rr) {
-    const cid = row[0], days = row[5], hit = row[7], contagious = row[8];
+    const cid = row[0], days = row[5];
     let off = row[6];
-    const t = sim.clock.tick;
     let d = rr.int(days[0], days[1]);
     if (cid === "back_pain" && p.job !== null && _manual(sim, p)) off = BACK_PAIN_MANUAL;
     let o = rr.int(off[0], off[1]);
@@ -469,6 +479,35 @@
       d = Math.max(1, Math.trunc(d * DOCTOR_DAYS + 0.5));
       o = Math.min(o, d);
     }
+    if (cid === "fracture") {
+      const wake = _asleep_until(sim, p);
+      if (wake !== null) {
+        _agenda(sim, wake + ACCIDENT_AWAKE, "accident", p.id, [cid, d, o, doctor]);
+        return;
+      }
+    }
+    _strike(sim, p, row, d, o, doctor);
+  }
+
+  // The tick `p` wakes when asleep now (a named's sleep ends at busy_until, a townsperson's stay), else null.
+  function _asleep_until(sim, p) {
+    const t = sim.clock.tick;
+    if (_named(sim, p)) return p.activity === "sleep" && p.state === "busy" ? Math.max(t, p.busy_until) : null;
+    if (p.activity !== "sleep" || (p.trip !== null && p.trip !== undefined)) return null;
+    const stay = sim.folk.stay.get(p.i);
+    return stay !== undefined ? Math.max(t, stay[1]) : sim.folk._wake_tick(p, t);
+  }
+
+  // A fracture rolled while `p` slept happens now they are up (skipped if they are in hospital by then).
+  function _accident(sim, p, arg) {
+    const [cid, d, o, doctor] = arg;
+    if (p.life.ward_until > sim.clock.tick) return;
+    _strike(sim, p, ACUTE.find(r => r[0] === cid), d, o, doctor);
+  }
+
+  function _strike(sim, p, row, d, o, doctor) {
+    const cid = row[0], hit = row[7], contagious = row[8];
+    const t = sim.clock.tick;
     const c = new Condition(cid, t, t + d * DAY, t + o * DAY, t + contagious * DAY, hit, doctor);
     p.life.conditions.push(c);
     p.health = Math.max(1.0, p.health - hit);
@@ -904,7 +943,7 @@
     _stream, _sid,
     _hit, _named, _person, _event, _agenda, _hospital_id, _partner, _children, pre_init, init, init_person,
     seed_story, _conceive, tick, _ward_care, _run_agenda, legacy_ageing, daily, birthday, toddle, _health, _cause,
-    _fall_ill, _heart, _see_doctor, _payer, note_injury, hospitalise, _discharge, max_health, can_work, in_hospital,
+    _fall_ill, _asleep_until, _accident, _strike, ACCIDENT_AWAKE, _heart, _see_doctor, _payer, note_injury, hospitalise, _discharge, max_health, can_work, in_hospital,
     ill, stage, infect, die, on_death, _family, birth, _named_baby, split, page, fork_you, stats_block,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

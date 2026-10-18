@@ -173,6 +173,95 @@ class StandingTest(unittest.TestCase):
         self.assertTrue(any(e["tag"] == "job_lost" for e in sim.history))
 
 
+def run_career_agenda(sim) -> list:
+    """Run the career rows on life's agenda in tick order at their ticks (nothing else); their ticks."""
+    ran = []
+    for t in sorted(sim.life.agenda):
+        rows = sim.life.agenda[t]
+        keep = [r for r in rows if r[0] != "career"]
+        sim.clock.tick = t
+        for kind, pid, arg in rows:
+            if kind == "career":
+                ran.append(t)
+                life._run_agenda(sim, kind, pid, arg)
+        if keep:
+            sim.life.agenda[t] = keep
+        else:
+            del sim.life.agenda[t]
+    return ran
+
+
+class TimingTest(unittest.TestCase):
+    """A review, layoff, offer or hire rolled at any hour happens on a weekday in WORK_HOURS, and someone at work
+    then has it at the end of the shift (the verifiers saw layoffs at 04:32 and on Sundays)."""
+
+    def test_rolled_events_wait_for_working_hours(self):
+        sim = life_sim()
+        a = next(x for x in sim.agents.values() if career.worker(x))
+        for start in (3 * 60, 5 * life.DAY + 10 * 60, 6 * life.DAY + 23 * 60, 2 * life.DAY + 16 * 60 + 59,
+                      8 * life.DAY + 9 * 60):
+            sim.life.agenda.clear()
+            sim.clock.tick = start
+            career._defer(sim, a, dice.stream(1, 99, start), "laid_off")
+            (t, rows), = sim.life.agenda.items()
+            day, m = divmod(t, life.DAY)
+            self.assertGreater(t, start)
+            self.assertLess(day % 7, 5, (start, t))
+            self.assertTrue(career.WORK_HOURS[0] <= m < career.WORK_HOURS[1], (start, t))
+            self.assertLessEqual(t - start, 3 * life.DAY + career.WORK_HOURS[1], (start, t))
+            self.assertEqual(rows, [("career", a.id, ("laid_off", None, start // life.DAY, a.job.slot, False))])
+
+    def test_at_work_it_waits_for_the_end_of_the_shift(self):
+        sim = life_sim()
+        a = next(x for x in sim.agents.values() if career.worker(x) and 0 in x.job.workdays
+                 and x.job.start_hour <= 10 < x.job.end_hour)
+        sim.life.agenda.clear()
+        sim.clock.tick = 10 * 60  # Monday 10:00, at work
+        a.activity, a.worked_today = "work", sim.clock.day
+        self.assertTrue(sim.on_shift_now(a))
+        slot = a.job.slot
+        career.due(sim, a, ("laid_off", None, 0, slot, False))
+        self.assertTrue(career.worker(a))  # not yet
+        (t, rows), = sim.life.agenda.items()
+        self.assertEqual(t, a.job.end_hour * 60)
+        self.assertEqual(run_career_agenda(sim), [t])
+        self.assertIsNone(a.job)  # laid off at the end of the shift
+        self.assertEqual(sim.life.counts["laid_off"], 1)
+
+    def test_a_changed_job_drops_the_old_roll(self):
+        sim = life_sim()
+        a = next(x for x in sim.agents.values() if career.worker(x))
+        sim.clock.tick = 2 * life.DAY + 12 * 60
+        career.due(sim, a, ("laid_off", None, 2, a.job.slot + 1000, False))  # rolled in another job
+        self.assertTrue(career.worker(a))
+
+
+@unittest.skipUnless(NODE, "node is not installed")
+class TimingTwinTest(unittest.TestCase):
+    def test_the_port_defers_the_same(self):
+        sim = life_sim()
+        a = next(x for x in sim.agents.values() if career.worker(x))
+        py = []
+        for start in range(0, 9 * life.DAY, 197):
+            sim.life.agenda.clear()
+            sim.clock.tick = start
+            career._defer(sim, a, dice.stream(1, 99, start), "offer")
+            py.append(next(iter(sim.life.agenda)))
+        js = node_eval(f"""
+const sim = new G.sim.Simulation(1);
+const a = [...sim.agents.values()].find(x => G.career.worker(x) && x.id === {a.id!r});
+const out = [];
+for (let start = 0; start < 9 * 1440; start += 197) {{
+  sim.life.agenda.clear();
+  sim.clock.tick = start;
+  G.career._defer(sim, a, G.dice.stream(1, 99, start), "offer");
+  out.push([...sim.life.agenda.keys()][0]);
+}}
+console.log(JSON.stringify(out));
+""")
+        self.assertEqual(js, py)
+
+
 class ReviewTest(unittest.TestCase):
     def test_a_city_owns_its_jobs(self):
         a, b = Simulation(1), Simulation(1)
@@ -277,6 +366,7 @@ class ReviewTest(unittest.TestCase):
         with mock.patch.object(people, "log_roll", lambda s, p, what, prob, roll: logged.append((what, prob))):
             for k in range(200):
                 career.daily(sim, seeker, dice.stream(1, dice.DAY_CAREER, seeker.id, k))
+                run_career_agenda(sim)  # the hire happens in working hours (career._defer)
                 if seeker.job is not None:
                     break
         self.assertEqual(seeker.job.slot, lead)

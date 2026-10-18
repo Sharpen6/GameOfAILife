@@ -34,6 +34,9 @@ OFFER_AT, OFFER_YEAR, OFFER_RAISE = 50, 0.15, (1.10, 1.25)  # a worker's daily o
 RETIRE_AGE, RETIRE_ODDS = 65, (0.4, 0.6, 1.0)  # at each review from 65: 65, 66, 67+
 COWORKER_AFFINITY = (15, 25)
 NEW_COWORKERS = 4
+# A review, layoff, offer or hire is rolled in the person's slot minute (any hour) and happens at WORK_HOURS on the
+# next weekday (a minute drawn from the day's stream), or at the end of the shift for someone at work then (`due`).
+WORK_HOURS = (9 * 60, 17 * 60)
 
 
 class JobBoard:
@@ -143,8 +146,9 @@ def on_shift_end(sim, p) -> None:
 
 
 def daily(sim, p, rr) -> None:
-    """The person's daily career roll (life.tick, in their slot minute): standing drifts toward 50; a worker may
-    be laid off (`odds(.03 x PACE / 360, -1)`); a seeker 18-64 may be hired (`odds(.035 + .0005 rep, +1)`)."""
+    """The person's daily career roll (life.tick, in their slot minute): standing drifts toward 50; a review is
+    due every 90 days; a worker may be laid off (`odds(.03 x PACE / 360, -1)`) or offered a job; a seeker 18-64 may
+    be hired (`odds(.035 + .0005 rep, +1)`). What is rolled happens in working hours (`_defer`, `due`)."""
     from . import life
 
     if not p.is_adult:
@@ -153,20 +157,80 @@ def daily(sim, p, rr) -> None:
     if worker(p):
         p.reputation += STANDING_DRIFT * (50.0 - p.reputation)
         if day % 90 == p.life.review_day and day - p.life.job_since >= 30:
-            review(sim, p, rr)
-            if not worker(p):
-                return
+            _defer(sim, p, rr, "review")
         if _hit(sim, p, "layoff", LAYOFF_YEAR * life.PACE["career"] / life.YEAR_DAYS, -1, rr):
-            lose_job(sim, p, rr, "laid_off")
+            _defer(sim, p, rr, "laid_off")
         elif p.reputation >= OFFER_AT and _hit(sim, p, "offer", OFFER_YEAR * life.PACE["career"] / life.YEAR_DAYS,
                                               +1, rr):
-            offer(sim, p, rr)
+            _defer(sim, p, rr, "offer")
     elif (p.job is None and p.life.jobless_since is not None and HIRE_AGES[0] <= p.age <= HIRE_AGES[1]
           and life.can_work(sim, p)):
         lead = network_slot(sim, p, board(sim).vacant(sim, p), _cap(p)) if p.relationships else None
         if _hit(sim, p, "hire", HIRE_BASE + HIRE_REP * p.reputation + (HIRE_NETWORK if lead is not None else 0.0),
                 +1, rr):
-            hire(sim, p, rr, lead)
+            _defer(sim, p, rr, "hire", lead)
+
+
+def _defer(sim, p, rr, what: str, lead: int | None = None) -> None:
+    """Put a rolled review, layoff, offer or hire on life's agenda for a minute in WORK_HOURS (drawn from `rr`)
+    today if that is still to come on a weekday, else on the next weekday."""
+    from . import life
+
+    t = sim.clock.tick
+    day, m = divmod(t, life.DAY)
+    minute = rr.int(WORK_HOURS[0], WORK_HOURS[1] - 1)
+    if day % 7 >= 5 or m >= minute:
+        day += 1
+        while day % 7 >= 5:
+            day += 1
+    slot = p.job.slot if p.job is not None else -1
+    life._agenda(sim, day * life.DAY + minute, "career", p.id, (what, lead, sim.clock.day, slot, False))
+
+
+def _at_work(sim, p) -> bool:
+    if p.id in sim.agents:
+        return sim.on_shift_now(p)
+    return p.activity == "work" and p.state == "busy" and getattr(p, "trip", None) is None
+
+
+def _shift_end(sim, p) -> int:
+    """The tick the shift `p` is at ends (the job's end hour today, after the shift's own offset for folk)."""
+    from . import life
+
+    t = sim.clock.tick
+    day = t // life.DAY
+    if p.id in sim.agents:
+        end = p.job.end_hour * 60
+    else:
+        end = sim.folk._end_minute(p)
+    tick = day * life.DAY + end
+    return tick if tick > t else t + 1
+
+
+def due(sim, p, arg) -> None:
+    """A rolled career event comes due (life's agenda): someone at work then has it at the end of the shift (once);
+    a review, layoff or offer only while they still hold the job it was rolled in; a hire only while still looking.
+    Draws come from the roll day's stream for this event."""
+    from . import dice, life, people
+
+    what, lead, rolled, slot, waited = arg
+    if what != "hire" and (not worker(p) or p.job.slot != slot):
+        return
+    if not waited and _at_work(sim, p):
+        life._agenda(sim, _shift_end(sim, p), "career", p.id, (what, lead, rolled, slot, True))
+        return
+    rr = dice.stream(people.dice_seed(sim), dice.DAY_CAREER, p.id, rolled, what)
+    if what == "review":
+        review(sim, p, rr)
+    elif what == "laid_off":
+        lose_job(sim, p, rr, "laid_off")
+    elif what == "offer":
+        offer(sim, p, rr)
+    elif (p.job is None and p.life.jobless_since is not None and HIRE_AGES[0] <= p.age <= HIRE_AGES[1]
+          and life.can_work(sim, p)):
+        if lead is not None and lead not in board(sim).vacant(sim, p):
+            lead = None
+        hire(sim, p, rr, lead)
 
 
 def offer(sim, p, rr) -> bool:

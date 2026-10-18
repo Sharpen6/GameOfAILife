@@ -26,6 +26,9 @@
   const [RETIRE_AGE, RETIRE_ODDS] = [65, [0.4, 0.6, 1.0]]; // at each review from 65: 65, 66, 67+
   const COWORKER_AFFINITY = [15, 25];
   const NEW_COWORKERS = 4;
+  // A review, layoff, offer or hire is rolled in the slot minute and happens at WORK_HOURS on the next weekday, or at
+  // the end of the shift for someone at work then (`due`).
+  const WORK_HOURS = [9 * 60, 17 * 60];
 
   // Every job slot: jobs[slot] (an agent.Job, whose `slot` is set), holder[slot] (a person id or null) and
   // reopen[slot] (the game day an emptied slot is advertised again). `named` counts the named v2 slots (0..k-1).
@@ -117,28 +120,77 @@
     p.reputation = Math.max(0.0, Math.min(100.0, p.reputation + delta));
   }
 
-  // The person's daily career roll (life.tick, in their slot minute): see career.py.
+  // The person's daily career roll (life.tick, in their slot minute): see career.py. What is rolled happens in
+  // working hours (`_defer`, `due`).
   function daily(sim, p, rr) {
     const L = G.life;
     if (!p.is_adult) return;
     const day = sim.clock.day;
     if (worker(p)) {
       p.reputation += STANDING_DRIFT * (50.0 - p.reputation);
-      if (day % 90 === p.life.review_day && day - p.life.job_since >= 30) {
-        review(sim, p, rr);
-        if (!worker(p)) return;
-      }
+      if (day % 90 === p.life.review_day && day - p.life.job_since >= 30) _defer(sim, p, rr, "review");
       if (_hit(sim, p, "layoff", LAYOFF_YEAR * L.PACE.career / L.YEAR_DAYS, -1, rr)) {
-        lose_job(sim, p, rr, "laid_off");
+        _defer(sim, p, rr, "laid_off");
       } else if (p.reputation >= OFFER_AT && _hit(sim, p, "offer", OFFER_YEAR * L.PACE.career / L.YEAR_DAYS, +1, rr)) {
-        offer(sim, p, rr);
+        _defer(sim, p, rr, "offer");
       }
     } else if (p.job === null && p.life.jobless_since !== null && HIRE_AGES[0] <= p.age && p.age <= HIRE_AGES[1]
       && L.can_work(sim, p)) {
       const lead = p.relationships.size ? network_slot(sim, p, board(sim).vacant(sim, p), _cap(p)) : null;
       if (_hit(sim, p, "hire", HIRE_BASE + HIRE_REP * p.reputation + (lead !== null ? HIRE_NETWORK : 0.0), +1, rr)) {
-        hire(sim, p, rr, lead);
+        _defer(sim, p, rr, "hire", lead);
       }
+    }
+  }
+
+  // A rolled review, layoff, offer or hire onto life's agenda at a minute in WORK_HOURS (drawn from rr): today if
+  // still to come on a weekday, else the next weekday.
+  function _defer(sim, p, rr, what, lead = null) {
+    const L = G.life;
+    const t = sim.clock.tick;
+    let day = Math.floor(t / L.DAY);
+    const m = t - day * L.DAY;
+    const minute = rr.int(WORK_HOURS[0], WORK_HOURS[1] - 1);
+    if (day % 7 >= 5 || m >= minute) {
+      day += 1;
+      while (day % 7 >= 5) day += 1;
+    }
+    const slot = p.job !== null ? p.job.slot : -1;
+    L._agenda(sim, day * L.DAY + minute, "career", p.id, [what, lead, sim.clock.day, slot, false]);
+  }
+
+  function _at_work(sim, p) {
+    if (sim.agents.has(p.id)) return sim.on_shift_now(p);
+    return p.activity === "work" && p.state === "busy" && (p.trip === null || p.trip === undefined);
+  }
+
+  // The tick the shift `p` is at ends (the job's end hour today, after the shift's own offset for folk).
+  function _shift_end(sim, p) {
+    const L = G.life;
+    const t = sim.clock.tick;
+    const day = Math.floor(t / L.DAY);
+    const end = sim.agents.has(p.id) ? p.job.end_hour * 60 : sim.folk._end_minute(p);
+    const tick = day * L.DAY + end;
+    return tick > t ? tick : t + 1;
+  }
+
+  // A rolled career event comes due (life's agenda): see career.py.
+  function due(sim, p, arg) {
+    const { dice, people } = G;
+    let [what, lead, rolled, slot, waited] = arg;
+    if (what !== "hire" && (!worker(p) || p.job.slot !== slot)) return;
+    if (!waited && _at_work(sim, p)) {
+      G.life._agenda(sim, _shift_end(sim, p), "career", p.id, [what, lead, rolled, slot, true]);
+      return;
+    }
+    const rr = dice.stream(people.dice_seed(sim), dice.DAY_CAREER, p.id, rolled, what);
+    if (what === "review") review(sim, p, rr);
+    else if (what === "laid_off") lose_job(sim, p, rr, "laid_off");
+    else if (what === "offer") offer(sim, p, rr);
+    else if (p.job === null && p.life.jobless_since !== null && HIRE_AGES[0] <= p.age && p.age <= HIRE_AGES[1]
+      && G.life.can_work(sim, p)) {
+      if (lead !== null && !board(sim).vacant(sim, p).includes(lead)) lead = null;
+      hire(sim, p, rr, lead);
     }
   }
 
@@ -344,5 +396,6 @@
     RAISE_AT, RAISE_ODDS, RAISE_PCT, PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY, PROMOTE_TITLES, OFFER_AT,
     OFFER_YEAR, OFFER_RAISE, RETIRE_AGE, RETIRE_ODDS, JobBoard, board, _hit, _place_name, _event, worker,
     on_shift_end, daily, review, promote, retire, lose_job, _pick, network_slot, _cap, hire, coworkers, offer, benefit,
+    WORK_HOURS, _defer, _at_work, _shift_end, due,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -18,19 +18,22 @@ WEALTH_SPEND = 0.004
 DEBT_RATE = 0.004  # a week, on -(cash + savings)
 CHRONIC_COST = 15.0  # a week, each treated chronic condition
 CHILD_COST = ((3, 70.0), (5, 60.0), (18, 30.0))  # (under this age, a week): baby, 3-4, 5-17
-# Shocks (WEEK_MONEY): (id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | None, text). "owner": only in a home
-# the household owns, since the landlord replaces a let home's appliances as it does its repairs (housing).
-BAD = (("car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs"),
-       ("appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}"),
-       ("dentist", 0.015, 100, 800, None, "has a ${a} dentist's bill"),
-       ("phone", 0.01, 150, 400, None, "replaces a broken phone for ${a}"),
-       ("fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine"),
-       ("burglary", 0.003, 300, 1500, None, "is burgled and loses ${a}"))
-GOOD = (("bonus", 0.012, 200, 800, "job", "gets a ${a} bonus at work"),
-        ("scratch_card", 0.003, 100, 3000, None, "wins ${a} on a scratch card"),
-        ("tax_refund", 0.01, 150, 600, None, "gets a ${a} tax refund"),
-        ("sold", 0.01, 50, 300, None, "sells something online for ${a}"),
-        ("gift", 0.005, 100, 500, None, "gets a ${a} gift from family"))
+# Shocks (WEEK_MONEY): (id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | None, text, when). "owner": only in
+# a home the household owns, since the landlord replaces a let home's appliances as it does its repairs (housing).
+# The roll is in the Sunday slot; the shock itself comes in the week ahead (life's agenda, `apply_shock`): "day" on a
+# weekday in DAY_HOURS (a garage, a dentist, an employer, the tax office), "any" on any day in ANY_HOURS.
+BAD = (("car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs", "day"),
+       ("appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}", "day"),
+       ("dentist", 0.015, 100, 800, None, "has a ${a} dentist's bill", "day"),
+       ("phone", 0.01, 150, 400, None, "replaces a broken phone for ${a}", "any"),
+       ("fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine", "any"),
+       ("burglary", 0.003, 300, 1500, None, "is burgled and loses ${a}", "any"))
+GOOD = (("bonus", 0.012, 200, 800, "job", "gets a ${a} bonus at work", "day"),
+        ("scratch_card", 0.0005, 100, 3000, None, "wins ${a} on a scratch card", "any"),
+        ("tax_refund", 0.01, 150, 600, None, "gets a ${a} tax refund", "day"),
+        ("sold", 0.01, 50, 300, None, "sells something online for ${a}", "any"),
+        ("gift", 0.005, 100, 500, None, "gets a ${a} gift from family", "any"))
+DAY_HOURS, ANY_HOURS = (9 * 60, 18 * 60), (9 * 60, 21 * 60)  # [from, until) minutes of the day a shock comes in
 
 
 def _income(sim, p) -> float:
@@ -65,8 +68,9 @@ def _owns_home(sim, p) -> bool:
 
 
 def _shock(sim, p, rr, table, valence: int, what: str) -> int:
-    """One roll on the sum of the eligible shocks' odds (luck-shifted, logged), then a plain draw by weight;
-    returns the amount (0 for none)."""
+    """One roll on the sum of the eligible shocks' odds (luck-shifted, logged), then a plain draw by weight, the
+    amount and when in the week ahead it comes (a weekday in DAY_HOURS, or any day in ANY_HOURS): it goes on life's
+    agenda (`apply_shock`). Returns the amount (0 for none)."""
     from . import life
 
     rows = []
@@ -90,11 +94,22 @@ def _shock(sim, p, rr, table, valence: int, what: str) -> int:
         i += 1
     row = rows[i]
     amount = rr.int(row[2], row[3])
+    hours = DAY_HOURS if row[6] == "day" else ANY_HOURS
+    ahead = rr.int(1, 5 if row[6] == "day" else 7)  # days after this Sunday: Monday to Friday, or to next Sunday
+    minute = rr.int(hours[0], hours[1] - 1)
+    life._agenda(sim, (sim.clock.day + ahead) * life.DAY + minute, "shock", p.id, (row[0], amount, valence))
+    return amount
+
+
+def apply_shock(sim, p, sid: str, amount: int, valence: int) -> None:
+    """A money shock rolled last Sunday comes in (life's agenda): the money and the line."""
+    from . import life
+
+    row = next(r for r in BAD + GOOD if r[0] == sid)
     p.money += amount * valence
     tag = "windfall" if valence > 0 else "expense"
     text = row[5].replace("${a}", f"${amount:,}")
     life._event(sim, p, f"{p.name} {text}.", tag, _importance(sim, p, amount))
-    return amount
 
 
 def _fixed(sim, hh) -> float:
@@ -109,8 +124,9 @@ def weekly(sim, p) -> None:
     """`p`'s money week (an adult's Sunday slot, life.md 5.8): the benefit; lifestyle spending (none while the
     household is in the red after last Sunday's bills or, before its first Sunday's bills, already short of them;
     halved while it tightens its belt; the habit never more than p's pay leaves after their share of the housing
-    charge and bills, spending out of wealth on top); one bad and one good shock; interest on debt; treated chronic conditions; and, for the household's
-    richest adult, the children's costs."""
+    charge and bills, spending out of wealth on top); one bad and one good shock (rolled now, coming in the week
+    ahead); interest on debt; treated chronic conditions; and, for the household's richest adult, the children's
+    costs."""
     from . import career, dice, housing, people
 
     life = p.life

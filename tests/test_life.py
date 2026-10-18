@@ -198,6 +198,88 @@ def folk_person(sim, i: int = 7, age: int = 30) -> Person:
     return p
 
 
+FRACTURE_JS = """
+const sim = new G.sim.Simulation(1);
+const a = sim.agents.get("dana"), DAY = 1440;
+const out = {};
+for (const [k, asleep] of [[0, true], [1, false]]) {
+  sim.life.agenda.clear();
+  a.life.conditions = []; a.life.ward_until = 0;
+  sim.clock.tick = (2 + 3 * k) * DAY + 3 * 60;
+  a.activity = asleep ? "sleep" : "idle"; a.state = asleep ? "busy" : "idle";
+  a.busy_until = (2 + 3 * k) * DAY + 6 * 60 + 30;
+  G.life._fall_ill(sim, a, G.life.ACUTE.find(r => r[0] === "fracture"), G.dice.stream(1, 5, k));
+  out[k] = { now: a.life.conditions.map(c => [c.id, c.since, c.until, c.off_until]),
+             agenda: [...sim.life.agenda.entries()].map(([t, rows]) => [t, rows.map(r => r[0])]) };
+  for (const [t, rows] of [...sim.life.agenda.entries()].sort((x, y) => x[0] - y[0])) {
+    if (!rows.some(r => r[0] === "accident")) continue;
+    sim.clock.tick = t;
+    a.activity = "idle"; a.state = "idle";
+    for (const [kind, pid, arg] of rows) if (kind === "accident") G.life._run_agenda(sim, kind, pid, arg);
+  }
+  out[k].after = a.life.conditions.map(c => [c.id, c.since, c.until, c.off_until]);
+  out[k].ward = a.life.ward_until;
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def fracture_py() -> dict:
+    sim = life_sim()
+    a = sim.agents["dana"]
+    DAY = life.DAY
+    out = {}
+    for k, asleep in ((0, True), (1, False)):
+        sim.life.agenda.clear()
+        a.life.conditions, a.life.ward_until = [], 0
+        sim.clock.tick = (2 + 3 * k) * DAY + 3 * 60
+        a.activity, a.state = ("sleep", "busy") if asleep else ("idle", "idle")
+        a.busy_until = (2 + 3 * k) * DAY + 6 * 60 + 30
+        life._fall_ill(sim, a, next(r for r in life.ACUTE if r[0] == "fracture"), dice.stream(1, 5, k))
+        row = {"now": [[c.id, c.since, c.until, c.off_until] for c in a.life.conditions],
+               "agenda": [[t, [r[0] for r in rows]] for t, rows in sim.life.agenda.items()]}
+        for t in sorted(sim.life.agenda):
+            rows = sim.life.agenda[t]
+            if not any(r[0] == "accident" for r in rows):
+                continue
+            sim.clock.tick = t
+            a.activity, a.state = "idle", "idle"
+            for kind, pid, arg in rows:
+                if kind == "accident":
+                    life._run_agenda(sim, kind, pid, arg)
+        row["after"] = [[c.id, c.since, c.until, c.off_until] for c in a.life.conditions]
+        row["ward"] = a.life.ward_until
+        out[str(k)] = row
+    return out
+
+
+class FractureTimingTest(unittest.TestCase):
+    """A fracture rolled while asleep (the slot minute is any hour) happens ACCIDENT_AWAKE minutes after waking."""
+
+    def test_in_bed_it_waits_for_waking(self):
+        got = fracture_py()
+        asleep, awake = got["0"], got["1"]
+        wake = 2 * life.DAY + 6 * 60 + 30
+        self.assertEqual(asleep["now"], [])
+        self.assertEqual(asleep["agenda"], [[wake + life.ACCIDENT_AWAKE, ["accident"]]])
+        self.assertEqual([c[:2] for c in asleep["after"]], [["fracture", wake + life.ACCIDENT_AWAKE]])
+        self.assertGreater(asleep["ward"], wake)
+        self.assertEqual([c[:2] for c in awake["now"]], [["fracture", 5 * life.DAY + 3 * 60]])
+        if NODE:
+            self.assertEqual(node_eval(FRACTURE_JS), got)
+
+    def test_a_sleeping_townsperson_waits_too(self):
+        sim = Simulation(1, world="region", folk=200)
+        while sim.clock.minute_of_day != 3 * 60:
+            sim.step()
+        p = next(q for q in sim.folk.living() if q.age >= 18 and q.activity == "sleep" and q.trip is None)
+        wake = sim.folk.stay[p.i][1]
+        self.assertGreater(wake, sim.clock.tick)
+        life._fall_ill(sim, p, next(r for r in life.ACUTE if r[0] == "fracture"), dice.stream(1, 5))
+        self.assertEqual(p.life.conditions, [])
+        self.assertIn(("accident", p.id), [(r[0], r[1]) for r in sim.life.agenda.get(wake + life.ACCIDENT_AWAKE, [])])
+
+
 class HealthTest(unittest.TestCase):
     def onset_odds(self, season: str, age: int = 30) -> float:
         sim = life_sim()

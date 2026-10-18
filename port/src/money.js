@@ -12,19 +12,22 @@
   const DEBT_RATE = 0.004; // a week, on -(cash + savings)
   const CHRONIC_COST = 15.0; // a week, each treated chronic condition
   const CHILD_COST = [[3, 70.0], [5, 60.0], [18, 30.0]]; // (under this age, a week): baby, 3-4, 5-17
-  // Shocks (WEEK_MONEY): [id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | null, text]. "owner": only in a
-  // home the household owns, since the landlord replaces a let home's appliances as it does its repairs (housing).
-  const BAD = [["car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs"],
-    ["appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}"],
-    ["dentist", 0.015, 100, 800, null, "has a ${a} dentist's bill"],
-    ["phone", 0.01, 150, 400, null, "replaces a broken phone for ${a}"],
-    ["fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine"],
-    ["burglary", 0.003, 300, 1500, null, "is burgled and loses ${a}"]];
-  const GOOD = [["bonus", 0.012, 200, 800, "job", "gets a ${a} bonus at work"],
-    ["scratch_card", 0.003, 100, 3000, null, "wins ${a} on a scratch card"],
-    ["tax_refund", 0.01, 150, 600, null, "gets a ${a} tax refund"],
-    ["sold", 0.01, 50, 300, null, "sells something online for ${a}"],
-    ["gift", 0.005, 100, 500, null, "gets a ${a} gift from family"]];
+  // Shocks (WEEK_MONEY): [id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | null, text, when]. "owner": only
+  // in a home the household owns, since the landlord replaces a let home's appliances as it does its repairs
+  // (housing). Rolled in the Sunday slot, the shock comes in the week ahead (life's agenda, `apply_shock`): "day" on a
+  // weekday in DAY_HOURS, "any" on any day in ANY_HOURS.
+  const BAD = [["car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs", "day"],
+    ["appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}", "day"],
+    ["dentist", 0.015, 100, 800, null, "has a ${a} dentist's bill", "day"],
+    ["phone", 0.01, 150, 400, null, "replaces a broken phone for ${a}", "any"],
+    ["fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine", "any"],
+    ["burglary", 0.003, 300, 1500, null, "is burgled and loses ${a}", "any"]];
+  const GOOD = [["bonus", 0.012, 200, 800, "job", "gets a ${a} bonus at work", "day"],
+    ["scratch_card", 0.0005, 100, 3000, null, "wins ${a} on a scratch card", "any"],
+    ["tax_refund", 0.01, 150, 600, null, "gets a ${a} tax refund", "day"],
+    ["sold", 0.01, 50, 300, null, "sells something online for ${a}", "any"],
+    ["gift", 0.005, 100, 500, null, "gets a ${a} gift from family", "any"]];
+  const DAY_HOURS = [9 * 60, 18 * 60], ANY_HOURS = [9 * 60, 21 * 60]; // [from, until) minutes a shock comes in
 
   // `p`'s take-home pay for a full week of shifts, else the pension at 65+ with no job, else nothing.
   function _income(sim, p) {
@@ -50,7 +53,8 @@
     return home !== undefined && home !== null && home.owner === hh.id;
   }
 
-  // One roll on the sum of the eligible shocks' odds, then a plain draw by weight; returns the amount.
+  // One roll on the sum of the eligible shocks' odds, then a plain draw by weight, the amount and when in the week
+  // ahead it comes: onto life's agenda (`apply_shock`). Returns the amount.
   function _shock(sim, p, rr, table, valence, what) {
     const rows = [];
     let total = 0.0;
@@ -71,11 +75,20 @@
     }
     const row = rows[i];
     const amount = rr.int(row[2], row[3]);
+    const hours = row[6] === "day" ? DAY_HOURS : ANY_HOURS;
+    const ahead = rr.int(1, row[6] === "day" ? 5 : 7); // days after this Sunday
+    const minute = rr.int(hours[0], hours[1] - 1);
+    G.life._agenda(sim, (sim.clock.day + ahead) * G.life.DAY + minute, "shock", p.id, [row[0], amount, valence]);
+    return amount;
+  }
+
+  // A money shock rolled last Sunday comes in (life's agenda): the money and the line.
+  function apply_shock(sim, p, sid, amount, valence) {
+    const row = BAD.concat(GOOD).find(r => r[0] === sid);
     p.money += amount * valence;
     const tag = valence > 0 ? "windfall" : "expense";
     const text = row[5].replace("${a}", `$${G.py.commas(amount)}`);
     G.life._event(sim, p, `${p.name} ${text}.`, tag, _importance(sim, p, amount));
-    return amount;
   }
 
   // The household's charges on Sunday night: the housing charge (housing.weekly_cost) and the adults' bills and cars.
@@ -150,6 +163,7 @@
 
   G.money = {
     SUNDAY, WINDOW, LIFESTYLE_BASE, LIFESTYLE_THRIFT, LIFESTYLE_ADVENTURE, LIFESTYLE_UP, LIFESTYLE_DOWN, WEALTH_SPEND,
-    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _owns_home, _shock, _fixed, weekly,
+    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, DAY_HOURS, ANY_HOURS, _income, _importance, _owns_home, _shock,
+    apply_shock, _fixed, weekly,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -39,6 +39,7 @@ CHRONIC = ("hypertension", "diabetes", "arthritis", "heart_disease")
 LABELS = {c[0]: c[10] for c in ACUTE} | {h[0]: h[2] for h in HEART} | {"sprain": "a sprain"} \
     | {c: c.replace("_", " ") for c in CHRONIC}
 SPRAIN = ((7, 14), (0, 3))  # a v2 outcome costing 8+ health: days, days off
+ACCIDENT_AWAKE = 30  # a fracture rolled while asleep happens this many minutes after they wake
 DOCTOR_FEE = 40.0
 DOCTOR_DAYS = 0.7  # a doctor shortens an illness by 30% ...
 DOCTOR_COMPLICATIONS = 0.5  # ... and halves its complications
@@ -353,6 +354,12 @@ def _run_agenda(sim, kind: str, pid: str, arg) -> None:
         _discharge(sim, p, arg)
     elif kind == "hospital":
         hospitalise(sim, p, arg[0], arg[1])
+    elif kind == "shock":
+        money.apply_shock(sim, p, arg[0], arg[1], arg[2])
+    elif kind == "career":
+        career.due(sim, p, arg)
+    elif kind == "accident":
+        _accident(sim, p, arg)
     elif kind == "bill":
         amount = int(max(0.0, p.money + p.savings) + 300)
         p.money -= amount
@@ -445,6 +452,7 @@ def _health(sim, p, rr, day: int) -> None:
     if life.conditions:
         p.health = min(p.health, ILL_CAP)
     # Onset: one roll on the sum of the acute rates, then a plain draw by weight (life.md 5.5).
+    struck = False  # a fracture deferred to waking (`_fall_ill`) leaves no condition yet: no catching it too
     if not life.conditions and life.ward_until == 0:
         season = SEASON_INDEX[sim.clock.season]
         weights = []
@@ -459,6 +467,7 @@ def _health(sim, p, rr, day: int) -> None:
             weights.append(heart * share)
             total += heart * share
         if _hit(sim, p, "ill", total * PACE["health"] / YEAR_DAYS, -1, rr):
+            struck = True
             x = rr.random() * total
             i = 0
             while i < len(weights) - 1 and x >= weights[i]:
@@ -469,7 +478,7 @@ def _health(sim, p, rr, day: int) -> None:
             else:
                 _heart(sim, p, HEART[i - len(ACUTE)], rr)
     # Catching it at home (life.md 5.5: home .08/.15/.10 a day while a housemate is contagious).
-    if not life.conditions and life.ward_until == 0:
+    if not struck and not life.conditions and life.ward_until == 0:
         for m in _members(sim, p):
             if m is p or m.life is None:
                 continue
@@ -519,8 +528,9 @@ def _cause(p, heart_ward: bool) -> str:
 
 
 def _fall_ill(sim, p, row, rr) -> None:
-    cid, days, off, hit, contagious = row[0], row[5], row[6], row[7], row[8]
-    t = sim.clock.tick
+    """An illness or an injury from its row: the days, the days off and a doctor drawn now; a fracture rolled while
+    `p` sleeps happens ACCIDENT_AWAKE minutes after they wake (life's agenda, `_accident`)."""
+    cid, days, off = row[0], row[5], row[6]
     d = rr.int(days[0], days[1])
     if cid == "back_pain" and p.job is not None and _manual(sim, p):
         off = BACK_PAIN_MANUAL
@@ -529,6 +539,37 @@ def _fall_ill(sim, p, row, rr) -> None:
     if doctor:
         d = max(1, int(d * DOCTOR_DAYS + 0.5))
         o = min(o, d)
+    if cid == "fracture":
+        wake = _asleep_until(sim, p)
+        if wake is not None:
+            _agenda(sim, wake + ACCIDENT_AWAKE, "accident", p.id, (cid, d, o, doctor))
+            return
+    _strike(sim, p, row, d, o, doctor)
+
+
+def _asleep_until(sim, p) -> int | None:
+    """The tick `p` wakes when asleep now (a named's sleep ends at busy_until, a townsperson's stay at home), else
+    None."""
+    t = sim.clock.tick
+    if _named(sim, p):
+        return max(t, p.busy_until) if p.activity == "sleep" and p.state == "busy" else None
+    if p.activity != "sleep" or p.trip is not None:
+        return None
+    stay = sim.folk.stay.get(p.i)
+    return max(t, stay[1]) if stay is not None else sim.folk._wake_tick(p, t)
+
+
+def _accident(sim, p, arg) -> None:
+    """A fracture rolled while `p` slept happens now they are up (skipped if they are in hospital by then)."""
+    cid, d, o, doctor = arg
+    if p.life.ward_until > sim.clock.tick:
+        return
+    _strike(sim, p, next(r for r in ACUTE if r[0] == cid), d, o, doctor)
+
+
+def _strike(sim, p, row, d: int, o: int, doctor: bool) -> None:
+    cid, hit, contagious = row[0], row[7], row[8]
+    t = sim.clock.tick
     c = Condition(cid, t, t + d * DAY, t + o * DAY, t + contagious * DAY, hit, doctor)
     p.life.conditions.append(c)
     p.health = max(1.0, p.health - hit)

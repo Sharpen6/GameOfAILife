@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from collections import Counter
 from unittest import mock
 
 from gameofailife import career, dice, life, money, people
@@ -164,16 +165,41 @@ ids.forEach((id, i) => {
 });
 const adults = [...sim.agents.values()].filter(a => a.is_adult).sort((a, b) => (a.id < b.id ? -1 : 1));
 sim.drain();
+const shocks = (until) => {  // the money shocks due by `until`, in tick order (life's agenda; nothing else runs)
+  for (const t of [...sim.life.agenda.keys()].filter(t => t <= until).sort((a, b) => a - b)) {
+    const rows = sim.life.agenda.get(t), keep = rows.filter(r => r[0] !== "shock");
+    sim.clock.tick = t;
+    for (const [kind, pid, arg] of rows) if (kind === "shock") G.life._run_agenda(sim, kind, pid, arg);
+    if (keep.length) sim.life.agenda.set(t, keep); else sim.life.agenda.delete(t);
+  }
+};
 for (let week = 0; week < 12; week++) {
+  shocks((7 * week + 6) * 1440 + 600);
   sim.clock.tick = (7 * week + 6) * 1440 + 600;
   for (const a of adults) G.money.weekly(sim, a);
 }
+shocks(100 * 1440);
 const [events] = sim.drain();
 console.log(JSON.stringify({
   people: adults.map(a => [a.id, a.money, a.savings, a.life.lifestyle]),
   events: events.map(e => [e.tick, e.agent, e.tag, e.importance, e.text]),
 }));
 """
+
+
+def due_shocks(sim, until: int) -> None:
+    """The money shocks on life's agenda due by `until`, in tick order, at their ticks (nothing else runs)."""
+    for t in sorted(k for k in sim.life.agenda if k <= until):
+        rows = sim.life.agenda[t]
+        keep = [r for r in rows if r[0] != "shock"]
+        sim.clock.tick = t
+        for kind, pid, arg in rows:
+            if kind == "shock":
+                life._run_agenda(sim, kind, pid, arg)
+        if keep:
+            sim.life.agenda[t] = keep
+        else:
+            del sim.life.agenda[t]
 
 
 def twin_py() -> dict:
@@ -187,12 +213,39 @@ def twin_py() -> dict:
     adults = sorted((a for a in sim.agents.values() if a.is_adult), key=lambda a: a.id)
     sim.drain()
     for week in range(12):
+        due_shocks(sim, (7 * week + 6) * 1440 + 600)
         sim.clock.tick = (7 * week + 6) * 1440 + 600
         for a in adults:
             money.weekly(sim, a)
+    due_shocks(sim, 100 * 1440)
     events, _, _ = sim.drain()
     return {"people": [[a.id, a.money, a.savings, a.life.lifestyle] for a in adults],
             "events": [[e["tick"], e["agent"], e["tag"], e["importance"], e["text"]] for e in events]}, sim
+
+
+class ShockTimingTest(unittest.TestCase):
+    """A shock rolled in the Sunday slot comes in the week ahead: a garage, a dentist, an employer or the tax office
+    on a weekday in DAY_HOURS, the rest any day in ANY_HOURS (they all came on Sundays)."""
+
+    def test_shocks_come_in_their_hours(self):
+        import re
+        py, _ = twin_py()
+        rows = [(re.compile(re.escape(r[5]).replace(re.escape("${a}"), r"\$[\d,]+")), r[6]) for r in money.BAD + money.GOOD]
+        seen = {"day": 0, "any": 0}
+        for tick, _agent, tag, _imp, text in py["events"]:
+            if tag not in ("expense", "windfall") or "cannot pay" in text:
+                continue
+            when = next(w for rx, w in rows if rx.search(text))
+            seen[when] += 1
+            day, m = divmod(tick, 1440)
+            hours = money.DAY_HOURS if when == "day" else money.ANY_HOURS
+            self.assertTrue(hours[0] <= m < hours[1], (tick, text))
+            if when == "day":
+                self.assertLess(day % 7, 5, (tick, text))
+        self.assertGreater(seen["day"], 5)
+        self.assertGreater(seen["any"], 5)
+        weekdays = Counter(t // 1440 % 7 for t, _a, tag, _i, _x in py["events"] if tag in ("expense", "windfall"))
+        self.assertLess(weekdays[money.SUNDAY], sum(weekdays.values()) / 4, weekdays)
 
 
 @unittest.skipUnless(NODE, "node is not installed")
