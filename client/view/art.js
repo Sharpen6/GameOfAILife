@@ -74,6 +74,8 @@
     const n = pts.length;
     for (let i = 0; i < n; i++) { const x = pts[i][0]; if (x < minX) minX = x; if (x > maxX) maxX = x; }
     const x0 = Math.round(minX), x1 = Math.round(maxX);
+    // neighbouring columns with the same span go out as one rect (same pixels, far fewer calls)
+    let runX = 0, runA = 0, runB = 0;
     for (let x = x0; x < x1; x++) {
       const cx = x + 0.5;
       let lo = Infinity, hi = -Infinity;
@@ -84,9 +86,14 @@
         if (y < lo) lo = y;
         if (y > hi) hi = y;
       }
-      const ya = Math.round(lo), yb = Math.round(hi);
-      if (yb > ya) g.fillRect(x, ya, 1, yb - ya);
+      let ya = Math.round(lo), yb = Math.round(hi);
+      if (!(yb > ya)) { ya = 0; yb = 0; }
+      if (ya !== runA || yb !== runB) {
+        if (runB > runA) g.fillRect(runX, runA, x - runX, runB - runA);
+        runX = x; runA = ya; runB = yb;
+      }
     }
+    if (runB > runA) g.fillRect(runX, runA, x1 - runX, runB - runA);
   }
   CV.poly = poly;
   const px = (g, x, y, w, h, c) => { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), w, h); };

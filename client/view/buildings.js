@@ -24,10 +24,10 @@
     big_house: { floorPx: 24, roof: "hip", roofPx: 30 },
     apartments: { floorPx: 22, roof: "flat", wall: ["#a8573f", "#9a6347", "#b06a4a"], roofC: "#6d6f78" },
     tower: { floorPx: 20, roof: "flat", wall: "#46597a", roofC: "#4a5466" },
-    hospital: { floorPx: 22, roof: "flat", wall: "#eef1f5", roofC: "#a9b0bd" },
+    hospital: { boxMargin: 9, floorPx: 22, roof: "flat", wall: "#eef1f5", roofC: "#a9b0bd" },
     school: { floorPx: 26, roof: "hip", roofPx: 20, wall: "#b8643e", roofC: "#56607a" },
-    city_hall: { floorPx: 24, roof: "flat", wall: "#e8e1cf", roofC: "#8d8f99" },
-    bank: { floorPx: 22, roof: "flat", wall: "#ddd6c4", roofC: "#7d808a" },
+    city_hall: { boxMargin: 9, floorPx: 24, roof: "flat", wall: "#e8e1cf", roofC: "#8d8f99" },
+    bank: { boxMargin: 9, floorPx: 22, roof: "flat", wall: "#ddd6c4", roofC: "#7d808a" },
     // fascia: a band above the awning that carries the shop's name board (px)
     cafe: { floorPx: 24, roof: "flat", wall: "#f3e3d4", roofC: "#8a6a9a", awning: ["#8a4fa0", "#f6eef8"], sign: "CAFE", signBg: "#4a2058", fascia: 22 },
     diner: { floorPx: 26, roof: "flat", wall: "#dfe6ea", roofC: "#c23b3b", awning: ["#c23b3b", "#ffffff"], signBg: "#1e2230" },
@@ -36,7 +36,7 @@
     corner_shop: { floorPx: 24, roof: "flat", wall: "#c98a5a", roofC: "#6d6f78", awning: ["#2f7fb8", "#ffffff"], sign: "GROCER", signBg: "#14304e", fascia: 22 },
     noodle_bar: { floorPx: 24, roof: "flat", wall: "#ecdcbc", roofC: "#7a2e2e", awning: ["#c0392b", "#f1c40f"], sign: "NOODLES", signBg: "#5a1010", fascia: 22 },
     arcade: { floorPx: 24, roof: "glass", wall: "#ddcfb2", roofC: "#8d8f99", sign: "ARCADE", signBg: "#24304a", fascia: 22 },
-    factory: { floorPx: 30, roof: "saw", wall: "#98a2a8", roofC: "#7a8086" },
+    factory: { boxMargin: 9, floorPx: 30, roof: "saw", wall: "#98a2a8", roofC: "#7a8086" },
     // v3 (view.md 3.8): the region's styles. extra: headroom above the roof top in px; awnings and signBgs go by variant.
     shop: { floorPx: 24, roof: "flat", wall: ["#efe2cc", "#dccbb0", "#c98a5a", "#e6e0d2", "#bccad4", "#d4ae94", "#e8e4d6", "#c8b89c"], roofC: "#6d6f78", fascia: 22,
       awnings: [["#2f7fb8", "#ffffff"], ["#c0392b", "#ffffff"], ["#2f8c5a", "#ffffff"], ["#d18f2f", "#fff4dd"], ["#8a4fa0", "#f6eef8"], ["#e2603a", "#fff0e0"], ["#3a5a8a", "#e8eef8"], ["#4a4a52", "#f2f2f2"]],
@@ -131,14 +131,28 @@
   }
   CV._heights = heights;
   // The sprite's canvas rect in world px for a place drawn in place, through one projection.
+  // A place with a variant (anything outside Millbrook) gets a box round its body rather than its lot: the
+  // body plus BODY_MARGIN tiles (awnings, porches, eaves) and the roof, so the sprite is mostly opaque.
+  const BODY_MARGIN = 0.3;
   function boxOf(proj, p) {
-    const hh = heights(p);
-    const fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
-    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
-    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) for (const z of [0, hh.topZ]) {
-      const q = proj.toWorld(a, b, z);
-      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+    if (CV.variantOf(p) != null && !(p.x === 0 && p.y === 0 && String(p.id).indexOf("#") > 0)) {
+      // the canonical copy's box, moved by whole pixels (as art.building moves its sprite)
+      const b = boxOf(proj, CV.canonPlace(p)), o = proj.toWorld(p.x, p.y), z = proj.toWorld(0, 0);
+      b.ox += o[0] - z[0]; b.oy += o[1] - z[1];
+      return b;
     }
+    const hh = heights(p);
+    let fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
+    {
+      const bd = CV.bodyOf(p), m = hh.st.boxMargin != null ? hh.st.boxMargin : BODY_MARGIN;
+      fx0 = Math.max(fx0, bd.x0 - m); fy0 = Math.max(fy0, bd.y0 - m); fx1 = Math.min(fx1, bd.x1 + m); fy1 = Math.min(fy1, bd.y1 + m);
+    }
+    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+    const add = (a, b, z) => { const q = proj.toWorld(a, b, z); if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1]; };
+    // a pitched roof of a keyed place rises only along its ridge: the corners need the eaves, the mid-lines the top
+    const ridge = (hh.st.roof === "gable" || hh.st.roof === "hip");
+    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { add(a, b, 0); add(a, b, ridge ? hh.Hw + 10 : hh.topZ); }
+    if (ridge) { const cx = (fx0 + fx1) / 2, cy = (fy0 + fy1) / 2; for (const [a, b] of [[fx0, cy], [fx1, cy], [cx, fy0], [cx, fy1]]) add(a, b, hh.topZ); }
     bx0 -= 6; bx1 += 6; by0 -= 6; by1 += 4;
     const ox = Math.floor(bx0), oy = Math.floor(by0);
     return { ox, oy, w: Math.max(1, Math.ceil(Math.ceil(bx1) - ox)), h: Math.max(1, Math.ceil(Math.ceil(by1) - oy)), height: hh.height, labelZ: hh.labelZ };
@@ -547,19 +561,28 @@
           const big = stage === 4 ? 1.25 : 1;
           for (let j = 0; j < lumps; j++) {
             const K = 5, cr = Array.from({ length: K }, () => 0.45 + Rn() * 0.8), rot = Rn() * 6.28;
-            L.push({ ds: (Rn() - 0.5) * 0.3 * big / ln, dt: (Rn() - 0.5) * 0.8 / rows, ra: (0.09 + Rn() * 0.08) * big / ln, rb: (0.32 + Rn() * 0.3) * big / rows, cr, rot, K });
+            L.push({ ds: (Rn() - 0.5) * 0.3 * big / ln, dt: (Rn() - 0.5) * 0.8 / rows, ra: (0.09 + Rn() * 0.08) * big / ln, rb: (0.32 + Rn() * 0.3) * big / rows, cr, rot, K,
+              lo2: (Math.min(...cr) * (1 - 1e-9)) ** 2, hi2: (Math.max(...cr) * (1 + 1e-9)) ** 2 });
           }
           const inside = (s, t) => L.some(l => {
-            const a = (s - sc - l.ds) / l.ra, b = (t - tc - l.dt) / l.rb, th = Math.atan2(b, a) + l.rot;
+            const a = (s - sc - l.ds) / l.ra, b = (t - tc - l.dt) / l.rb, r2 = a * a + b * b;
+            if (r2 >= l.hi2) return false; // outside every radius of this lump (Math.hypot is slow)
+            if (r2 < l.lo2) return true;
+            const th = Math.atan2(b, a) + l.rot;
             const q = ((th / 6.2832) % 1 + 1) % 1 * l.K, k0 = Math.floor(q), fr = q - k0;
             return Math.hypot(a, b) < l.cr[k0 % l.K] * (1 - fr) + l.cr[(k0 + 1) % l.K] * fr;
           });
-          const dS = 0.35 / Math.min(eavePx, rowPx), dT = 0.35 / upPx, sR = 0.3 * big / ln, tR = 1.8 * big / rows;
+          // v2 sampled every 0.35 px; a keyed (region) place samples every 0.5 px, still at least once a pixel
+          const step = ctx.variant == null ? 0.35 : 0.5;
+          const dS = step / Math.min(eavePx, rowPx), dT = step / upPx, sR = 0.3 * big / ln, tR = 1.8 * big / rows;
           for (let s = sc - sR; s <= sc + sR; s += dS) for (let t = tc - tR; t <= tc + tR; t += dT) {
-            if (s < 0.03 || s > 0.97 || t < 0.06 || t > 0.94 || !inside(s, t)) continue;
+            if (s < 0.03 || s > 0.97 || t < 0.06 || t > 0.94) continue;
             const p = slopeAt(f, s, t), key = Math.round(p[1] - 0.5) * 8192 + Math.round(p[0] - 0.5);
             const along = s * ln, raf = !snow && Math.abs(along / 0.36 - Math.round(along / 0.36)) * 0.36 * rowPx / ln < 0.5;
-            if (!hole.has(key) || raf) hole.set(key, raf ? 2 : 1);
+            const was = hole.get(key);
+            if (was === 2 || (was === 1 && !raf)) continue; // nothing to change here, whatever inside() says
+            if (!inside(s, t)) continue;
+            hole.set(key, raf ? 2 : 1);
           }
         }
         // 1-2 px notches: bite a few edge pixels away and chip a few more out of the shingles around
@@ -1492,7 +1515,7 @@
       for (const f of FACES) {
         const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, col = litF ? ctx.wall : shade(ctx.wall, 0.8);
         poly(g, quad(F, 0, F.len, 0, H), col);
-        for (let u = 0.2; u < F.len - 0.3; u += 0.5) { poly(g, quad(F, u, u + 0.3, 0, 14), shade(col, 0.55)); poly(g, quad(F, u, u + 0.3, 20, H - 6), shade(col, 0.72)); }
+        for (let u = 0.2; u < F.len - 0.3; u += 0.5) { poly(g, quad(F, u, u + 0.3, 0, 14), shade(col, 0.55)); const q = quad(F, u, u + 0.3, 20, H - 6); poly(g, q, shade(col, 0.72)); ctx.windows.push(q); }
         poly(g, quad(F, 0, F.len, H - 3, H), shade(col, 1.12));
       }
       const tiers = 4, d = Math.min(x1 - x0, y1 - y0) * 0.09;
@@ -1529,7 +1552,21 @@
 
     // --- the building sprite ---------------------------------------------------------------------------
     // look: { stage 0..4, units: [{unit, vacant, listing}], works, ... } (homes only).
+    // A place with a variant is drawn as its canonical copy (CV.canonPlace: id style#variant at 0,0) and moved
+    // into place by whole pixels, so every copy of a sprite key is the same pixels wherever it stands.
+    // Millbrook's places (no variant) draw in place, as v2 did.
     art.building = function (p, look, season) {
+      if (CV.variantOf(p) == null || (p.x === 0 && p.y === 0 && String(p.id).indexOf("#") > 0)) return drawBuilding(p, look, season);
+      const b = drawBuilding(CV.canonPlace(p), look, season);
+      const o = proj.toWorld(p.x, p.y), z = proj.toWorld(0, 0), dx = o[0] - z[0], dy = o[1] - z[1];
+      const mv = q => q && [q[0] + dx, q[1] + dy].concat(q.slice(2));
+      b.ox += dx; b.oy += dy; b.id = p.id;
+      b.windows = b.windows.map(quad => quad.map(mv));
+      b.lights = b.lights.map(mv);
+      b.porch = mv(b.porch); b.neon = mv(b.neon); b.smoke = mv(b.smoke); b.beacon = mv(b.beacon);
+      return b;
+    };
+    function drawBuilding(p, look, season) {
       look = look || {};
       const st = STYLE[p.style] || STYLE.house;
       const isHome = p.kind === "home";
@@ -1580,7 +1617,7 @@
       const litShare = isHome ? 70 : p.style === "tower" ? 45 : 60;
       return { c: S.c, ox: S.ox, oy: S.oy, windows: ctx.windows, lights: ctx.lights, height: box.height, id: p.id, litShare,
         porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: null };
-    };
+    }
 
     // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty; in
     // winter pale ice, and the derelict one an empty basin with dirty snow in the bottom.

@@ -104,8 +104,11 @@ function pageRun(arg) {
         let b;
         const t0 = performance.now();
         try { b = art.building(q, look, season); } catch (e) { out.errors.push(`${p.style} ${p.id}: ${e && e.stack || e}`); continue; }
-        const g = b.c.getContext("2d"), W = b.c.width, H = b.c.height, d = g.getImageData(0, 0, W, H).data;
+        // the sprite's cost is drawing it plus rasterising it (a one-pixel read forces that); the full read
+        // below is the test's own and is not timed
+        const g = b.c.getContext("2d"); g.getImageData(0, 0, 1, 1);
         const ms = performance.now() - t0;
+        const W = b.c.width, H = b.c.height, d = g.getImageData(0, 0, W, H).data;
         if (kind === "iso") st.ms.push(ms);
         st.n++;
         let opaque = 0, minX = W, minY = H, maxX = -1, maxY = -1;
