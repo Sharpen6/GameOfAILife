@@ -26,7 +26,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import transit
+from . import people, transit
 from .clock import TICKS_PER_REAL_SECOND
 from .sim import Simulation
 from .ws import ConnectionClosed, MessageTooBig, WebSocket, server_handshake
@@ -334,6 +334,7 @@ class GameServer:
         """A new God view's (or watcher's) start: the town once, the full state, and the recent past."""
         sim = self.sim
         state = sim.state_json(housing=True)
+        state["occ"] = sim.folk.occ()  # who is in each place, folk and named (PLAN 2.11; frames send it now and then)
         return {"type": "welcome", "role": "god", "town": sim.town_json(), "state": state,
                 "history": sim.history[-WELCOME_HISTORY:], "news": sim.news[-WELCOME_NEWS:],
                 "headlines": sim.headlines[-WELCOME_HEADLINES:], "llm_log": sim.llm_log[-WELCOME_LLM_LOG:],
@@ -631,7 +632,7 @@ class GameServer:
                 raise TypeError("luck must be a number")
             ok = self.sim.set_luck(str(msg.get("agent_id")), float(luck))
             return {"type": "luck_set", "ok": ok, "agent_id": msg.get("agent_id"),
-                    "luck": self.sim.agents[msg["agent_id"]].luck if ok else None}
+                    "luck": self.sim.luck_of(str(msg["agent_id"])) if ok else None}
         if t == "set_speed":
             speed = int(msg.get("speed", 1))
             self.speed = speed if speed in SPEEDS else 1
@@ -683,14 +684,14 @@ class GameServer:
             answers = {
                 "possessions": lambda: sim.possessions(agent),
                 "attributes": agent.attributes,
-                "relationships": lambda: {oid: {**r.to_json(), "name": sim.agents[oid].name}
-                                          for oid, r in agent.relationships.items()},
+                "relationships": lambda: {oid: people.rel_row(sim, oid, r) for oid, r in agent.relationships.items()},
                 "memory": lambda: agent.memory[-30:],
                 "inbox": lambda: agent.inbox[-20:],
                 "world": lambda: {"time": sim.clock.stamp(), "season": sim.clock.season, "weather": sim.weather,
                                   "places": {p.id: {"name": p.name, "kind": p.kind, "district": p.district,
                                                     "open": p.is_open(sim.clock.hour)}
-                                             for p in sim.town.places.values()},
+                                             for p in sim.town.places.values()
+                                             if sim.town.millbrook_ids is None or p.id in sim.town.millbrook_ids},
                                   "timetable": transit.timetable_json()},
                 "people": lambda: {a.id: a.name for a in sim.living()},
                 "market": lambda: sim.market_json(),
@@ -707,16 +708,35 @@ class GameServer:
         return {"type": "error", "error": f"unknown message type {t!r}"}
 
 
+def _listen_failed(exc: OSError, host: str, port: int) -> SystemExit:
+    """The one-line startup error for a port that is taken or an address that is not this machine's."""
+    if exc.errno == errno.EADDRINUSE:
+        return SystemExit(f"Port {port} is already in use on {host} (is GameOfAILife already running?). "
+                          "Try --port 0 for any free port, or another --port.")
+    why = os.strerror(exc.errno) if exc.errno and exc.errno > 0 else exc.strerror or str(exc)  # gaierror: < 0
+    return SystemExit(f"Could not listen on {host}:{port}: {why}. Check --host and --port.")
+
+
+def check_listen(host: str, port: int) -> None:
+    """Fail fast, before the region and its townsfolk are built (a few seconds), when the server could not listen
+    on host:port; `serve` checks again when it really starts."""
+    try:
+        infos = socket.getaddrinfo(host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)
+        family, kind, proto, _, address = infos[0]
+        with socket.socket(family, kind, proto) as probe:
+            if os.name == "posix":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # as asyncio.start_server does
+            probe.bind(address)
+    except OSError as exc:
+        raise _listen_failed(exc, host, port) from None
+
+
 async def serve(sim: Simulation, host: str, port: int, speed: int = 1) -> None:
     server = GameServer(sim, speed)
     try:
         actual = await server.start(host, port)
     except OSError as exc:  # only here, at startup: the port is taken, or --host is not an address of this machine
-        if exc.errno == errno.EADDRINUSE:
-            raise SystemExit(f"Port {port} is already in use on {host} (is GameOfAILife already running?). "
-                             "Try --port 0 for any free port, or another --port.") from None
-        why = os.strerror(exc.errno) if exc.errno and exc.errno > 0 else exc.strerror or str(exc)  # gaierror: < 0
-        raise SystemExit(f"Could not listen on {host}:{port}: {why}. Check --host and --port.") from None
+        raise _listen_failed(exc, host, port) from None
     shown = url_host(host, server._server.sockets[0].getsockname()[0])
     print(f"GameOfAILife is running. Open http://{shown}:{actual} to watch as God.")
     print(f"Controllers connect to ws://{shown}:{actual}/ws")

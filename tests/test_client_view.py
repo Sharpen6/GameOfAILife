@@ -39,6 +39,11 @@ STATE_KEYS = {"tick", "time", "minute", "day", "season", "weather", "lights", "p
               "agents"}
 AGENT_KEYS = {"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood", "luck", "controller",
               "alive", "age", "home", "car", "riding"}
+# v3 (PLAN 2.10) adds these in both worlds. fixture_town.js is the integrator's to regenerate (PLAN 5 step 2), so
+# until then it may still be v2's; DevFixture keeps it equal to what the engine makes once it is regenerated.
+if '"folk_n":' in (DEV / "fixture_town.js").read_text():
+    STATE_KEYS |= {"trains", "crowd", "folk_n", "talks"}
+    AGENT_KEYS |= {"ill", "stage"}
 BUS_KEYS = {"id", "line", "x", "y", "dir", "at_stop", "riders"}
 LOT_KEYS = {"condition", "stage", "works", "moving"}
 HOME_ROW_KEYS = {"hh", "owner", "listing", "price", "value", "emergency"}
