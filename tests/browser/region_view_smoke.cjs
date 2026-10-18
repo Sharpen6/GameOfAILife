@@ -2,7 +2,7 @@
 // Headless smoke test for the region view (V1a, view.md 3): the 256 x 192 region of client/dev/region_data.js
 // on client/dev/region.html (manual=1: the test times setTown and drives every frame).
 //
-//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat camera)
+//   node tests/browser/region_view_smoke.cjs [check ...]     (checks: open sweep steady same night season fit flat camera pick proj)
 //
 // 1 open: the first default frame (setTown, setState, frame at zoom 1/4 over (85, 48)) is drawn within 600 ms
 //   at 1280x800 and 390x844 dpr 2 (a phone), 1000 ms at 1440x900 dpr 2, and settles (no chunk pending)
@@ -81,7 +81,7 @@ async function open(browser, o, query) {
   await page.evaluate(() => {
     const g = document.getElementById("map").getContext("2d");
     // one frame, flushed (a pixel read waits for the draw)
-    window.__f = () => { const t = performance.now(); window.__view.frame(); g.getImageData(0, 0, 1, 1); return performance.now() - t; };
+    window.__f = now => { const t = performance.now(); window.__view.frame(now); g.getImageData(0, 0, 1, 1); return performance.now() - t; };
     window.__dbg = () => window.__view.scene().debug();
     // frames until nothing is pending (chunks, sprites, boxes, stale ground), at most n
     window.__settle = n => {
@@ -165,19 +165,21 @@ async function sweep(browser, o, label, query) {
   const { ctx, page, errors } = await open(browser, o, query);
   await page.evaluate(() => window.__setTown());
   const at = await riverton(page);
-  const r = await page.evaluate(([x, y]) => {
+  // with dyn=1 the frames carry real timestamps, so the view's dynamic resolution sees the frame gaps and acts
+  const r = await page.evaluate(([x, y, dyn]) => {
     const fit = window.__view.cam().fitZoom(), ts = [], zs = [];
     let spr = 0, chk = 0;
     for (let i = 0; i < 120; i++) {
       const u = i < 60 ? i / 59 : (119 - i) / 59, z = Math.exp(Math.log(1) + (Math.log(fit) - Math.log(1)) * u);
       window.__cam({ zoom: z, x, y });
-      ts.push(window.__f()); zs.push(z);
+      ts.push(window.__f(dyn ? performance.now() : undefined)); zs.push(z);
       const d = window.__dbg(); spr = Math.max(spr, d.spriteMP); chk = Math.max(chk, d.cacheMP);
     }
-    return { ts, fit, spr, chk, phone: window.__dbg().phone };
-  }, at);
+    const c = document.getElementById("map");
+    return { ts, fit, spr, chk, phone: window.__dbg().phone, dpr: c.width / c.clientWidth };
+  }, [at[0], at[1], /dyn=1/.test(query || "")]);
   const s = stat(r.ts);
-  timed(s.max, 50, `sweep ${label}: the worst frame`, `fit ${r.fit.toFixed(3)}, median ${s.med.toFixed(1)}`);
+  timed(s.max, 50, `sweep ${label}: the worst frame`, `fit ${r.fit.toFixed(3)}, median ${s.med.toFixed(1)}, dpr at the end ${r.dpr.toFixed(2)}`);
   timed(s.p95, 25, `sweep ${label}: the 95th percentile frame`);
   const sc = o.mobile ? 8 : 16, cc = o.mobile ? 10 : 24;
   check(r.spr <= sc, `sweep ${label}: sprites within ${sc} MP`, `${r.spr.toFixed(1)} MP`);
@@ -186,22 +188,33 @@ async function sweep(browser, o, label, query) {
   check(!errors.length, `sweep ${label}: no console errors`, errors.slice(0, 3).join(" | "));
   await ctx.close();
 }
-async function runSweep(browser) { await sweep(browser, SIZES.desk, "1280x800"); await sweep(browser, SIZES.phone, "390x844 dpr 2"); }
+async function runSweep(browser) {
+  await sweep(browser, SIZES.desk, "1280x800"); await sweep(browser, SIZES.phone, "390x844 dpr 2");
+  await sweep(browser, SIZES.big, "1440x900 dpr 2 dyn", "dyn=1");
+}
 
 // 3: steady near frames, and the LOD by zoom
 async function steady(browser, label, query) {
   const { ctx, page, errors } = await open(browser, SIZES.desk, query);
   await page.evaluate(() => window.__setTown());
-  const r = await page.evaluate(() => {
+  const at = await riverton(page);
+  // over Downtown: Millbrook's (42, 25) and Riverton Downtown, the densest
+  const r = await page.evaluate(spots => {
     const lods = {};
     for (const z of [3, 1, 0.5, 0.4, 0.25, 0.18, 0.1, 0.0625]) { window.__cam({ zoom: z, x: 60, y: 40 }); window.__f(); lods[z] = window.__view.scene().lod(); }
-    window.__cam({ zoom: 0.5, x: 60, y: 40 });
-    const st = window.__settle(400);
-    const ts = []; for (let i = 0; i < 60; i++) ts.push(window.__f());
-    return { lods, st, ts };
-  });
-  const s = stat(r.ts);
-  timed(s.med, 12, `steady ${label}: the median frame at zoom 0.5`, `p95 ${s.p95.toFixed(1)}, settled in ${r.st.frames} frames, items ${r.st.d.items}`);
+    const out = [];
+    for (const [name, x, y] of spots) {
+      window.__cam({ zoom: 0.5, x, y });
+      const st = window.__settle(400);
+      const ts = []; for (let i = 0; i < 60; i++) ts.push(window.__f());
+      out.push({ name, st, ts });
+    }
+    return { lods, out };
+  }, [["Millbrook downtown", 42, 25], ["Riverton Downtown", at[0], at[1]]]);
+  for (const o of r.out) {
+    const s = stat(o.ts);
+    timed(s.med, 12, `steady ${label}: the median frame at zoom 0.5 over ${o.name}`, `p95 ${s.p95.toFixed(1)}, settled in ${o.st.frames} frames, items ${o.st.d.items}`);
+  }
   const want = { 3: "near", 1: "near", 0.5: "near", 0.4: "mid", 0.25: "mid", 0.18: "mid", 0.1: "far", 0.0625: "far" };
   check(Object.entries(want).every(([z, l]) => r.lods[z] === l), `steady ${label}: lod() is near at >= 0.5, mid at 0.18-0.5, far below`, JSON.stringify(r.lods));
   check(!errors.length, `steady ${label}: no console errors`, errors.slice(0, 3).join(" | "));
@@ -348,8 +361,51 @@ async function runCamera(browser) {
   await ctx.close();
 }
 
+// decor buildings are not clickable (view.md 4.1): a pick at a decor building's centre never names a decor id
+async function runPick(browser) {
+  const { ctx, page, errors } = await open(browser, SIZES.desk, "stub=0");
+  await page.evaluate(() => window.__setTown());
+  const r = await page.evaluate(() => {
+    const view = window.__view, sc = view.scene(), ids = new Set(sc.R.buildings.filter(b => !b.decor).map(b => b.p.id)), out = [];
+    for (const [z, x, y] of [[1, 150, 100], [0.25, 150, 100], [0.0625, 128, 96]]) {
+      window.__cam({ zoom: z, x, y }); window.__settle(200);
+      const c = document.getElementById("map"), W = c.clientWidth, H = c.clientHeight;
+      let n = 0, bad = [];
+      for (const rec of sc.buildings()) {
+        if (!rec.decor) continue;
+        const [cx, cy] = sc.worldToCss(rec.center[0], rec.center[1]);
+        if (cx < 0 || cy < 0 || cx >= W || cy >= H) continue;
+        n++;
+        for (const h of view.pickAll(cx, cy)) if (h && h.kind === "place" && !ids.has(h.id)) { bad.push(h.id); break; }
+        if (n >= 60) break;
+      }
+      out.push({ z, n, bad });
+    }
+    return out;
+  });
+  for (const o of r) check(o.n > 0 && !o.bad.length, `pick: no decor building is picked at zoom ${o.z}`, `${o.n} decor centres, ${o.bad.length} picked ${o.bad.slice(0, 3).join(" ")}`);
+  check(!errors.length, "pick: no console errors", errors.slice(0, 3).join(" | "));
+  await ctx.close();
+}
+
+// a projection switch at runtime (the View menu's Top-down) draws what a fresh flat page draws (view.md 3.2)
+async function runProj(browser) {
+  const views = [[1, 40, 25], [0.5, 150, 100]];
+  const at = (page, vs) => page.evaluate(vs => vs.map(([z, x, y]) => { window.__cam({ zoom: z, x, y }); window.__settle(400); window.__view.frame(1e6); return window.__hash(); }), vs);
+  const a = await open(browser, SIZES.desk, "stub=0");
+  await a.page.evaluate(() => { window.__setTown(); window.__cam({ zoom: 1, x: 40, y: 25 }); window.__settle(200); window.__view.setMode({ projection: "flat" }); });
+  const ha = await at(a.page, views);
+  const kind = await a.page.evaluate(() => window.__view.scene().proj.kind);
+  const b = await open(browser, SIZES.desk, "stub=0&flat=1");
+  await b.page.evaluate(() => window.__setTown());
+  const hb = await at(b.page, views);
+  check(kind === "flat" && ha.every((h, i) => h === hb[i]), "proj: after a switch to flat the near views equal a fresh flat page", `${ha.join(" ")} / ${hb.join(" ")}`);
+  check(!a.errors.length && !b.errors.length, "proj: no console errors", a.errors.concat(b.errors).slice(0, 3).join(" | "));
+  await a.ctx.close(); await b.ctx.close();
+}
+
 const RUNS = [["open", runOpen], ["sweep", runSweep], ["steady", runSteady], ["same", runSame], ["night", runNight], ["season", runSeason],
-  ["fit", runFit], ["flat", runFlat], ["camera", runCamera]];
+  ["fit", runFit], ["flat", runFlat], ["camera", runCamera], ["pick", runPick], ["proj", runProj]];
 async function main() {
   const pw = findPlaywright();
   if (!pw) { console.log("SKIP: Playwright is not installed"); return; }

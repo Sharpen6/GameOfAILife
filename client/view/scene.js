@@ -1363,10 +1363,22 @@
         n++;
       }
       scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
-      if (BIG && chunks && frameNo % 30 === 0) { chunks.begin(); chunks.trim(lowCap() - nearPx()); }
+      if (BIG && chunks) { chunks.begin(); chunks.trim(lowCap() - nearPx()); } // (returns at once when under the cap)
       if (BIG) {
         const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy];
         const a = performance.now(); buildQueued(budget, 4, st); scene.stats.spriteMs = performance.now() - a;
+        // sprite prefetch (view.md 3.2): the camera rests, the queue is empty, the frame is cheap so far, zoom >= 0.3
+        // and sprites are under 75% of the cap: sprites for the view grown 75% each way, nearest first, within 4 ms
+        // (once a pass over a view queues nothing, that view is done until the camera moves)
+        if (st && !spriteQueue.size && pfView !== v.S + ":" + v.ox + ":" + v.oy && scene.cam.zoom >= 0.3 && spriteMP < 0.75 * scene.spriteCap
+          && performance.now() - t0 < 8 && budget.left() > 0) {
+          const gx = (v.x1 - v.x0) * 0.75, gy = (v.y1 - v.y0) * 0.75;
+          const st0 = scene.stats.staleSprites; // (staleSprites counts what is drawn)
+          for (const o of inRect(v.x0 - gx, v.y0 - gy, v.x1 + gx, v.y1 + gy)) if (o.big) spriteOf(o);
+          scene.stats.staleSprites = st0;
+          if (!spriteQueue.size) pfView = v.S + ":" + v.ox + ":" + v.oy;
+          else { const b = performance.now(); buildQueued(budget, 4, true); scene.stats.spriteMs += performance.now() - b; }
+        }
         if (st && !spriteQueue.size && !scene.stats.boxes) prefetch();
       }
       smoke(v, now);
@@ -1430,6 +1442,22 @@
       return [...out].filter(o => o.rec || o.big ? (o.wx0 < x1 && o.wx1 > x0 && o.wy0 < y1 && o.wy1 > y0) : (o.wx < x1 && o.wx + o.sw > x0 && o.wy < y1 && o.wy + o.sh > y0));
     }
     scene.buildingsIn = (x0, y0, x1, y1) => inRect(x0, y0, x1, y1).filter(o => o.big);
+    // Occupancy for the low-zoom lights (view.md 3.4: a home is lit if occ > 0, else 5%): folk's occ, in place
+    // order (the facade keeps the last one: absent means unchanged); null without one (the clock alone decides).
+    // occVer moves when occ changes, and an l chunk then compares the signature of its homes' occupancy.
+    let occRef = null, occKey = "", occVer = 0;
+    const occNow = () => {
+      const o = Array.isArray(scene.occ) ? scene.occ : scene.state && Array.isArray(scene.state.occ) ? scene.state.occ : null;
+      if (o !== occRef) { const k = o ? o.join(",") : ""; occRef = o; if (k !== occKey) { occKey = k; occVer++; } }
+      return o;
+    };
+    const occOf = (o, occ) => { if (!occ || o.decor) return null; const i = placeById.get(o.p.id); return i == null ? null : occ[i] | 0; };
+    const occSig = (list, occ) => {
+      if (!occ) return -1;
+      let h = 0; // (order-free: the bake's list is sorted by depth, a check's is not)
+      for (const o of list) if (o.big && !o.decor && o.p.kind === "home" && occOf(o, occ) > 0) h = (h + (placeById.get(o.p.id) * 7919 + 13) % 1000003) % 1000000007;
+      return h;
+    };
     const lowPainter = {
       origin: () => ({ x0: B.x0, y0: B.y0 - 1024 }),
       job(layer, level, wx0, wy0, span) {
@@ -1438,10 +1466,10 @@
         if (layer === "u" || layer === "c" || layer === "l") {
           const list = inRect(wx0, wy0, wx0 + span, wy0 + span).sort((a, b) => a.depth - b.depth);
           if (layer === "l") {
-            const minute = scene.minute, bucket = CV.lightBucket(minute);
-            job.tag = bucket;
+            const minute = scene.minute, bucket = CV.lightBucket(minute), occ = occNow();
+            job.tag = { bucket, ver: occVer, sig: occSig(list, occ) };
             const step = level >= 0.25 ? 1 : 2;
-            steps.push(() => { for (const o of list) if (o.big) CV.lowLights(q, o.B, level, wx0, wy0, CV.lightShare(o.B, minute, null), { proj, step }); });
+            steps.push(() => { for (const o of list) if (o.big) CV.lowLights(q, o.B, level, wx0, wy0, CV.lightShare(o.B, minute, occOf(o, occ)), { proj, step }); });
           } else {
             const win = level >= 0.25 ? 1 : level >= 0.125 ? 2 : 0;
             let boxedN = 0;
@@ -1485,7 +1513,7 @@
         staleSprites: st.staleSprites || 0, items: st.items || 0, boxes: st.boxes || 0, runs: st.runs || 0, splitRuns: st.splitRuns || 0,
         nearStale: scene.lodNow === "near" ? (st.nearStale || 0) + (st.mipMiss || 0) : 0, mipMiss: st.mipMiss || 0, statics_builds: st.statics_builds || 0, staticsMs: st.staticsMs || 0, placeUpdates: st.placeUpdates || 0, buildings: R.buildings.length };
     };
-    let lastLowView = null, lastNearView = null;
+    let lastLowView = null, lastNearView = null, pfView = null;
     // idle prefetch: the far levels over the whole map, so a zoom out finds them baked
     // (only into room the cache has, or the trim that makes room would evict what it bakes)
     const prefetch = () => { if (chunks.mp + 512 * 512 > lowCap() - nearPx()) return; const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
@@ -1524,7 +1552,15 @@
         if (dusk > 0.005) { g.fillStyle = `rgba(255,140,60,${dusk.toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height); }
         const bucket = CV.lightBucket(scene.minute);
         g.globalCompositeOperation = "lighter"; g.globalAlpha = Math.min(1, night * 1.1);
-        layer("l", e => { if (e.tag !== bucket) e.stale = true; });
+        const occ = occNow();
+        layer("l", e => {
+          const t = e.tag;
+          if (!t || t.bucket !== bucket) { e.stale = true; return; }
+          if (t.ver === occVer) return;
+          // occ moved since this chunk was baked: re-bake only if its homes' occupancy did
+          const sig = occSig(inRect(e.wx0, e.wy0, e.wx0 + e.span, e.wy0 + e.span), occ);
+          if (sig !== t.sig) e.stale = true; else t.ver = occVer;
+        });
         g.globalCompositeOperation = "source-over"; g.globalAlpha = 1;
       }
       if (far) { groundOverlays(v, now); for (const src of moverSources) if (src.marks) src.marks(g, vv, lod); }
@@ -1988,7 +2024,10 @@
       for (const r of buildings) {
         if (!inHull(r.hull, wx, wy) && !inHull(r.ground, wx, wy)) continue;
         const sl = r.slices.find(q => wx >= q.wx && wx < q.wx + q.sw);
-        c.push({ hit: { kind: "place", id: r.p.id }, depth: sl && opaqueAt(r, wx, wy) ? sl.depth : r.depth - 1e6, mover: 0 });
+        const solid = !!(sl && opaqueAt(r, wx, wy));
+        // a decor building (view.md 4.1) has no sim role and is not clickable, but where it is solid it hides what is behind
+        if (r.decor && !solid) continue;
+        c.push({ hit: r.decor ? null : { kind: "place", id: r.p.id }, depth: solid ? sl.depth : r.depth - 1e6, mover: 0 });
       }
       for (const it of shelters) if (inBox(it.wx + 4, it.wy + 4, it.wx + it.sw - 2, it.wy + it.sh - 2)) c.push({ hit: { kind: "stop", id: it.ref }, depth: it.depth, mover: 0 });
       for (const src of moverSources) {
@@ -1996,6 +2035,8 @@
         if (h) c.push({ hit: h, depth: h.depth != null ? h.depth : 1e9, mover: 1 });
       }
       c.sort((a, b) => b.depth - a.depth || b.mover - a.mover);
+      const front = c.findIndex(q => !q.hit);
+      if (front >= 0) c.length = front; // (what a decor building hides is not picked)
       const ground = [];
       const [tx, ty] = proj.toTile(wx, wy);
       const x = Math.floor(tx), y = Math.floor(ty);
@@ -2100,6 +2141,9 @@
       proj = scene.proj = CV.makeProj(kind, W, H, rot || 0);
       art = scene.art = CV.makeArt(proj);
       bCache.clear(); levels.clear(); dirty = true;
+      // the region's sprites, mips, lamp masks and chunks were drawn in the old projection (their keys do not name
+      // it): drop them all, so nothing of the old view is drawn (view.md 3.2)
+      if (BIG) { sprites.clear(); spriteQueue.clear(); spriteMP = 0; mips = new WeakMap(); lampOcc.clear(); lampMasks = 0; if (chunks) chunks.clear(); lodCur = null; lastLowView = null; lastNearView = null; pfView = null; }
       B = proj.bounds(); B.y1 += 24;
     };
     scene.art = art;
