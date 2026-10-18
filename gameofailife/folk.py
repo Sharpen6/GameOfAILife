@@ -379,7 +379,10 @@ class Folk:
         if spare is None:
             k = _dice().key(self.sim.dice_seed, NS_FOLK, p.i, "spare")
             spare = self._spare[p.i] = SHIFT_MARGIN - SHIFT_SPREAD + k % (2 * SHIFT_SPREAD + 1)
-        return p.job.start_hour * 60 - self._commute_of(p)[0] - spare
+        minutes, mode = self._commute_of(p)
+        if mode == "train":
+            spare = SHIFT_MARGIN  # train commuters time it to the train, so they ride together
+        return p.job.start_hour * 60 - minutes - spare
 
     def _bed_minute(self, p) -> int:
         bed = self._bed.get(p.i)

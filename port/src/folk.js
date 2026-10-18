@@ -374,7 +374,9 @@
         spare = SHIFT_MARGIN - SHIFT_SPREAD + k % (2 * SHIFT_SPREAD + 1);
         this._spare.set(p.i, spare);
       }
-      return p.job.start_hour * 60 - this._commute_of(p)[0] - spare;
+      const [minutes, mode] = this._commute_of(p);
+      if (mode === "train") spare = SHIFT_MARGIN; // train commuters time it to the train, so they ride together
+      return p.job.start_hour * 60 - minutes - spare;
     }
 
     _bed_minute(p) {
