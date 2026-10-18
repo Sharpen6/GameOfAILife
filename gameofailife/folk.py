@@ -173,6 +173,7 @@ class Folk:
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
         self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
+        self.sent: dict[int, None] = {}  # people on a send_to errand (an invite, a date): not free until its stay ends
         self._bind()
         if self.n <= 0:
             self.n = 0
@@ -472,6 +473,7 @@ class Folk:
         if p.trip is not None:
             self._arrive(sim, p, now)
             return
+        self.sent.pop(p.i, None)  # the errand's stay is over (or it was cut short): free time is theirs again
         self._gain(p, now)
         day, m = divmod(now, DAY)
         home = self.home_place(p)
@@ -1327,12 +1329,13 @@ def _folk_of(sim) -> Folk | None:
 
 def is_free(sim, p) -> bool:
     """Alive, in town, awake, not at or heading to work or school, not in hospital, in free time (and not due at
-    a shift within the hour)."""
+    a shift within the hour), and not on an errand someone sent them on (`send_to`: an invite, a date, a friend's
+    outing) until its stay ends, so nobody pulls them off it."""
     f = _folk_of(sim)
     if f is None or not isinstance(p, Person) or not p.alive or p.gone or p.age < 5:
         return False
     act = p.activity
-    if act not in FREE:
+    if act not in FREE or p.i in f.sent:
         return False
     job = p.job
     if job is not None:
@@ -1363,6 +1366,10 @@ def send_to(sim, p, place_id, activity, minutes) -> bool:
         f._gain(p, now)
     f.settle(p, now)
     f.ends.pop(p.i, None)
+    if ward:
+        f.sent.pop(p.i, None)
+    else:
+        f.sent[p.i] = None
     if f.where.get(p.i) == place_id:
         f._begin(p, now, activity, minutes)
         return True
@@ -1444,6 +1451,7 @@ def kill(sim, p, how) -> None:
     f.out.pop(p.i, None)
     f._leave(p)
     f.ends.pop(p.i, None)
+    f.sent.pop(p.i, None)
     p.next_tick = -1
     p.state = "idle"
     p.activity = "idle"

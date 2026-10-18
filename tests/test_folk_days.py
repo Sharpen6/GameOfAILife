@@ -496,5 +496,75 @@ class ApiTest(unittest.TestCase):
         self.assertIsNotNone(m)
 
 
+class CompanionTest(unittest.TestCase):
+    """Someone sent on an errand (`send_to`: an invite, a date, a friend's outing) keeps it: nobody's company for
+    another outing and never re-sent until its stay ends; nobody at work, at school or asleep is company either."""
+
+    def test_an_errand_is_kept(self):
+        if not integrated():
+            self.skipTest("needs the real Simulation and social.pick_companion")
+        from gameofailife import people, social
+        from gameofailife.agent import RelationKind
+        sim = make_world(SEEDS[0], 200)
+        for _ in range(9 * 60):  # to 14:00 on day 0
+            sim.step()
+        f = sim.folk
+        free = [p for p in f.living() if p.age >= 18 and folk.is_free(sim, p) and p.trip is None]
+        p = free[0]
+        q = next(x for x in free if x.household_id != p.household_id)
+        p.relationships = {}
+        people.set_rel(sim, p.id, q.id, RelationKind.FRIEND, 70)
+        self.assertIs(social.pick_companion(sim, p, "visit"), q)
+        cafes = [pid for pid, pl in sim.town.places.items() if pl.kind == "cafe" and pl.is_open(14.5)
+                 and f.allowed(pid) and pid != q.inside]
+        self.assertTrue(folk.send_to(sim, q, cafes[0], "hang_out", 60))
+        self.assertFalse(folk.is_free(sim, q))
+        self.assertIsNone(social.pick_companion(sim, p, "visit"))
+        self.assertFalse(folk.send_to(sim, q, cafes[1], "hang_out", 60))
+        self.assertEqual(q.trip.dest if q.trip is not None else q.inside, cafes[0])
+        for _ in range(400):
+            sim.step()
+            if q.i not in f.sent:
+                break
+        self.assertNotIn(q.i, f.sent)  # the errand's stay ended: free time is theirs again
+
+    def test_company_is_free_all_day(self):
+        if not integrated():
+            self.skipTest("needs the real Simulation and social.pick_companion")
+        from unittest import mock
+
+        from gameofailife import social
+        sim = make_world(SEEDS[0], N)
+        f = sim.folk
+        real_send, real_pick = folk.send_to, social.pick_companion
+        bad, picks, resent, sent = [], [], [], []
+
+        def send_to(sim_, p, place_id, activity, minutes):
+            was = p.i in f.sent
+            ok = real_send(sim_, p, place_id, activity, minutes)
+            if ok and activity != folk.WARD:
+                sent.append(p.id)
+                if was:
+                    resent.append((sim_.clock.tick, p.id, place_id))
+            return ok
+
+        def pick(sim_, p, why):
+            q = real_pick(sim_, p, why)
+            if q is not None:
+                picks.append(q.id)
+                if q.i in f.sent or q.activity in ("work", "school", "sleep") or q.trip is not None and \
+                        q.trip.then in ("work", "school", "sleep"):
+                    bad.append((sim_.clock.tick, q.id, q.activity))
+            return q
+
+        with mock.patch.object(folk, "send_to", send_to), mock.patch.object(social, "pick_companion", pick):
+            for _ in range(DAY):
+                sim.step()
+        self.assertGreater(len(picks), 0)
+        self.assertGreater(len(sent), 0)
+        self.assertEqual(bad[:5], [])
+        self.assertEqual(resent[:5], [])
+
+
 if __name__ == "__main__":
     unittest.main()

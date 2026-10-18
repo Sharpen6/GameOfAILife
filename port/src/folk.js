@@ -145,6 +145,7 @@
       this._wake = new Map();
       this._spare = new Map(); // i -> minutes spare before a shift
       this._driven = new Map(); // pupil i -> [driver i, departure tick] of a school run
+      this.sent = new Set(); // people on a send_to errand (an invite, a date): not free until its stay ends
       this._locator = (p, tick) => this._locate(p, tick);
       this._bind();
       if (this.n <= 0) {
@@ -471,6 +472,7 @@
         this._arrive(sim, p, now);
         return;
       }
+      this.sent.delete(p.i); // the errand's stay is over (or it was cut short): free time is theirs again
       this._gain(p, now);
       const [day, m] = divmod(now, DAY);
       const home = this.home_place(p);
@@ -1373,11 +1375,12 @@
   // --- life.md 3.2: the folk functions life calls ---
 
   // Alive, in town, awake, not at or heading to work or school, not in hospital, in free time (and not due at a
-  // shift within the hour).
+  // shift within the hour), and not on an errand someone sent them on (`send_to`: an invite, a date, a friend's
+  // outing) until its stay ends, so nobody pulls them off it.
   function is_free(sim, p) {
     const f = _folk_of(sim);
     if (f === null || !(p instanceof fm().Person) || !p.alive || p.gone || p.age < 5) return false;
-    if (!FREE.includes(p.activity)) return false;
+    if (!FREE.includes(p.activity) || f.sent.has(p.i)) return false;
     const job = p.job;
     if (job !== null) {
       const now = sim.clock.tick;
@@ -1403,6 +1406,8 @@
     else f._gain(p, now);
     f.settle(p, now);
     f.ends.delete(p.i);
+    if (ward) f.sent.delete(p.i);
+    else f.sent.add(p.i);
     if (f.where.get(p.i) === place_id) {
       f._begin(p, now, activity, minutes);
       return true;
@@ -1483,6 +1488,7 @@
     f.out.delete(p.i);
     f._leave(p);
     f.ends.delete(p.i);
+    f.sent.delete(p.i);
     p.next_tick = -1;
     p.state = "idle";
     p.activity = "idle";
