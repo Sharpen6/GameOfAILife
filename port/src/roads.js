@@ -90,12 +90,12 @@
     // [x, y, heading] m minutes after leaving: heading "e", "w", "s" or "n", null once arrived.
     at(m) {
       let t = m * 8;
+      if (t < 0) t = 0;
       const t8 = this.t8;
       if (t >= t8[t8.length - 1]) {
         const [x, y] = this.pts[this.pts.length - 1];
         return [x, y, null];
       }
-      if (t < 0) t = 0;
       const i = bisect_right(t8, t) - 1;
       const [x0, y0] = this.pts[i], [x1, y1] = this.pts[i + 1];
       const span = t8[i + 1] - t8[i];

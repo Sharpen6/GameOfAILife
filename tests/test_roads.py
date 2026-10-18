@@ -134,6 +134,20 @@ class RoadNetTest(unittest.TestCase):
                 done = path.index((x, y), done)  # raises if the tile is not on the path at or after the last one
             self.assertEqual(r.at(r.minutes + 1), (*r.pts[-1], None))
             self.assertEqual(r.at(0)[:2], r.pts[0])
+            self.assertEqual(r.at(-0.5), r.at(0))
+
+    def test_route_at_one_point(self):
+        """A route from a street tile to itself is one point: at(m) is that point, arrived, for every m, before 0
+        too."""
+        w = self.net.w
+        for a, _ in self.pairs[:20]:
+            ra = self.net._end(a)[0]
+            tile = (ra % w, ra // w)
+            for mode in ("walk", "car"):
+                r = self.net.route(tile, tile, mode, keep=False)
+                self.assertEqual((len(r.pts), r.tiles, r.minutes), (1, 0, 0))
+                for m in (-3, -0.5, 0, 0.5, 10):
+                    self.assertEqual(r.at(m), (*r.pts[0], None))
 
     def test_route_lru_and_keep(self):
         net = roads.RoadNet(self.town.tiles, self.town.places, self.town.highway_edges, self.town.interchanges)
