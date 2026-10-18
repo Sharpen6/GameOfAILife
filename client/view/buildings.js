@@ -24,10 +24,10 @@
     big_house: { floorPx: 24, roof: "hip", roofPx: 30 },
     apartments: { floorPx: 22, roof: "flat", wall: ["#a8573f", "#9a6347", "#b06a4a"], roofC: "#6d6f78" },
     tower: { floorPx: 20, roof: "flat", wall: "#46597a", roofC: "#4a5466" },
-    hospital: { floorPx: 22, roof: "flat", wall: "#eef1f5", roofC: "#a9b0bd" },
+    hospital: { boxMargin: 9, floorPx: 22, roof: "flat", wall: "#eef1f5", roofC: "#a9b0bd" },
     school: { floorPx: 26, roof: "hip", roofPx: 20, wall: "#b8643e", roofC: "#56607a" },
-    city_hall: { floorPx: 24, roof: "flat", wall: "#e8e1cf", roofC: "#8d8f99" },
-    bank: { floorPx: 22, roof: "flat", wall: "#ddd6c4", roofC: "#7d808a" },
+    city_hall: { boxMargin: 9, floorPx: 24, roof: "flat", wall: "#e8e1cf", roofC: "#8d8f99" },
+    bank: { boxMargin: 9, floorPx: 22, roof: "flat", wall: "#ddd6c4", roofC: "#7d808a" },
     // fascia: a band above the awning that carries the shop's name board (px)
     cafe: { floorPx: 24, roof: "flat", wall: "#f3e3d4", roofC: "#8a6a9a", awning: ["#8a4fa0", "#f6eef8"], sign: "CAFE", signBg: "#4a2058", fascia: 22 },
     diner: { floorPx: 26, roof: "flat", wall: "#dfe6ea", roofC: "#c23b3b", awning: ["#c23b3b", "#ffffff"], signBg: "#1e2230" },
@@ -36,11 +36,33 @@
     corner_shop: { floorPx: 24, roof: "flat", wall: "#c98a5a", roofC: "#6d6f78", awning: ["#2f7fb8", "#ffffff"], sign: "GROCER", signBg: "#14304e", fascia: 22 },
     noodle_bar: { floorPx: 24, roof: "flat", wall: "#ecdcbc", roofC: "#7a2e2e", awning: ["#c0392b", "#f1c40f"], sign: "NOODLES", signBg: "#5a1010", fascia: 22 },
     arcade: { floorPx: 24, roof: "glass", wall: "#ddcfb2", roofC: "#8d8f99", sign: "ARCADE", signBg: "#24304a", fascia: 22 },
-    factory: { floorPx: 30, roof: "saw", wall: "#98a2a8", roofC: "#7a8086" },
+    factory: { boxMargin: 9, floorPx: 30, roof: "saw", wall: "#98a2a8", roofC: "#7a8086" },
+    // v3 (view.md 3.8): the region's styles. extra: headroom above the roof top in px; awnings and signBgs go by variant.
+    shop: { floorPx: 24, roof: "flat", wall: ["#efe2cc", "#dccbb0", "#c98a5a", "#e6e0d2", "#bccad4", "#d4ae94", "#e8e4d6", "#c8b89c"], roofC: "#6d6f78", fascia: 22,
+      awnings: [["#2f7fb8", "#ffffff"], ["#c0392b", "#ffffff"], ["#2f8c5a", "#ffffff"], ["#d18f2f", "#fff4dd"], ["#8a4fa0", "#f6eef8"], ["#e2603a", "#fff0e0"], ["#3a5a8a", "#e8eef8"], ["#4a4a52", "#f2f2f2"]],
+      signBgs: ["#14304e", "#5a1010", "#1a4a30", "#5a2e10", "#4a2058", "#6a2a10", "#1e2a4a", "#2a2a30"] },
+    restaurant: { floorPx: 24, roof: "flat", wall: ["#ecdcbc", "#f3e3d4", "#e0c8a8", "#d8e0e4", "#f0d8c8", "#e8e0c8", "#d4b898", "#e4d4c4"], roofC: "#7a2e2e", fascia: 22,
+      awnings: [["#c0392b", "#f1c40f"], ["#2a2a30", "#e8e8e8"], ["#8a3a1a", "#f6e0c0"], ["#2f8c5a", "#f6d24a"], ["#d18f2f", "#5a1a10"], ["#3a2a5a", "#e8dcf0"], ["#c23b3b", "#ffffff"], ["#7a2e2e", "#f1c40f"]],
+      signBgs: ["#5a1010", "#1e1e24", "#4a2410", "#1a4a30", "#5a2e10", "#2a1a40", "#1e2230", "#3a1010"] },
+    row_houses: { floorPx: 24, roof: "gable", roofPx: 24, extra: 16 },
+    warehouse: { floorPx: 30, roof: "gable", roofPx: 14, wall: ["#a8b0b4", "#b8a890", "#8e9aa4", "#c0b8a8", "#9aa898"], roofC: "#7a8086", extra: 6 },
+    station: { floorPx: 30, roof: "flat", wall: "#d8cdb8", roofC: "#5a6470", sign: "STATION", signBg: "#1e3a6a", extra: 30 },
+    residential_tower: { floorPx: 20, roof: "flat", wall: ["#a8573f", "#9a6347", "#b06a4a", "#8a5a48", "#c08868", "#b8a088"], roofC: "#6d6f78", extra: 30 },
+    hotel: { floorPx: 20, roof: "flat", wall: "#e8dcc4", roofC: "#7d808a", sign: "HOTEL", signBg: "#5a1a2a", extra: 36 },
+    library: { floorPx: 24, roof: "flat", wall: "#d8cdb4", roofC: "#7d808a", sign: "LIBRARY" },
+    police: { floorPx: 24, roof: "flat", wall: "#c8ccd2", roofC: "#5a6070", sign: "POLICE", signBg: "#1e3a7a", extra: 20 },
+    fire_station: { floorPx: 26, roof: "flat", wall: "#b0503a", roofC: "#5a5a60", sign: "FIRE STATION", signBg: "#8a1a14", extra: 44 },
+    cinema: { floorPx: 26, roof: "flat", wall: "#4a4058", roofC: "#4a4a54", sign: "CINEMA", signBg: "#c8283a", extra: 24 },
+    mall: { floorPx: 26, roof: "flat", wall: "#dcd6ca", roofC: "#8d8f99", sign: "MALL", signBg: "#2a5a8a", extra: 16 },
+    clubhouse: { floorPx: 22, roof: "gable", roofPx: 22, wall: "#efe6d2", roofC: "#4f6b4a", sign: "CLUBHOUSE", signBg: "#2a4a2a", extra: 16 },
+    stadium: { floorPx: 16, roof: "open", wall: "#c8c4bc", roofC: "#8a8a92", extra: 52 },
   };
   CV.STYLE = STYLE;
   CV.FLOORS = { house: 1, big_house: 2, apartments: 3, tower: 4, hospital: 3, school: 2, city_hall: 3, bank: 3, cafe: 2,
-    diner: 1, market: 1, bakery: 1, corner_shop: 1, noodle_bar: 2, arcade: 2, factory: 2, park: 0 };
+    diner: 1, market: 1, bakery: 1, corner_shop: 1, noodle_bar: 2, arcade: 2, factory: 2, park: 0,
+    shop: 2, restaurant: 2, row_houses: 2, warehouse: 1, station: 1, residential_tower: 12, hotel: 12, library: 2,
+    police: 2, fire_station: 2, cinema: 2, mall: 2, clubhouse: 1, stadium: 3 };
+  CV.hasStyle = style => Object.prototype.hasOwnProperty.call(STYLE, style);
 
   // House bodies stand inside their footprint with a garden ring around them; other buildings keep a
   // thin paved apron.
@@ -109,15 +131,29 @@
   }
   CV._heights = heights;
   // The sprite's canvas rect in world px for a place drawn in place, through one projection.
+  // A place with a variant (anything outside Millbrook) gets a box round its body rather than its lot: the
+  // body plus BODY_MARGIN tiles (awnings, porches, eaves) and the roof, so the sprite is mostly opaque.
+  const BODY_MARGIN = 0.3;
   function boxOf(proj, p) {
-    const hh = heights(p);
-    const fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
-    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
-    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) for (const z of [0, hh.topZ]) {
-      const q = proj.toWorld(a, b, z);
-      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
+    if (CV.variantOf(p) != null && !(p.x === 0 && p.y === 0 && String(p.id).indexOf("#") > 0)) {
+      // the canonical copy's box, moved by whole pixels (as art.building moves its sprite)
+      const b = boxOf(proj, CV.canonPlace(p)), o = proj.toWorld(p.x, p.y), z = proj.toWorld(0, 0);
+      b.ox += o[0] - z[0]; b.oy += o[1] - z[1];
+      return b;
     }
-    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += 4;
+    const hh = heights(p);
+    let fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
+    {
+      const bd = CV.bodyOf(p), m = hh.st.boxMargin != null ? hh.st.boxMargin : BODY_MARGIN;
+      fx0 = Math.max(fx0, bd.x0 - m); fy0 = Math.max(fy0, bd.y0 - m); fx1 = Math.min(fx1, bd.x1 + m); fy1 = Math.min(fy1, bd.y1 + m);
+    }
+    let bx0 = Infinity, bx1 = -Infinity, by0 = Infinity, by1 = -Infinity;
+    const add = (a, b, z) => { const q = proj.toWorld(a, b, z); if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1]; };
+    // a pitched roof of a keyed place rises only along its ridge: the corners need the eaves, the mid-lines the top
+    const ridge = (hh.st.roof === "gable" || hh.st.roof === "hip");
+    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { add(a, b, 0); add(a, b, ridge ? hh.Hw + 10 : hh.topZ); }
+    if (ridge) { const cx = (fx0 + fx1) / 2, cy = (fy0 + fy1) / 2; for (const [a, b] of [[fx0, cy], [fx1, cy], [cx, fy0], [cx, fy1]]) add(a, b, hh.topZ); }
+    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += CV.variantOf(p) == null ? 4 : 8; // keyed: room for steps and canopy posts in front (flat)
     const ox = Math.floor(bx0), oy = Math.floor(by0);
     return { ox, oy, w: Math.max(1, Math.ceil(Math.ceil(bx1) - ox)), h: Math.max(1, Math.ceil(Math.ceil(by1) - oy)), height: hh.height, labelZ: hh.labelZ };
   }
@@ -525,19 +561,28 @@
           const big = stage === 4 ? 1.25 : 1;
           for (let j = 0; j < lumps; j++) {
             const K = 5, cr = Array.from({ length: K }, () => 0.45 + Rn() * 0.8), rot = Rn() * 6.28;
-            L.push({ ds: (Rn() - 0.5) * 0.3 * big / ln, dt: (Rn() - 0.5) * 0.8 / rows, ra: (0.09 + Rn() * 0.08) * big / ln, rb: (0.32 + Rn() * 0.3) * big / rows, cr, rot, K });
+            L.push({ ds: (Rn() - 0.5) * 0.3 * big / ln, dt: (Rn() - 0.5) * 0.8 / rows, ra: (0.09 + Rn() * 0.08) * big / ln, rb: (0.32 + Rn() * 0.3) * big / rows, cr, rot, K,
+              lo2: (Math.min(...cr) * (1 - 1e-9)) ** 2, hi2: (Math.max(...cr) * (1 + 1e-9)) ** 2 });
           }
           const inside = (s, t) => L.some(l => {
-            const a = (s - sc - l.ds) / l.ra, b = (t - tc - l.dt) / l.rb, th = Math.atan2(b, a) + l.rot;
+            const a = (s - sc - l.ds) / l.ra, b = (t - tc - l.dt) / l.rb, r2 = a * a + b * b;
+            if (r2 >= l.hi2) return false; // outside every radius of this lump (Math.hypot is slow)
+            if (r2 < l.lo2) return true;
+            const th = Math.atan2(b, a) + l.rot;
             const q = ((th / 6.2832) % 1 + 1) % 1 * l.K, k0 = Math.floor(q), fr = q - k0;
             return Math.hypot(a, b) < l.cr[k0 % l.K] * (1 - fr) + l.cr[(k0 + 1) % l.K] * fr;
           });
-          const dS = 0.35 / Math.min(eavePx, rowPx), dT = 0.35 / upPx, sR = 0.3 * big / ln, tR = 1.8 * big / rows;
+          // v2 sampled every 0.35 px; a keyed (region) place samples every 0.5 px, still at least once a pixel
+          const step = ctx.variant == null ? 0.35 : 0.5;
+          const dS = step / Math.min(eavePx, rowPx), dT = step / upPx, sR = 0.3 * big / ln, tR = 1.8 * big / rows;
           for (let s = sc - sR; s <= sc + sR; s += dS) for (let t = tc - tR; t <= tc + tR; t += dT) {
-            if (s < 0.03 || s > 0.97 || t < 0.06 || t > 0.94 || !inside(s, t)) continue;
+            if (s < 0.03 || s > 0.97 || t < 0.06 || t > 0.94) continue;
             const p = slopeAt(f, s, t), key = Math.round(p[1] - 0.5) * 8192 + Math.round(p[0] - 0.5);
             const along = s * ln, raf = !snow && Math.abs(along / 0.36 - Math.round(along / 0.36)) * 0.36 * rowPx / ln < 0.5;
-            if (!hole.has(key) || raf) hole.set(key, raf ? 2 : 1);
+            const was = hole.get(key);
+            if (was === 2 || (was === 1 && !raf)) continue; // nothing to change here, whatever inside() says
+            if (!inside(s, t)) continue;
+            hole.set(key, raf ? 2 : 1);
           }
         }
         // 1-2 px notches: bite a few edge pixels away and chip a few more out of the shingles around
@@ -690,6 +735,10 @@
           const lost = stage === 2 && f === LIT && i === 1 ? "r" : null;
           const hang = stage === 1 && f === LIT && i === 1 ? "r" : stage === 2 && f !== LIT && i === 0 ? "l" : null;
           win(ctx, F, uc - 0.14, uc + 0.14, 8, 19, Object.assign(ws, { frame: ctx.trim, curtain: CURTAIN[(ctx.h0 + i) % CURTAIN.length], both: true, shutters: SHUTTER[(ctx.h0 >>> 5) % SHUTTER.length], box: f === LIT, idx: i, sill: ctx.trim, mullion: true, noShutter: lost, hang, wallCol: col }));
+        });
+        for (let fl = 1; fl < ctx.floors; fl++) [F.len * 0.27, F.len * 0.73].forEach((uc, i) => { // upper floors (the region's two-floor houses)
+          const ws = windowState(ctx, i + 2 * fl, f, 2 * ctx.floors);
+          win(ctx, F, uc - 0.13, uc + 0.13, fl * ctx.st.floorPx + 7, fl * ctx.st.floorPx + 18, Object.assign(ws, { frame: ctx.trim, curtain: CURTAIN[(ctx.h0 + i + fl) % CURTAIN.length], mullion: true, sill: ctx.trim, idx: i + 2 * fl }));
         });
         if (isDoor) {
           const uc = F.len / 2;
@@ -1107,7 +1156,7 @@
           boxAt(g, r[0], r[1], r[2], r[3], top2, top2 + ent, "#f0ead8");
           const Fo = { face: F.face, at: (u, z) => F.out(u, z, 0.26) };
           poly(g, quad(Fo, 0.1, F.len - 0.1, top2 + 1, top2 + 2), "#d8d0bc");
-          wallSign(ctx, Fo, bank ? "SAVINGS BANK" : "CITY HALL", F.len / 2, top2 + Math.round(ent / 2) + 1, "#3a3020", null, 2);
+          wallSign(ctx, Fo, bank ? "SAVINGS BANK" : ctx.p.style === "library" ? "PUBLIC LIBRARY" : "CITY HALL", F.len / 2, top2 + Math.round(ent / 2) + 1, "#3a3020", null, 2);
           // a pediment over the middle of the facade
           let zw = Infinity;
           for (let fl = 0; fl < floors; fl++) if (fl * fh + 5 >= top2 + ent + 2) { zw = fl * fh + 5; break; }
@@ -1122,7 +1171,7 @@
       }
       flatRoof(ctx, ctx.roofC, { cope: shade(ctx.wall, 1.15) });
       const Hd = ctx.H;
-      if (!bank) { // clock tower with a copper dome
+      if (!bank && ctx.p.style !== "library") { // clock tower with a copper dome
         const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, w = 0.55;
         boxAt(g, cx - w, cy - w, cx + w, cy + w, Hd, Hd + 32, ctx.wall);
         for (const f of FACES) {
@@ -1171,7 +1220,8 @@
             if (s === "bakery" || s === "market" || s === "corner_shop") { const p = F.at((a + b) / 2, 6); g.fillStyle = ["#d8a050", "#e8c060", "#c07030"][i % 3]; g.fillRect(Math.round(p[0]) - 3, Math.round(p[1]) - 2, 6, 2); }
           }
           door(ctx, F, du, 0.26, top, { color: "#3a4a5a", frame: "#3a3a3a", glazed: true });
-          if (st.awning) awning(ctx, F, 0.05, F.len - 0.05, fh - 3, st.awning, 0.26, 7);
+          const awn = st.awnings ? st.awnings[(ctx.variant == null ? ctx.h0 : ctx.variant) % st.awnings.length] : st.awning;
+          if (awn) awning(ctx, F, 0.05, F.len - 0.05, fh - 3, awn, 0.26, 7);
           if (st.lanterns) for (let u = 0.25; u < F.len - 0.1; u += 0.45) { const p = F.out(u, fh - 13, 0.24); CV.ellipse(g, p[0], p[1], 3, 3, "#d8281e"); g.fillStyle = "#f6d24a"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 1, 2, 1); ctx.lights.push([p[0], p[1], "#ff6a3a"]); }
         } else {
           const n = Math.max(1, Math.round(F.len * 1.1));
@@ -1196,7 +1246,8 @@
           for (let i = 0; i < n; i++) { const a = 0.1 + (F.len - 0.2) * i / n, b = a + (F.len - 0.2) / n - 0.08; awning(ctx, F, a, b, fh - 3, cols[i % 4], 0.22, 6); }
         }
         // the name board sits on the fascia, clear of the awning: a dark board, cream letters, a light frame
-        if (st.sign && st.fascia && isFront) wallSign(ctx, F, st.sign, F.len / 2, fh + 10, "#fff4dc", st.signBg, 2, { border: mix(st.signBg, "#ffffff", 0.55), shine: true });
+        const signTxt = st.sign || (st.awnings ? ctx.signText : null), signBg = st.signBgs ? st.signBgs[(ctx.variant == null ? ctx.h0 : ctx.variant) % st.signBgs.length] : st.signBg;
+        if (signTxt && st.fascia && isFront) wallSign(ctx, F, signTxt, F.len / 2, fh + 10, "#fff4dc", signBg, CV.textWidth(signTxt) * 2 + 12 > F.len * 30 ? 1 : 2, { border: mix(signBg, "#ffffff", 0.55), shine: true });
         poly(g, quad(F, 0, F.len, H - 2, ctx.Hw), shade(col, 1.1));
       }
       if (st.roof === "gable") pitched(ctx, "gable", st.roofPx);
@@ -1239,7 +1290,7 @@
             poly(g, quad(F, uc - 0.38, uc + 0.38, 0, 24), litF ? "#8a8e94" : "#6e7278");
             for (let z = 3; z < 24; z += 3) poly(g, quad(F, uc - 0.38, uc + 0.38, z, z + 1), litF ? "#6e7278" : "#585c62");
           }
-          wallSign(ctx, F, "MILLBROOK WORKS", F.len / 2, fh + 8, "#ffffff", "#2a3a4a", 2, { border: "#c8d2dc" });
+          wallSign(ctx, F, ctx.variant == null ? "MILLBROOK WORKS" : ["IRONWORKS", "FOUNDRY", "STEEL MILL", "MACHINE WORKS", "BREWERY", "PRINT WORKS", "TEXTILES", "BOILER WORKS"][ctx.variant], F.len / 2, fh + 8, "#ffffff", "#2a3a4a", 2, { border: "#c8d2dc" });
         }
         poly(g, quad(F, 0, F.len, H - 2, ctx.Hw), shade(col, 1.1));
       }
@@ -1283,6 +1334,211 @@
       }
     }
 
+    // --- v3 styles (view.md 3.8) ---------------------------------------------------------------------------
+    // Row houses: a terrace of two-floor units in alternating paint, one door each on the street side, a long
+    // gable roof with a chimney on every other party wall.
+    function drawRowHouses(ctx) {
+      const g = ctx.g, { x0, y0, x1, y1, stage, H } = ctx, fh = ctx.st.floorPx;
+      const alongX = (x1 - x0) >= (y1 - y0), long = alongX ? x1 - x0 : y1 - y0, n = Math.max(2, Math.round(long / 1.7));
+      const brick = (ctx.variant || 0) % 3 === 2;
+      const base2 = brick ? "#b06a4a" : HOUSE_PAINT[(ctx.h0 >>> 3) % HOUSE_PAINT.length];
+      const alt = shade(mix(base2, GREY, FADE[stage]), DIM[stage]), first = brick ? shade(mix("#a8573f", GREY, FADE[stage]), DIM[stage]) : ctx.wall;
+      for (const f of FACES) {
+        const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, isLong = (f === "s" || f === "n") === alongX;
+        const k = litF ? 1 : 0.8, isDoor = f === ctx.p.face || (isLong && !FACES.includes(ctx.p.face) && litF);
+        ctx.spans = [];
+        const units = isLong ? n : 1, uw = F.len / units;
+        for (let i = 0; i < units; i++) {
+          const paint = isLong ? (i % 2 ? alt : first) : first, col = shade(paint, k);
+          poly(g, quad(F, i * uw, (i + 1) * uw, 0, ctx.Hw), col);
+          if (brick) for (let z = 3; z < H; z += 3) poly(g, quad(F, i * uw, (i + 1) * uw, z, z + 1), shade(col, 0.9));
+          poly(g, quad(F, i * uw, (i + 1) * uw, 0, 3), shade(col, 0.66));
+          if (isLong && i) poly(g, quad(F, i * uw - 0.015, i * uw + 0.015, 0, H), shade(col, 0.7)); // party wall
+          if (stage >= 1) grime(ctx, { face: F.face, len: uw, at: (u, z) => F.at(i * uw + u, z), out: (u, z, d) => F.out(i * uw + u, z, d), rect: F.rect }, H, stage, ctx.h0 + i * 7 + f.charCodeAt(0), col, "under");
+          for (let fl = 0; fl < ctx.floors; fl++) {
+            const us = isDoor && fl === 0 ? [i * uw + uw * 0.7] : [i * uw + uw * 0.3, i * uw + uw * 0.7];
+            us.forEach((uc, j) => {
+              const ws = windowState(ctx, i * 6 + fl * 2 + j, f, units * 6);
+              win(ctx, F, uc - 0.12, uc + 0.12, fl * fh + 7, fl * fh + 18, Object.assign(ws, { frame: ctx.trim, curtain: CURTAIN[(ctx.h0 + i + j + fl) % CURTAIN.length], mullion: true, sill: ctx.trim, idx: i * 6 + fl * 2 + j }));
+            });
+          }
+          if (isDoor) {
+            const uc = i * uw + uw * 0.28;
+            door(ctx, F, uc, 0.2, 17, { color: stage >= 3 ? "#6a5238" : DOOR[(ctx.h0 + i) % DOOR.length], frame: ctx.trim, boarded: stage >= 3, step: true });
+            poly(g, [F.at(uc - 0.16, 21), F.at(uc + 0.16, 21), F.out(uc + 0.16, 18, 0.12), F.out(uc - 0.16, 18, 0.12)], shade(ctx.roofC, k));
+            if (stage < 3 && i === 0) ctx.porch = F.at(uc + 0.16, 13);
+          }
+        }
+        if (stage >= 3) grime(ctx, F, H, stage, ctx.h0 + f.charCodeAt(0), shade(first, k), "over");
+        poly(g, quad(F, 0, F.len, H - 3, H), "rgba(0,0,0,0.18)");
+      }
+      ctx.spans = null;
+      const roof = pitched(ctx, "gable", ctx.st.roofPx, { alongX });
+      const step = long / n;
+      for (let i = 2; i < n; i += 2) {
+        const t = (alongX ? x0 : y0) + i * step - 0.13;
+        if (alongX) chimney(ctx, t, roof.ym - 0.13, ctx.Hw + 10, ctx.Hw + ctx.st.roofPx + 6, brick ? "#7a4a38" : "#9a4a38");
+        else chimney(ctx, roof.xm - 0.13, t, ctx.Hw + 10, ctx.Hw + ctx.st.roofPx + 6, brick ? "#7a4a38" : "#9a4a38");
+      }
+    }
+
+    // Warehouse: corrugated walls, roller doors with yellow frames, a strip of high windows, a low pitched roof.
+    function drawWarehouse(ctx) {
+      const g = ctx.g, { x0, y0, x1, y1, H } = ctx;
+      for (const f of FACES) {
+        const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, col = litF ? ctx.wall : shade(ctx.wall, 0.8);
+        poly(g, quad(F, 0, F.len, 0, ctx.Hw), col);
+        for (let u = 0.04; u < F.len; u += 0.1) poly(g, quad(F, u, u + 0.03, 4, H), shade(col, 0.88));
+        poly(g, quad(F, 0, F.len, 0, 4), litF ? "#7a7c80" : "#626468");
+        poly(g, quad(F, 0.1, F.len - 0.1, H - 9, H - 5), litF ? "#3a5a7a" : "#2e4a66");
+        for (let u = 0.1; u < F.len - 0.4; u += 0.5) ctx.windows.push(quad(F, u + 0.04, u + 0.4, H - 9, H - 5));
+        if (f === ctx.p.face || (litF && !FACES.includes(ctx.p.face))) {
+          const n = Math.max(1, Math.floor(F.len / 1.5));
+          for (let i = 0; i < n; i++) {
+            const uc = (i + 0.5) * F.len / n;
+            poly(g, quad(F, uc - 0.36, uc + 0.36, 0, 22), "#e0b830");
+            poly(g, quad(F, uc - 0.32, uc + 0.32, 0, 20), litF ? "#8a8e94" : "#6e7278");
+            for (let z = 3; z < 20; z += 3) poly(g, quad(F, uc - 0.32, uc + 0.32, z, z + 1), litF ? "#6e7278" : "#585c62");
+          }
+          door(ctx, F, Math.min(F.len - 0.2, (n - 0.5) * F.len / n + 0.55), 0.16, 16, { color: "#3a4a5a", frame: "#2a2a2a" });
+        }
+        poly(g, quad(F, 0, F.len, H - 2, ctx.Hw), shade(col, 1.1));
+      }
+      pitched(ctx, "gable", ctx.st.roofPx, { o: 0.06 });
+    }
+
+    // Station: a stone hall with tall windows, a canopy and the STATION board over the entrance, a clock turret.
+    function drawStation(ctx) {
+      const g = ctx.g, { x0, y0, x1, y1, H, st } = ctx;
+      const front = FACES.includes(ctx.p.face) ? ctx.p.face : LIT;
+      for (const f of FACES) {
+        const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, col = litF ? ctx.wall : shade(ctx.wall, 0.82);
+        poly(g, quad(F, 0, F.len, 0, ctx.Hw), col);
+        poly(g, quad(F, 0, F.len, 0, 5), shade(col, 0.72));
+        poly(g, quad(F, 0, F.len, H - 4, H), shade(col, 1.1));
+        const n = Math.max(1, Math.round(F.len * 1.4)), du = f === front ? (f === ctx.p.face ? entryU(ctx, F) : F.len / 2) : -9;
+        for (let i = 0; i < n; i++) {
+          const uc = (i + 0.5) * F.len / n;
+          if (Math.abs(uc - du) < 0.4) continue;
+          win(ctx, F, uc - 0.13, uc + 0.13, 7, H - 9, { frame: "#f2ede2", mullion: true, state: 0, idx: i });
+          poly(g, [F.at(uc - 0.13, H - 9), F.at(uc + 0.13, H - 9), F.at(uc, H - 5)], litF ? "#8cbfe4" : "#6b9cc6");
+        }
+        if (f === front) {
+          door(ctx, F, du, 0.4, 20, { color: "#2a3a4c", frame: "#f2ede2", glazed: true });
+          const a = Math.max(0.05, du - 1.2), b = Math.min(F.len - 0.05, du + 1.2), r = F.rect(a, b, 0, 0.28); // the canopy stays inside the sprite box's 0.3-tile margin
+          boxAt(g, r[0], r[1], r[2], r[3], 22, 25, "#3a4a5a", "#56667a");
+          for (const u of [a + 0.08, b - 0.12]) { const c = F.rect(u, u + 0.04, 0.22, 0.26); boxAt(g, c[0], c[1], c[2], c[3], 0, 22, "#3a4a5a"); }
+          wallSign(ctx, F, st.sign, du, H - 2, "#ffffff", st.signBg, 1, { border: "#8ab0d8" });
+        }
+      }
+      flatRoof(ctx, ctx.roofC, { cope: shade(ctx.wall, 1.12) });
+      const cx = (x0 + x1) / 2 - 0.25, cy = (y0 + y1) / 2 - 0.25, Hd = ctx.Hw;
+      boxAt(g, cx, cy, cx + 0.5, cy + 0.5, Hd, Hd + 16, ctx.wall);
+      for (const f of FACES) { const F = faceFn(f, cx, cy, cx + 0.5, cy + 0.5), c = F.at(F.len / 2, Hd + 10); CV.ellipse(g, c[0], c[1], 3, 3, "#ffffff"); g.fillStyle = "#222"; g.fillRect(Math.round(c[0]), Math.round(c[1]) - 2, 1, 2); }
+      poly(g, [P(cx - 0.05, cy - 0.05, Hd + 16), P(cx + 0.55, cy - 0.05, Hd + 16), P(cx + 0.55, cy + 0.55, Hd + 16), P(cx + 0.25, cy + 0.25, Hd + 26), P(cx - 0.05, cy + 0.55, Hd + 16)], "#3a6a5a");
+      poly(g, [P(cx - 0.05, cy + 0.55, Hd + 16), P(cx + 0.55, cy + 0.55, Hd + 16), P(cx + 0.25, cy + 0.25, Hd + 26)], "#4f8a72");
+    }
+
+    // A civic hall (police, fire station, cinema, mall, clubhouse and any unknown style): walls, rows of
+    // windows, an entrance and a name board, with each style's own features.
+    function drawHall(ctx) {
+      const g = ctx.g, { x0, y0, x1, y1, H, st } = ctx, s = ctx.p.style;
+      const fh = st.floorPx, floors = ctx.floors;
+      const front = FACES.includes(ctx.p.face) ? ctx.p.face : LIT;
+      for (const f of FACES) {
+        const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, col = litF ? ctx.wall : shade(ctx.wall, 0.8), isFront = f === front;
+        poly(g, quad(F, 0, F.len, 0, ctx.Hw), col);
+        if (s === "fire_station") for (let z = 2; z < H; z += 3) poly(g, quad(F, 0, F.len, z, z + 1), shade(col, 0.88));
+        if (s === "clubhouse") for (let z = 3; z < H; z += 3) poly(g, quad(F, 0, F.len, z, z + 1), shade(col, 0.92));
+        poly(g, quad(F, 0, F.len, 0, 4), shade(col, 0.68));
+        const du = isFront ? (f === ctx.p.face ? Math.max(0.4, Math.min(F.len - 0.4, entryU(ctx, F))) : F.len / 2) : -9;
+        const n = Math.max(1, Math.round(F.len * (s === "mall" || s === "cinema" ? 0.6 : 1.2)));
+        for (let fl = 0; fl < floors; fl++) {
+          if (fl > 0) poly(g, quad(F, 0, F.len, fl * fh, fl * fh + 2), shade(col, 0.85));
+          if (s === "cinema" && fl > 0) continue; // a blank auditorium wall
+          for (let i = 0; i < n; i++) {
+            const uc = (i + 0.5) * F.len / n;
+            if (fl === 0 && isFront && (Math.abs(uc - du) < (s === "mall" ? 1.1 : 0.45) || s === "fire_station")) continue;
+            const w = s === "mall" ? 0.5 : 0.13;
+            win(ctx, F, uc - w, uc + w, fl * fh + 7, fl * fh + fh - 6, { frame: s === "clubhouse" ? "#ffffff" : "#e8e4dc", mullion: true, state: 0, idx: i + fl * n });
+          }
+        }
+        if (isFront) {
+          if (s === "fire_station") { // the engine bays
+            const bays = Math.max(2, Math.floor(F.len / 1.6));
+            for (let i = 0; i < bays; i++) {
+              const uc = (i + 0.5) * F.len / bays;
+              poly(g, quad(F, uc - 0.36, uc + 0.36, 0, 24), "#f2ede2");
+              poly(g, quad(F, uc - 0.32, uc + 0.32, 0, 22), litF ? "#c8281e" : "#a8201a");
+              for (let k = 0; k < 3; k++) poly(g, quad(F, uc - 0.28 + k * 0.2, uc - 0.12 + k * 0.2, 12, 19), "#8cbfe4");
+            }
+          } else if (s === "mall") { // a glass entrance hall
+            poly(g, quad(F, du - 1, du + 1, 0, fh + 4), "#3a4a5a");
+            for (let u = du - 0.95; u < du + 0.95; u += 0.2) poly(g, quad(F, u, u + 0.17, 2, fh + 2), litF ? "#8cbfe4" : "#6b9cc6");
+            ctx.windows.push(quad(F, du - 0.95, du + 0.95, 2, fh + 2));
+          } else door(ctx, F, du, s === "cinema" ? 0.6 : 0.3, 19, { color: "#2a3a4c", frame: "#e8e4dc", glazed: true, step: true });
+          if (s === "cinema") { // the marquee with its bulbs
+            const r = F.rect(du - 1.0, du + 1.0, 0, 0.4);
+            boxAt(g, r[0], r[1], r[2], r[3], 21, 31, "#f2e6c8", "#d8c8a0");
+            const Fo = { face: F.face, at: (u, z) => F.out(u, z, 0.4) };
+            wallSign(ctx, Fo, st.sign, du, 26, "#c8283a", null, 1);
+            for (let u = du - 0.95; u < du + 0.95; u += 0.12) { const p = F.out(u, 31, 0.4); g.fillStyle = "#ffe48a"; g.fillRect(Math.round(p[0]), Math.round(p[1]) - 1, 1, 1); ctx.lights.push([p[0], p[1], "#ffd86a"]); }
+            wallSign(ctx, F, st.sign, du, H - 12, "#ffffff", st.signBg, 2, { border: "#ffd86a" });
+          } else if (s === "clubhouse") {
+            const r = F.rect(0.1, F.len - 0.1, 0, 0.4);
+            boxAt(g, r[0], r[1], r[2], r[3], 18, 20, "#8a6a44");
+            for (let u = 0.15; u < F.len - 0.1; u += 0.6) { const c = F.rect(u, u + 0.05, 0.34, 0.39); boxAt(g, c[0], c[1], c[2], c[3], 0, 18, "#f2ede2"); }
+            wallSign(ctx, F, st.sign, F.len / 2, H - 4, "#ffffff", st.signBg, 1);
+          } else wallSign(ctx, F, st.sign || "", du, Math.min(H - 8, fh + 10), "#ffffff", st.signBg || "#2a3a4a", F.len > 3 ? 2 : 1, { border: "#c8d2dc" });
+          if (s === "police") for (const u of [du - 0.3, du + 0.3]) { const p = F.out(u, 22, 0.06); g.fillStyle = "#2a4aa8"; g.fillRect(Math.round(p[0]) - 1, Math.round(p[1]) - 3, 3, 3); ctx.lights.push([p[0], p[1] - 2, "#5a8aff"]); }
+        }
+        poly(g, quad(F, 0, F.len, H - 2, ctx.Hw), shade(col, 1.1));
+      }
+      if (st.roof === "gable") { pitched(ctx, "gable", st.roofPx); return; }
+      flatRoof(ctx, ctx.roofC, { cope: shade(ctx.wall, 1.12) });
+      const Hd = ctx.H;
+      if (s === "fire_station") { // the hose tower
+        const tx = x0 + 0.15, ty = y0 + 0.15;
+        boxAt(g, tx, ty, tx + 0.7, ty + 0.7, Hd, Hd + 36, ctx.wall);
+        const F = faceFn(LIT, tx, ty, tx + 0.7, ty + 0.7);
+        for (let z = Hd + 6; z < Hd + 32; z += 9) poly(g, quad(F, 0.25, 0.45, z, z + 5), "#3a4a5a");
+        boxAt(g, tx - 0.04, ty - 0.04, tx + 0.74, ty + 0.74, Hd + 36, Hd + 39, shade(ctx.wall, 0.7));
+      } else if (s === "mall") {
+        for (let x = x0 + 1; x < x1 - 1.4; x += 2.2) poly(g, top(x, y0 + 1, x + 1.2, y1 - 1, Hd + 1), "#9cc8ea");
+        acUnit(ctx, x1 - 1.2, y0 + 0.5, Hd); acUnit(ctx, x0 + 0.5, y1 - 1, Hd);
+      } else { acUnit(ctx, x0 + 0.4, y0 + 0.4, Hd); if (x1 - x0 > 3) acUnit(ctx, x1 - 0.9, y0 + 0.5, Hd); }
+    }
+
+    // Stadium: an arcaded concrete ring, tiers of seats stepping down to the pitch, a floodlight at each corner.
+    function drawStadium(ctx) {
+      const g = ctx.g, { x0, y0, x1, y1, H } = ctx;
+      for (const f of FACES) {
+        const F = faceFn(f, x0, y0, x1, y1), litF = f === LIT, col = litF ? ctx.wall : shade(ctx.wall, 0.8);
+        poly(g, quad(F, 0, F.len, 0, H), col);
+        for (let u = 0.2; u < F.len - 0.3; u += 0.5) { poly(g, quad(F, u, u + 0.3, 0, 14), shade(col, 0.55)); const q = quad(F, u, u + 0.3, 20, H - 6); poly(g, q, shade(col, 0.72)); ctx.windows.push(q); }
+        poly(g, quad(F, 0, F.len, H - 3, H), shade(col, 1.12));
+      }
+      const tiers = 4, d = Math.min(x1 - x0, y1 - y0) * 0.09;
+      for (let k = 0; k < tiers; k++) {
+        const a = k * d, z = H - k * 7;
+        poly(g, top(x0 + a, y0 + a, x1 - a, y1 - a, z), k % 2 ? "#5a6a8a" : "#8a3a3a");
+        poly(g, top(x0 + a + d * 0.5, y0 + a + d * 0.5, x1 - a - d * 0.5, y1 - a - d * 0.5, z), k % 2 ? "#6a7a9a" : "#a84a4a");
+      }
+      const a = tiers * d, zp = H - tiers * 7, snow = CV.SEASON[ctx.season] && CV.SEASON[ctx.season].snow;
+      poly(g, top(x0 + a, y0 + a, x1 - a, y1 - a, zp), snow ? "#e8eeec" : "#4f9a3a");
+      const px0 = x0 + a + 0.3, py0 = y0 + a + 0.3, px1 = x1 - a - 0.3, py1 = y1 - a - 0.3, line = snow ? "#c8d0d0" : "#e8f2e0";
+      for (const [p0, q0, p1, q1] of [[px0, py0, px1, py0 + 0.04], [px0, py1 - 0.04, px1, py1], [px0, py0, px0 + 0.04, py1], [px1 - 0.04, py0, px1, py1], [(px0 + px1) / 2 - 0.02, py0, (px0 + px1) / 2 + 0.02, py1]]) poly(g, top(p0, q0, p1, q1, zp), line);
+      for (const [cx, cy] of [[x0 + 0.2, y0 + 0.2], [x1 - 0.3, y0 + 0.2], [x0 + 0.2, y1 - 0.3], [x1 - 0.3, y1 - 0.3]]) {
+        boxAt(g, cx, cy, cx + 0.1, cy + 0.1, H, H + 40, "#8a8e96");
+        const p = P(cx + 0.05, cy + 0.05, H + 44);
+        g.fillStyle = "#3a3e46"; g.fillRect(Math.round(p[0]) - 6, Math.round(p[1]) - 2, 12, 6);
+        g.fillStyle = "#fff6c8"; g.fillRect(Math.round(p[0]) - 5, Math.round(p[1]) - 1, 10, 3);
+        ctx.lights.push([p[0], p[1], "#fff6c8"]);
+      }
+    }
+    art._bld = { win, door, wallSign, awning, flatRoof, pitched, chimney, acUnit, entryU, grime, baseGrime, copingStains, windowState };
+    art.styleDrawers = art.styleDrawers || {};
+
     // Scaffolding over the visible walls while works are on.
     function scaffold(ctx) {
       const g = ctx.g, { x0, y0, x1, y1 } = ctx, H = ctx.Hw;
@@ -1296,7 +1552,21 @@
 
     // --- the building sprite ---------------------------------------------------------------------------
     // look: { stage 0..4, units: [{unit, vacant, listing}], works, ... } (homes only).
+    // A place with a variant is drawn as its canonical copy (CV.canonPlace: id style#variant at 0,0) and moved
+    // into place by whole pixels, so every copy of a sprite key is the same pixels wherever it stands.
+    // Millbrook's places (no variant) draw in place, as v2 did.
     art.building = function (p, look, season) {
+      if (CV.variantOf(p) == null || (p.x === 0 && p.y === 0 && String(p.id).indexOf("#") > 0)) return drawBuilding(p, look, season);
+      const b = drawBuilding(CV.canonPlace(p), look, season);
+      const o = proj.toWorld(p.x, p.y), z = proj.toWorld(0, 0), dx = o[0] - z[0], dy = o[1] - z[1];
+      const mv = q => q && [q[0] + dx, q[1] + dy].concat(q.slice(2));
+      b.ox += dx; b.oy += dy; b.id = p.id;
+      b.windows = b.windows.map(quad => quad.map(mv));
+      b.lights = b.lights.map(mv);
+      b.porch = mv(b.porch); b.neon = mv(b.neon); b.smoke = mv(b.smoke); b.beacon = mv(b.beacon);
+      return b;
+    };
+    function drawBuilding(p, look, season) {
       look = look || {};
       const st = STYLE[p.style] || STYLE.house;
       const isHome = p.kind === "home";
@@ -1320,13 +1590,20 @@
       switch (p.style) {
         case "house": drawHouse(ctx); break;
         case "big_house": drawBigHouse(ctx); break;
-        case "apartments": drawApartments(ctx); break;
-        case "tower": drawTower(ctx); break;
+        case "apartments": if (variant != null && art.styleDrawers.apartments) art.styleDrawers.apartments(ctx); else drawApartments(ctx); break;
+        case "tower": if (variant != null && art.styleDrawers.tower) art.styleDrawers.tower(ctx); else drawTower(ctx); break;
+        case "row_houses": drawRowHouses(ctx); break;
+        case "warehouse": drawWarehouse(ctx); break;
+        case "station": drawStation(ctx); break;
+        case "library": drawCivic(ctx); break;
+        case "stadium": drawStadium(ctx); break;
+        case "police": case "fire_station": case "cinema": case "mall": case "clubhouse": drawHall(ctx); break;
+        case "residential_tower": case "hotel": if (art.styleDrawers[p.style]) art.styleDrawers[p.style](ctx); else drawHall(ctx); break;
         case "hospital": drawHospital(ctx); break;
         case "school": drawSchool(ctx); break;
         case "city_hall": case "bank": drawCivic(ctx); break;
         case "factory": drawFactory(ctx); break;
-        default: drawShop(ctx);
+        default: if (CV.hasStyle(p.style)) drawShop(ctx); else drawHall(ctx);
       }
       // the front corner catches the light
       if (proj.kind === "iso") {
@@ -1339,7 +1616,39 @@
       if (look.works) scaffold(ctx);
       const litShare = isHome ? 70 : p.style === "tower" ? 45 : 60;
       return { c: S.c, ox: S.ox, oy: S.oy, windows: ctx.windows, lights: ctx.lights, height: box.height, id: p.id, litShare,
-        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: null };
+        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: CV.spriteKey(p, look, season), sid };
+    }
+
+    // Night glow: a sprite's lit windows as a small canvas of their own, shared by every copy of a sprite key
+    // (and of a share). Which windows light is hashed from the sid ("style#variant"), so all copies agree; a
+    // Millbrook place hashes its id, which gives v2's glow pixel for pixel. Returns { c, wx, wy } (world px of
+    // the canvas's top-left) or null when no window is lit. share: percent of windows lit (default litShare).
+    const glowCache = new Map();
+    art.glow = function (b, share) {
+      const pct = share == null ? b.litShare : share;
+      const ck = (b.key || "id:" + b.id + "@" + b.ox + "," + b.oy) + "|" + pct;
+      let gl = glowCache.get(ck);
+      if (gl === undefined) {
+        const seed = b.sid || b.id, win = b.windows.filter((q, k) => hash(seed + ":" + k) % 100 < pct);
+        gl = null;
+        if (win.length) {
+          // a keyed sprite's windows relative to its canvas (the same for every copy); Millbrook's in world px, as v2
+          const bx = String(seed).indexOf("#") > 0 ? b.ox : 0, by = bx ? b.oy : 0;
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          const loc = bx ? win.map(q => q.map(([x, y]) => [x - bx, y - by])) : win;
+          for (const q of loc) for (const [x, y] of q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+          x0 = Math.floor(x0); y0 = Math.floor(y0);
+          const c = CV.canvas(x1 - x0 + 2, y1 - y0 + 2), q = c.getContext("2d");
+          q.translate(-x0, -y0);
+          for (const w of loc) CV.poly(q, w, "#e8a440");
+          q.fillStyle = "#ffd890";
+          for (const w of loc) { const cx = (w[0][0] + w[2][0]) / 2, cy = (w[0][1] + w[2][1]) / 2; q.fillRect(Math.round(cx) - 1, Math.round(cy) - 1, 2, 2); }
+          gl = { c, dx: x0 + bx - b.ox, dy: y0 + by - b.oy };
+        }
+        if (glowCache.size >= 4096) glowCache.clear();
+        glowCache.set(ck, gl);
+      }
+      return gl && { c: gl.c, wx: b.ox + gl.dx, wy: b.oy + gl.dy };
     };
 
     // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty; in

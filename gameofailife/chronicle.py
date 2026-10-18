@@ -94,6 +94,28 @@ EVENT_TAGS: dict[str, tuple[str, int]] = {
     "birth": ("life", 2),
     "moved_out": ("home", 2),
     "came_of_age": ("life", 1),
+    # v3 (PLAN 3.1): social life, family, health, work and money for both tiers, and townsfolk comings and goings
+    "talk": ("social", 0),
+    "flirt": ("social", 0),
+    "rival": ("social", 1),
+    "row": ("social", 1),
+    "moved_in": ("family", 2),
+    "engaged": ("family", 2),
+    "divorce": ("family", 2),
+    "expecting": ("family", 1),
+    "ill": ("health", 1),  # a cold passes importance 0
+    "recovered": ("health", 0),
+    "doctor": ("health", 0),
+    "chronic": ("health", 1),
+    "raise": ("work", 1),
+    "warning": ("work", 1),
+    "quit": ("work", 1),
+    "expense": ("money", 1),  # importance by amount
+    "windfall": ("money", 1),  # importance by amount
+    "loan": ("money", 1),
+    "arrived": ("life", 1),
+    "left_town": ("life", 1),
+    "digest": ("life", 1),
     # the fallback; a test keeps it unused
     "other": ("life", 0),
 }
