@@ -153,8 +153,9 @@ async function run(browser, base, server, name, size, touch) {
     && /^Day /.test(document.getElementById("clock").textContent), null, 15000, "the welcome");
   check(await page.evaluate(() => !!(window.CityView && typeof CityView.create === "function")), "the view's scripts loaded");
   const order = await page.evaluate(() => [...document.scripts].map(s => s.getAttribute("src")));
-  check(JSON.stringify(order) === JSON.stringify(["view/proj.js", "view/art.js", "view/buildings.js", "view/actors.js",
-    "view/scene.js", "view/movers.js", "view/camera.js", "view/minimap.js", "view/view.js", "dashboard.js", "game.js"]),
+  check(JSON.stringify(order) === JSON.stringify(["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod",
+    "lowart", "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view"].map(n => `view/${n}.js`)
+    .concat(["dashboard.js", "game.js"])),
   "the PLAN 3.12 script order", order);
   check(await page.evaluate(() => !document.getElementById("toast")), "the old #toast is gone");
   await page.waitForTimeout(800);

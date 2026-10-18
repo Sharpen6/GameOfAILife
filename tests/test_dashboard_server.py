@@ -36,8 +36,9 @@ CLIENT = ROOT / "client"
 TIMEOUT = 3.0
 SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_log", "scores", "valence",
                "due", "pending_emergency", "roll", "base_p", "hit"}
-SCRIPTS = ["view/proj.js", "view/art.js", "view/buildings.js", "view/actors.js", "view/scene.js", "view/movers.js",
-           "view/camera.js", "view/minimap.js", "view/view.js", "dashboard.js", "game.js"]  # PLAN 3.12, in order
+SCRIPTS = [f"view/{n}.js" for n in ("proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart",
+                                    "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view")] + \
+    ["dashboard.js", "game.js"]  # view.md 3.1 (v3), in order
 STYLES = ["style.css", "view/view.css", "dashboard.css"]
 STATS_BYTES = 20 * 1024
 

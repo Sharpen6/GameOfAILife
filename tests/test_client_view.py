@@ -22,8 +22,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 VIEW = ROOT / "client" / "view"
 DEV = ROOT / "client" / "dev"
 
-VIEW_SCRIPTS = ["proj.js", "art.js", "buildings.js", "actors.js", "scene.js", "movers.js",
-                "camera.js", "minimap.js", "view.js"]
+VIEW_SCRIPTS = ["proj.js", "art.js", "buildings.js", "towers.js", "rail_art.js", "actors.js", "region.js", "lod.js",
+                "lowart.js", "scene.js", "movers.js", "crowd.js", "trains.js", "pings.js", "camera.js", "minimap.js",
+                "view.js"]  # view.md 3.1 without the deferred dash_* files (PLAN 3, v3-skel-view)
 DEV_SCRIPTS = ["fixture_town.js", "fake_state.js"]
 FACADE = ["create", "setTown", "setState", "select", "focus", "highlight", "setOverlay", "ping",
           "setInset", "camera", "setMode", "start", "stop"]

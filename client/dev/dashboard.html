@@ -108,7 +108,7 @@
       const host = F.createHost({ browser: q.has("browser"), slow: q.has("slow"), fresh: q.has("fresh"),
         speed: Number(q.get("speed") || 1), seed: Number(q.get("seed") || 7) });
       const canvas = document.getElementById("map");
-      const VIEW_SCRIPTS = ["proj", "art", "buildings", "actors", "scene", "movers", "camera", "minimap", "view"];
+      const VIEW_SCRIPTS = ["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart", "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view"];
       let view = null, speed = 1, state = null;
       const viewOpts = {
         onPick: (hit, ev) => Dash.pick(hit, ev),
