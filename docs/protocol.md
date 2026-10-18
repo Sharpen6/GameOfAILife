@@ -1442,7 +1442,10 @@ Millbrook's school.
 | Stats | `region` | Only in the `region` world: `{"population", "named", "folk", "births", "deaths", "births_today", "deaths_today", "jobs", "commute", "train", "bus"}` with `jobs` `{"total", "filled", "open"}`, `commute` `{"walk", "car", "bus", "train", "bike"}`, `train` `{"riders_now", "riders_today", "lines": [{"id", "riders_today"}]}` and `bus` `{"riders_now", "riders_today"}`. |
 
 `city` and `districts` in the stats count the townsfolk too (the region's districts follow Millbrook's in the
-`region` world). [`get_folk`](#get_folk) lists every townsperson; a view asks for it again when `stats.folk.v`
+`region` world): the counts (`population`, `adults`, `children`, `working`, `students`, `retired`, `out_of_work`),
+the `mood`, `health` and `needs` means, `luck` (God's changes on townsfolk included), and `wealth` (`total` is
+everyone's worth; `median`, `top10_share`, `gini` and `in_debt` cover every adult), and each district's `people`,
+`mood` and `median_worth`. `recent_deaths`, `homes` and `life` keep their own rules. [`get_folk`](#get_folk) lists every townsperson; a view asks for it again when `stats.folk.v`
 changes.
 
 The invariant every frame keeps: `len(crowd) / 4` + the townsfolk inside places + those aboard a train or bus + car

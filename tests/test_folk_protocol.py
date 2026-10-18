@@ -5,7 +5,9 @@ test_port's python_quiet does), with a God view that keeps every push; then two 
 the crowd invariant on every frame, `occ` and the region `lots`/`homes` cadence, folk `get_agent`, `set_luck` and
 `get_folk`, the richest title and `stats.people` named-only, at most 60 folk-only News lines a day, the welcome
 and `welcome.town` sizes, and the 60 staying in Millbrook for three days. TestPortKeys compares the recursive key
-sets of the welcome, a frame, `stats`, `get_folk` and the pages with the JS port's LocalHost.
+sets of the welcome, a frame, `stats`, `get_folk` and the pages with the JS port's LocalHost. TestFolkCityStats
+checks that `stats.city` and `stats.districts` count the townsfolk's needs, luck, worths, retired and out of work,
+with the same numbers in JS.
 """
 
 from __future__ import annotations
@@ -411,6 +413,104 @@ class TestPortKeys(unittest.TestCase):
         if probe.stdout.strip() != "true":
             self.skipTest("the JS townsfolk (port/src/folk.js) are not in this build: the integrator runs this half")
         self.compare(FOLK)
+
+
+# --- the townsfolk in stats.city and stats.districts ------------------------------------------------------------
+
+CITY_STATS_JS = r"""
+const G = require(process.argv[1] + "/port/tools/engine.cjs").load();
+const sim = new G.sim.Simulation(1, null, null, 1, { world: "region", folk: Number(process.argv[2]) });
+for (let i = 0; i < 200; i++) sim.step();
+for (let i = 0; i < 200; i++) sim.set_luck(`f${i}`, 95);
+for (let i = 0; i < 70; i++) sim.step();
+const st = sim.stats_json(true);
+process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts }));
+"""
+
+STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth")
+
+
+def city_stats_python(folk: int) -> tuple[Simulation, dict]:
+    """CITY_STATS_JS's run in Python: 200 steps, God's luck 95 on f0-f199, 70 steps."""
+    sim = Simulation(1, world="region", folk=folk)
+    for _ in range(200):
+        sim.step()
+    for i in range(200):
+        assert sim.set_luck(f"f{i}", 95)
+    for _ in range(70):
+        sim.step()
+    return sim, sim.stats_json(full=True)
+
+
+class TestFolkCityStats(unittest.TestCase):
+    """`stats.city` and `stats.districts` count the townsfolk's needs, luck, worths, retired and out of work too
+    (stats.folk_parts over `Folk.city_parts`), in Python and JS alike."""
+
+    @classmethod
+    def setUpClass(cls):
+        from gameofailife import stats
+        cls.sim, cls.st = sim, st = city_stats_python(FOLK)
+        f = sim.folk
+        cls.named = [a for a in sim.agents.values() if a.alive]
+        cls.folk = f.living()
+        cls.folk_adult_worths = [f.worth(sim, p) for p in cls.folk if p.age >= 18]
+        cls.named_adult_worths = [p.worth for p in stats._people(sim) if p.agent.is_adult]
+
+    @classmethod
+    def tearDownClass(cls):
+        for name in ("sim", "st", "named", "folk"):
+            setattr(cls, name, None)
+        gc.collect()
+
+    def test_needs_cover_everyone(self):
+        city = self.st["city"]
+        n = len(self.named) + len(self.folk)
+        self.assertEqual(city["population"], n)
+        for k, v in city["needs"].items():
+            named_mean = sum(a.needs[k] for a in self.named) / len(self.named)
+            everyone = (sum(a.needs[k] for a in self.named) + sum(p.needs[k] for p in self.folk)) / n
+            with self.subTest(k):
+                self.assertGreater(v, 15, city["needs"])  # 1,060 people's needs, never the 60's sums over 1,060
+                self.assertTrue(abs(v - everyone) <= 15 or abs(v - named_mean) <= 15, (k, v, everyone, named_mean))
+
+    def test_gods_luck_on_townsfolk_shows(self):
+        luck = self.st["city"]["luck"]
+        named_touched = sum(1 for a in self.named if a.luck != 50)
+        self.assertGreaterEqual(luck["touched"], 200 + named_touched - 5, luck)  # f0-f199, less any who died
+        self.assertGreaterEqual(luck["raised"], 195, luck)
+        self.assertGreater(luck["mean"], 50, luck)
+
+    def test_worths_cover_everyone(self):
+        from gameofailife import stats
+        w = self.st["city"]["wealth"]
+        adults = self.named_adult_worths + self.folk_adult_worths
+        self.assertEqual(w["median"], stats._int(stats.median(adults)))
+        self.assertEqual(w["gini"], stats.gini(adults))
+        for d in self.st["districts"]:
+            if d["people"] >= 10:
+                with self.subTest(d["id"]):
+                    self.assertNotEqual(d["median_worth"], 0, d)
+
+    def test_retired_and_out_of_work_count_townsfolk(self):
+        city = self.st["city"]
+        retired = sum(1 for p in self.folk if p.age >= 65 and p.job is None)
+        idle = sum(1 for p in self.folk if 18 <= p.age < 65 and p.job is None)
+        named_retired = sum(1 for a in self.named if not a.job and a.age >= 65)
+        named_idle = sum(1 for a in self.named if a.is_adult and not a.job and a.age < 65)
+        self.assertEqual(city["retired"], retired + named_retired)
+        self.assertEqual(city["out_of_work"], idle + named_idle)
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_the_js_twin_gives_the_same_numbers(self):
+        run = subprocess.run([NODE, "-e", CITY_STATS_JS, str(ROOT), str(FOLK)], capture_output=True, text=True,
+                             timeout=300)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        js = json.loads(run.stdout)
+        for k in STATS_FIELDS:
+            with self.subTest(k):
+                self.assertEqual(js["city"][k], self.st["city"][k], k)
+        self.assertEqual([(d["id"], d["people"], d["median_worth"]) for d in js["districts"]],
+                         [(d["id"], d["people"], d["median_worth"]) for d in self.st["districts"]])
 
 
 # --- client/dev/fixture_folk.js ---------------------------------------------------------------------------------

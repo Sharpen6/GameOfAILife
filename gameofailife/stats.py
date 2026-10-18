@@ -14,8 +14,9 @@ this module, so it loads nothing from the engine (tests/test_seams.py): the buil
 `town` when they run, by which time the simulation has loaded both.
 
 v3 (F3's hooks): `city.births` and `city.deaths` come from `sim.life.counts`, `city.life` is `life.stats_block`;
-with townsfolk, `stats.folk` is `sim.folk.stats_json(sim)` (ints) and `city`/`districts` add `sim.folk.city_parts`
-(see `_add_parts`); in the region world `stats.region` (view.md 4.3). `stats.people` and the richest title stay
+with townsfolk, `stats.folk` is `sim.folk.stats_json(sim)` (ints) and `city`/`districts` add `folk_parts(sim)`
+(`sim.folk.city_parts` plus the townsfolk's needs, luck, worths, retired and out of work; see `_add_parts`); in the
+region world `stats.region` (view.md 4.3). `stats.people` and the richest title stay
 the 60 named. The hourly sample calls `sim.folk.sample_hour(sim)`.
 """
 
@@ -225,12 +226,85 @@ def canon_parts(parts: dict | None) -> dict | None:
     return out
 
 
+CITY_NEEDS = ("hunger", "energy", "social", "fun")
+
+
+def folk_parts(sim: Simulation, hourly: bool = False) -> dict | None:
+    """The townsfolk's part of `city` and `districts`, or None without townsfolk: `Folk.city_parts(sim)` (F2a,
+    through `canon_parts`) plus what it leaves out, over the same people (`sim.folk.living()`): `needs_sum` (each
+    need brought forward to now without settling anyone), `luck` ({touched, raised, lowered, sum}), `adult_worths`
+    (city-wide and per district), `in_debt`, `worth_sum` (everyone's worth, the wealth total), `retired` (65+
+    without a job) and `out_of_work` (18-64 without a job). A key `city_parts` already sends is kept as sent.
+    stats_json and CityStats.sample both use this one helper. `hourly` is CityStats.sample's call, right after
+    `folk.sample_hour` at the same tick: each worth comes from the ring sample_hour just filled, and the needs,
+    luck and district worths, which a sample does not keep, are left out (the step stays within perf_folk's p99)."""
+    f = sim.folk
+    if not f.n:
+        return None
+    from .agent import NEED_DECAY
+    from .folk_model import DECAY_SCALE
+    parts = canon_parts(f.city_parts(sim)) or {"districts": {}}
+    tick = sim.clock.tick
+    places = sim.town.places
+    rings = getattr(f, "rings", None) if hourly else None
+    full = not hourly
+    needs = {n: 0.0 for n in CITY_NEEDS}
+    luck = {"touched": 0, "raised": 0, "lowered": 0, "sum": 0.0}
+    worths: list[int] = []
+    by_district: dict[str, list[int]] = {}
+    worth_sum = in_debt = retired = out_of_work = 0
+    for p in f.living():
+        if full:
+            raw = p._needs  # the lazy raw needs as of p._nt, projected to now and never written (no settling)
+            dt = tick - p._nt
+            if dt > 0 and p.age >= 5:
+                scale = DECAY_SCALE.get(p.activity if p.state == "busy" else "", {})
+                for n in CITY_NEEDS:
+                    v = raw[n] - NEED_DECAY[n] * scale.get(n, 1.0) * dt
+                    needs[n] += 0.0 if v < 0.0 else 100.0 if v > 100.0 else v
+            else:
+                for n in CITY_NEEDS:
+                    needs[n] += raw[n]
+            x = p.luck
+            luck["sum"] += x
+            if x != 50:
+                luck["touched"] += 1
+                luck["raised" if x > 50 else "lowered"] += 1
+        ring = rings.get(p.i) if rings is not None else None
+        w = ring[-1] if ring else f.worth(sim, p)
+        worth_sum += w
+        if p.age >= 18:
+            worths.append(w)
+            if p.money + p.savings < 0:
+                in_debt += 1
+            if p.job is None:
+                if p.age >= 65:
+                    retired += 1
+                else:
+                    out_of_work += 1
+            if full:
+                home = f.home_place(p)
+                place = places.get(home) if home else None
+                by_district.setdefault(place.district if place else "", []).append(w)
+    extra = {"adult_worths": worths, "worth_sum": worth_sum, "in_debt": in_debt, "retired": retired,
+             "out_of_work": out_of_work}
+    if full:
+        extra["needs_sum"], extra["luck"] = needs, luck
+    for k, v in extra.items():
+        parts.setdefault(k, v)
+    districts = parts.setdefault("districts", {})
+    for d, ws in by_district.items():
+        districts.setdefault(d, {"people": 0, "mood_sum": 0.0}).setdefault("adult_worths", ws)
+    return parts
+
+
 def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
     """Add the townsfolk to a city block (`Folk.city_parts(sim)`, F2a). Every key is optional:
     PART_COUNTS ints (added); `mood_sum`, `health_sum` (floats) and `needs_sum` ({need: float}) over the folk
-    counted in `population` (the means then cover everyone); `adult_worths` (the folk adults' worths, ints: wealth
-    total, median, top-10 share and gini cover everyone); `in_debt` (int); `luck` ({touched, raised, lowered}, ints,
-    and `sum`); `money_sum` (cash and savings, added to the wealth total when there are no worths). F2a's own
+    counted in `population` (the means then cover everyone; without `needs_sum` the named needs means stand);
+    `adult_worths` (the folk adults' worths, ints: median, top-10 share and gini cover everyone) and `worth_sum`
+    (all the folk's worth, the wealth total; else the adults' worths); `in_debt` (int); `luck` ({touched, raised,
+    lowered}, ints, and `sum`; without it the named luck stands); `folk_parts` builds all of these; `money_sum` (cash and savings, added to the wealth total when there are no worths). F2a's own
     names (`employed`, `pupils`, `mood`, `health`, `money`) arrive through `canon_parts`. Named-only stays
     named-only: `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
     named_n = block["population"]
@@ -241,17 +315,20 @@ def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
         alive = [p.agent for p in people]
         block["mood"] = _int((sum(a.mood for a in alive) + parts.get("mood_sum", 0.0)) / n)
         block["health"] = _int((sum(a.health for a in alive) + parts.get("health_sum", 0.0)) / n)
-        needs = parts.get("needs_sum", {})
-        block["needs"] = {k: _int((sum(a.needs[k] for a in alive) + needs.get(k, 0.0)) / n) for k in block["needs"]}
-        luck = parts.get("luck", {})
-        for k in ("touched", "raised", "lowered"):
-            block["luck"][k] += int(luck.get(k, 0))
-        block["luck"]["mean"] = _int((sum(a.luck for a in alive) + luck.get("sum", 50.0 * (n - named_n))) / n)
+        needs = parts.get("needs_sum")
+        if needs is not None:  # without the townsfolk's needs the named means stand (never diluted by n)
+            block["needs"] = {k: _int((sum(a.needs[k] for a in alive) + needs.get(k, 0.0)) / n)
+                              for k in block["needs"]}
+        luck = parts.get("luck")
+        if luck is not None:
+            for k in ("touched", "raised", "lowered"):
+                block["luck"][k] += int(luck.get(k, 0))
+            block["luck"]["mean"] = _int((sum(a.luck for a in alive) + luck.get("sum", 50.0 * (n - named_n))) / n)
     worths = parts.get("adult_worths")
     if worths:
         adults = [p.worth for p in people if p.agent.is_adult] + list(worths)
         w = block["wealth"]
-        w["total"] += sum(worths)
+        w["total"] += int(parts.get("worth_sum", sum(worths)))
         w["median"], w["top10_share"], w["gini"] = _int(median(adults)), top_share(adults), gini(adults)
         w["in_debt"] += int(parts.get("in_debt", 0))
     elif parts.get("money_sum"):  # no worths: the townsfolk's cash and savings still count in the total
@@ -332,7 +409,7 @@ def stats_json(sim: Simulation, full: bool = False) -> dict:
     the samples recorded since the previous push, and each sample goes in one push only.
     """
     people = _people(sim)
-    parts = canon_parts(sim.folk.city_parts(sim)) if sim.folk.n else None
+    parts = folk_parts(sim)
     samples = list(sim.stats.samples) if full else sim.stats.take_new_samples()
     out = {"type": "stats", "full": bool(full), "tick": sim.clock.tick, "time": sim.clock.stamp(),
            "day": sim.clock.day, "city": _city_block(sim, people, parts), "llm": _llm_block(sim),
@@ -457,7 +534,8 @@ class CityStats:
         if not getattr(sim, "agents", None):
             return None
         people = _people(sim)
-        city = _city_block(sim, people, canon_parts(sim.folk.city_parts(sim)) if sim.folk.n else None)
+        sim.folk.sample_hour(sim)  # the townsfolk's worth rings (stats.folk.worth_24h); folk_parts reads them
+        city = _city_block(sim, people, folk_parts(sim, hourly=True))
         homes = city["homes"]
         self.samples.append({
             "tick": sim.clock.tick, "day": sim.clock.day, "pop": city["population"], "mood": city["mood"],
@@ -473,7 +551,6 @@ class CityStats:
             ring.append(p.worth)
             del ring[:-WORTH_HOURS]
         self._check_richest(sim, [p for p in people if p.agent.is_adult])
-        sim.folk.sample_hour(sim)  # the townsfolk's worth rings (stats.folk.worth_24h)
         return None
 
     def _check_richest(self, sim: Simulation, adults: list[_Person]) -> None:
