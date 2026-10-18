@@ -5,76 +5,22 @@
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import time
 import tracemalloc
 import unittest
 from collections import deque
-from pathlib import Path
 
-from gameofailife import roads
+from gameofailife import region, roads
 from gameofailife import town as T
 
-ROOT = Path(__file__).resolve().parent.parent
-DATA = ROOT / "gameofailife" / "data" / "region.json"
 WALK_CODES = set(".#PebxF")
-_TOWN = {}
-
-
-def _fallback_json() -> Path | None:
-    """region.json before R1a's loader exists: gameofailife/data/region.json, else $RAIL_REGION_JSON."""
-    if DATA.exists():
-        return DATA
-    env = os.environ.get("RAIL_REGION_JSON")
-    return Path(env) if env and Path(env).exists() else None
-
-
-class _Town:
-    """The region as region_load.py builds it, for the tests only, until `region.build_region` exists."""
 
 
 def region_town():
-    """The seed-1 region map: `region.build_region(1)` when R1a's loader is there, else built here from the data."""
-    try:
-        from gameofailife import region
-    except ImportError:
-        region = None
-    if region is not None and hasattr(region, "build_region"):
-        return region.build_region(1)
-    if "t" in _TOWN:
-        return _TOWN["t"]
-    path = _fallback_json()
-    if path is None:
-        raise unittest.SkipTest("no region data yet (gameofailife/data/region.json or RAIL_REGION_JSON)")
-    d = json.loads(path.read_text())
-    fw, fh = d["frozen"]
-    mb = T.build_map(1)
-    tiles = [list(row) for row in d["rows"]]
-    for y in range(fh):
-        tiles[y][:fw] = mb.tiles[y][:fw]
-    places = dict(mb.places)
-    for p in d["places"]:
-        places[p["id"]] = T.Place(p["id"], p["name"], p["kind"], p["x"], p["y"], p["w"], p["h"],
-                                  tuple(p["hours"]) if p["hours"] else None, tuple(p["entry"]), p["face"],
-                                  p["district"], p["style"], p["floors"], p["tier"], p["units"])
-    t = _Town()
-    t.tiles, t.places, t.memo, t.rail, t.world = tiles, places, {}, d["rail"], "region"
-    t.w, t.h = len(tiles[0]), len(tiles)
-    t.highway_edges = [(tuple(a), tuple(b)) for a, b in d["highway_edges"]]
-    t.interchanges = [tuple(p) for p in d["interchanges"]]
-    _TOWN["t"] = t
-    return t
-
-
-def node_env() -> dict:
-    """The environment for port/tools/parity_rail.cjs: it needs RAIL_REGION_JSON only while R1a's loader is absent."""
-    env = dict(os.environ)
-    path = _fallback_json()
-    if path is not None:
-        env.setdefault("RAIL_REGION_JSON", str(path))
-    return env
+    """The seed-1 region map (shared and read-only)."""
+    return region.build_region(1)
 
 
 def pairs(town, n: int) -> list[tuple[str, str]]:
