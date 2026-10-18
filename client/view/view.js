@@ -13,6 +13,16 @@
 //   setInset({top, right, bottom})     CSS px of page UI over the canvas
 //   setMode({projection})              "iso" | "flat", kept in localStorage["goal.view"]
 //   camera(), start(), stop()          camera() and onCamera: exactly {x, y, zoom, follow, projection}
+// v3 (view.md 4.5): setTown and setState also read decor, rail, crowd, occ (absent: unchanged), trains, folk_n
+// and talks; folk ids ("f417") work in select, focus({agent}) and highlight; and:
+//   events(list)                       a frame's events: social tags with place and agents become pings
+//                                      (setState(state, speed, events) does the same)
+//   focus({district | station | line}) a district's centre (its largest rect's), a station, a whole line
+//   districts(), stations(), lod()     [{id, name, center}], [{id, name, line, x, y}], "near" | "mid" | "far"
+//   setLayers({transit, labels, pings, runs})  kept in localStorage["goal.view"]; layers() reads them
+//   debug()                            {lod, level, chunks, cacheMP, spriteMP, items, runs, splitRuns,
+//                                      statics_builds, crowd, crowdDrawn, trainCars, pings, drawMs, buildMs, queue}
+// Hits add {kind: "agent", id: "f417", folk: true} and {kind: "train", id, line, riders}.
 // A place in focus, ping, highlight or an overlay may also be a home id (resolved through town.homes). The
 // view pings only when told to, and it never sends messages. Classic script on window.CityView.
 "use strict";
@@ -31,7 +41,8 @@
     canvas.classList.add("cv-canvas");
     const prefs = Object.assign({ projection: "iso" }, opt.persist === false ? {} : loadPrefs());
     prefs.rot = 0; // rotation is a tested parameter of the projection with no UI in v1: never restored
-    let scene = null, movers = null, cam = null, mini = null, town = null;
+    let scene = null, movers = null, cam = null, mini = null, town = null, crowd = null, trains = null, pings = null;
+    let layers = Object.assign({ transit: false, labels: true, pings: true, runs: true }, prefs.layers || {});
     let running = false, raf = 0, lastT = 0, lastCamSent = 0, camDirty = true, lastSave = 0, loopErrAt = 0;
     let selected = null, pendingState = null, pendingSpeed = 1, inset = { top: 0, right: 0, bottom: 0 };
     let lastLots = null, lastHomes = null, seedHousing = false; // the last lots and homes any frame carried
@@ -80,7 +91,7 @@
       mMini.classList.toggle("cv-on", !!(mini && mini.isOpen()));
       mHomes.disabled = !mini; mHomes.classList.toggle("cv-on", !!(mini && mini.homesOn()));
     }
-    function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : id; }
+    function nameOf(id) { const a = movers && movers.agent(id); return a ? (a.name || id) : isFolk(id) ? "townsperson" : id; }
     function syncChip() {
       const on = !!(cam && selected);
       if (chip.classList.contains("cv-show") !== on) reservedAt = 0;
@@ -221,6 +232,10 @@
     function targetOf(t) {
       if (!scene || !t) return null;
       const proj = scene.proj;
+      if (t.agent != null && isFolk(t.agent) && !movers.agent(t.agent)) {
+        const q = crowd ? crowd.pos(t.agent) : null;
+        return q ? { w: proj.toWorld(q[0], q[1]), zoom: 2, tile: q } : null;
+      }
       if (t.agent != null) {
         const r = movers.byId(t.agent);
         if (r && r.foot) {
@@ -240,16 +255,33 @@
       }
       if (t.tile) { const [x, y] = t.tile; return { w: proj.toWorld(x + 0.5, y + 0.5), zoom: 2, tile: [x + 0.5, y + 0.5] }; }
       if (t.district != null) {
-        const d = (town.districts || []).find(q => q.id === t.district);
-        if (!d || !d.rects || !d.rects.length) return null;
+        const d = districtList().find(q => q.id === t.district);
+        if (!d) return null;
+        const big = (town.w || 0) > 120; // a region district is a whole quarter: a wider view of it
+        return { w: proj.toWorld(d.center[0], d.center[1]), zoom: big ? 0.5 : 1, tile: d.center.slice() };
+      }
+      if (t.station != null) {
+        const s = stationList().find(q => q.id === t.station);
+        return s ? { w: proj.toWorld(s.x, s.y), zoom: 1, tile: [s.x, s.y] } : null;
+      }
+      if (t.line != null) {
+        const l = ((town.rail && town.rail.lines) || []).find(q => q.id === t.line);
+        if (!l) return null;
         let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-        for (const r of d.rects) { x0 = Math.min(x0, r[0]); y0 = Math.min(y0, r[1]); x1 = Math.max(x1, r[0] + r[2]); y1 = Math.max(y1, r[1] + r[3]); }
-        return { w: proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2), zoom: 1, tile: [(x0 + x1) / 2, (y0 + y1) / 2] };
+        for (const c of Object.values(l.tracks || {}).flat()) { x0 = Math.min(x0, c[0]); y0 = Math.min(y0, c[1]); x1 = Math.max(x1, c[0] + 1); y1 = Math.max(y1, c[1] + 1); }
+        if (!isFinite(x0)) return null;
+        // the zoom that fits the line's box in the canvas
+        const cs = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([x, y]) => proj.toWorld(x, y));
+        const ww = Math.max(...cs.map(c => c[0])) - Math.min(...cs.map(c => c[0])), wh = Math.max(...cs.map(c => c[1])) - Math.min(...cs.map(c => c[1]));
+        const cw = canvas.clientWidth || 800, ch = (canvas.clientHeight || 600) - inset.top - inset.bottom;
+        const fz = Math.max(0.0625, Math.min(1, 0.85 * Math.min(cw / Math.max(1, ww), Math.max(100, ch) / Math.max(1, wh))));
+        return { w: proj.toWorld((x0 + x1) / 2, (y0 + y1) / 2), zoom: fz, exact: true, tile: [(x0 + x1) / 2, (y0 + y1) / 2] };
       }
       return null;
     }
     function followPos() {
       if (!cam || !cam.follow) return null;
+      if (crowd && isFolk(cam.follow)) { const t = crowd.pos(cam.follow); return t ? scene.proj.toWorld(t[0], t[1]) : null; }
       const r = movers.byId(cam.follow);
       return r && r.foot ? r.foot : null;
     }
@@ -268,7 +300,7 @@
       if (!force && now - lastSave < 600) { saveLate = true; return; }
       saveLate = false; lastSave = now;
       const t = scene.proj.toTile(cam.x, cam.y);
-      savePrefs({ projection: scene.proj.kind, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined, homes: mini ? mini.homesPref() : undefined });
+      savePrefs({ projection: scene.proj.kind, zoom: cam.zoom, x: +t[0].toFixed(2), y: +t[1].toFixed(2), minimap: mini ? mini.isOpen() : undefined, homes: mini ? mini.homesPref() : undefined, layers: prefs.layers });
     }
     // Picking (PLAN decision 80): the first upright candidate is the frontmost thing drawn under the point;
     // with none, the ground answers (a stop, a park or a home's lot, else the tile).
@@ -323,6 +355,44 @@
       scene.overlay = { name: o.name, colors };
     }
 
+    const isFolk = id => typeof id === "string" && /^f\d+$/.test(id);
+    // districts with their centre: the centre of the largest rect (view.md 4.1), or R's when it has one
+    function districtList() {
+      if (!town) return [];
+      const R = scene && scene.R;
+      if (R && Array.isArray(R.districts) && R.districts.length) return R.districts.map(d => ({ id: d.id, name: d.name, center: d.center || [0, 0] }));
+      return (town.districts || []).filter(d => d.rects && d.rects.length).map(d => {
+        const r = d.rects.reduce((a, b) => (b[2] * b[3] > a[2] * a[3] ? b : a));
+        return { id: d.id, name: d.name, center: [r[0] + r[2] / 2, r[1] + r[3] / 2] };
+      });
+    }
+    // stations: each line's stops (the station building's middle, else its platforms')
+    function stationList() {
+      if (!town) return [];
+      const out = [];
+      for (const l of (town.rail && town.rail.lines) || []) for (const st of l.stations || []) {
+        const p = (town.places || []).find(q => q.id === st.id);
+        let x, y;
+        if (p) { x = p.x + p.w / 2; y = p.y + p.h / 2; }
+        else if (st.platforms && st.platforms.length) { const q = st.platforms[0]; x = q[0] + q[2] / 2; y = q[1] + q[3] / 2; }
+        else continue;
+        out.push({ id: st.id, name: st.name || (p && p.name) || st.id, line: l.id, x, y });
+      }
+      return out;
+    }
+    function lodOf() {
+      if (!scene) return "near";
+      const l = typeof scene.lod === "function" ? scene.lod() : scene.lod;
+      if (l) return l;
+      const z = cam ? cam.zoom : 1;
+      return z >= 0.5 ? "near" : z >= 0.18 ? "mid" : "far";
+    }
+    // the layers the scene reads (labels, runs, transit) and the pings, which the facade draws
+    function applyLayers() {
+      if (!scene) return;
+      scene.layers = Object.assign({}, scene.layers || {}, layers);
+      if (typeof scene.setLayers === "function") scene.setLayers(Object.assign({}, layers));
+    }
     function build(t) {
       if (cam) cam.destroy();
       if (mini) mini.destroy();
@@ -335,6 +405,11 @@
       if (opt.eager) scene.prewarm();
       if (opt.quality) scene.quality = opt.quality;
       movers = CV.makeMovers(scene);
+      crowd = CV.makeCrowd ? CV.makeCrowd(scene, movers) : null;
+      trains = CV.makeTrains ? CV.makeTrains(scene, movers) : null;
+      pings = CV.makePings ? CV.makePings(scene, movers, crowd) : null;
+      scene.crowd = crowd; scene.trains = trains;
+      applyLayers();
       seedHousing = true;
       cam = CV.makeCamera(canvas, scene, {
         click: onClick,
@@ -380,6 +455,11 @@
       scene.selected = selected;
       if (now - reservedAt > 250) refreshReserved();
       scene.draw(now);
+      if (pings && layers.pings !== false) {
+        const t1 = performance.now();
+        pings.draw(canvas.getContext("2d"), now);
+        if (scene.stats) scene.stats.pingMs = performance.now() - t1;
+      }
       if (mini) mini.draw(now);
       if (camDirty) { camDirty = false; persist(false); emitCamera(false); }
       else { if (saveLate) persist(false); if (camLate) emitCamera(false); } // the last move is never dropped
@@ -415,7 +495,7 @@
     // --- the facade -----------------------------------------------------------------------------------
     const view = {
       setTown(t) { build(t); if (!running) frame(performance.now()); },
-      setState(st, speed) {
+      setState(st, speed, events) {
         if (!st) return;
         if (st.lots) lastLots = st.lots;
         if (st.homes) lastHomes = st.homes;
@@ -430,7 +510,13 @@
         if (st.season) scene.setSeason(st.season);
         scene.weather = st.weather || "clear";
         if (st.lights) scene.setLights(st.lights);
-        const changed = movers.setState(st, speed, performance.now());
+        const t = performance.now();
+        const changed = movers.setState(st, speed, t);
+        if (crowd) crowd.setState(st, t);
+        if (trains) trains.setState(st, t);
+        if (Array.isArray(st.occ)) scene.occ = st.occ; // absent: unchanged
+        if (st.folk_n != null) scene.folkN = st.folk_n;
+        if (pings) { if (st.talks) pings.talks(st.talks, t); if (events) pings.events(events, t); }
         if (changed && mini) mini.rebuild();
         if (selected && !movers.agent(selected)) { /* the selected agent left the state; keep the id */ }
       },
@@ -444,7 +530,7 @@
         o = o || {};
         const t = targetOf(target);
         if (!t || !cam) return false;
-        const z = o.zoom || Math.max(cam.zoom, t.zoom);
+        const z = o.zoom || (t.exact ? t.zoom : Math.max(cam.zoom, t.zoom));
         let [wx, wy] = t.w;
         if (o.inset) {
           const a = o.inset, b = inset;
@@ -502,6 +588,10 @@
       // CSS px (canvas-relative) of a target: a person's sprite middle, a place's label point, a tile's centre
       screenOf(t) {
         if (!scene || !t) return null;
+        if (t.agent != null && crowd && isFolk(t.agent) && !movers.agent(t.agent)) {
+          const q = crowd.pos(t.agent), w = q && scene.proj.toWorld(q[0], q[1]);
+          return w ? scene.worldToCss(w[0], w[1] - 13) : null;
+        }
         if (t.agent != null) {
           const r = movers.byId(t.agent);
           if (r && r.item) { const it = r.item, h = it.hit || [0, 0, it.sw, it.sh]; return scene.worldToCss(it.wx + (h[0] + h[2]) / 2, it.wy + (h[1] + h[3]) / 2); }
@@ -517,6 +607,28 @@
       frame(now) { frame(now == null ? performance.now() : now); return scene ? scene.stats.draw : 0; },
       scene() { return scene; },
       cam() { return cam; },
+      events(list) { if (pings && Array.isArray(list)) pings.events(list, performance.now()); },
+      districts() { return districtList().map(d => ({ id: d.id, name: d.name, center: d.center.slice() })); },
+      stations() { return stationList().map(s => Object.assign({}, s)); },
+      lod() { return lodOf(); },
+      setLayers(l) {
+        for (const k of ["transit", "labels", "pings", "runs"]) if (l && l[k] != null) layers[k] = !!l[k];
+        prefs.layers = Object.assign({}, layers);
+        applyLayers();
+        if (opt.persist !== false) savePrefs(Object.assign(loadPrefs(), { layers: prefs.layers }));
+      },
+      layers() { return Object.assign({}, layers); },
+      debug() {
+        const d = scene && typeof scene.debug === "function" ? scene.debug() : {};
+        const s = (scene && scene.stats) || {};
+        const c = crowd ? crowd.stats() : { crowd: 0, crowdDrawn: 0 }, tr = trains ? trains.stats() : { trainCars: 0 }, pg = pings ? pings.stats() : { pings: 0 };
+        return Object.assign({ lod: lodOf(), level: null, chunks: s.chunks || 0, cacheMP: s.cacheMP || 0, spriteMP: 0, items: s.items || 0, runs: 0, splitRuns: 0,
+          statics_builds: 0, drawMs: s.draw || 0, buildMs: 0, queue: 0 }, d, { lod: d.lod || lodOf(), crowd: c.crowd, crowdDrawn: c.crowdDrawn, crowdInView: c.crowdInView,
+          trainCars: tr.trainCars, trains: tr.trains, pings: pg.pings });
+      },
+      crowd() { return crowd; },
+      trains() { return trains; },
+      pings() { return pings; },
       setCamera(c) {
         if (!cam) return;
         if (c.zoom) cam.zoom = c.zoom;

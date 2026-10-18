@@ -31,7 +31,6 @@
   // A walker's straight step across a blocked corner skips this share of the move either side of the corner
   // point itself (a pixel or two), which lies on all four tiles at once.
   const CORNER = 0.02;
-  const WALKABLE = ".#Pe";
 
   // Does the L from tile (x0, y0) to tile (x1, y1), x leg first or y leg first, pass only over tiles that
   // ok(x, y) allows? The two end tiles are left out: a car leaves from and arrives at a driveway.
@@ -106,6 +105,18 @@
   }
   CV.carColor = id => CAR_COLORS[hash(id + ":car") % CAR_COLORS.length];
 
+  // Tile predicates (view.md 3.3): R's (region.js, scene.R) when the scene has one, else made here from the
+  // tile codes: isStreet "# b x", isWalk ". # P e b x F", isRoadLike adds "H h", isRail "= r x".
+  CV.regionOf = function (scene) {
+    if (scene.R && scene.R.isWalk) return scene.R;
+    if (scene._R) return scene._R;
+    const t = scene.town;
+    if (typeof CV.makeRegion === "function") { try { const R = CV.makeRegion(t); if (R && R.isWalk) return (scene._R = R); } catch (e) { /* fall back */ } }
+    const W = t.w, H = t.h, rows = t.tiles;
+    const has = s => (x, y) => x >= 0 && y >= 0 && x < W && y < H && s.includes(rows[y][x]);
+    return (scene._R = { w: W, h: H, isStreet: has("#bx"), isWalk: has(".#PebxF"), isRoadLike: has("#bxHh"), isRail: has("=rx") });
+  };
+
   // state.lots and state.homes -> {placeId: {stage, works, moving, listing, vacant, anyListed, units}}.
   CV.looksFrom = function (town, lots, homes) {
     const looks = {};
@@ -140,10 +151,12 @@
     const tracks = new Map();
     const M = { placeOf, tickMs: 417, lots: null, homes: null, state: null };
     let lastTick = null, tickAt = 0, recs = new Map(), rankKey = "", alongOf = new Map();
-    const tile = (x, y) => (x < 0 || y < 0 || x >= town.w || y >= town.h) ? null : town.tiles[y][x];
-    // where a vehicle may cut a corner (roads, which run off the map) and where a person may (open ground)
-    const roadOk = (x, y) => { const c = tile(x, y); return c === null || c === "#"; };
-    const walkOk = (x, y) => { const c = tile(x, y); return c === null || WALKABLE.includes(c); };
+    const R = CV.regionOf(scene);
+    const off = (x, y) => x < 0 || y < 0 || x >= town.w || y >= town.h;
+    // where a vehicle may cut a corner (streets, bridges and level crossings, which run off the map) and where
+    // a person may (open ground, pavements, paths, bridges, crossings, farmland)
+    const roadOk = (x, y) => off(x, y) || R.isStreet(x, y);
+    const walkOk = (x, y) => off(x, y) || R.isWalk(x, y);
 
     // The share (0..1) of its current move a track has made by now.
     const share = (tr, now) => Math.min(1, Math.max(0, (now - tr.t0) / tr.dur));
@@ -217,7 +230,7 @@
     // behind another and two households apart; at a junction they keep to a kerb corner. adj is the walker's
     // spread from others bound for the same spot (spread), eased in over the move: along the pavement, or
     // at a corner along ax, the way the walker came in.
-    const isRoad = (x, y) => scene.isRoad(x, y);
+    const isRoad = (x, y) => R.isStreet(x, y);
     // A road tile that is not a junction, where walkers keep to a pavement along it: "ew", "ns" or null.
     function pavement(x, y) {
       if (!isRoad(x, y)) return null;
