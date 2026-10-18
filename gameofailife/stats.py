@@ -12,6 +12,11 @@ Portability (the JS port is a line-by-line copy): every number is rounded with f
 Python's banker's round; ties sort by id in code-unit order; rings are lists, oldest first. `sim.py` imports
 this module, so it loads nothing from the engine (tests/test_seams.py): the builders import `housing` and
 `town` when they run, by which time the simulation has loaded both.
+
+v3 (F3's hooks): `city.births` and `city.deaths` come from `sim.life.counts`, `city.life` is `life.stats_block`;
+with townsfolk, `stats.folk` is `sim.folk.stats_json(sim)` (ints) and `city`/`districts` add `sim.folk.city_parts`
+(see `_add_parts`); in the region world `stats.region` (view.md 4.3). `stats.people` and the richest title stay
+the 60 named. The hourly sample calls `sim.folk.sample_hour(sim)`.
 """
 
 from __future__ import annotations
@@ -168,14 +173,17 @@ def _homes_block(sim: Simulation) -> dict:
             "lots_by_stage": by_stage, "neglected_lived_in": neglected}
 
 
-def _city_block(sim: Simulation, people: list[_Person]) -> dict:
+def _city_block(sim: Simulation, people: list[_Person], parts: dict | None = None) -> dict:
+    from . import life  # here, not at the top: see the module docstring
     alive = [p.agent for p in people]
     adults = [a for a in alive if a.is_adult]
     dead = [a for a in sim.agents.values() if not a.alive]
     died = sorted((a for a in dead if a.died), key=lambda a: (-a.died["tick"], a.id))[:RECENT_DEATHS]
     lucks = [a.luck for a in alive]
-    return {
-        "population": len(alive), "start_population": len(sim.agents), "deaths": len(dead), "births": 0,  # nobody is born yet
+    counts = sim.life.counts  # every birth and death of both tiers, once life counts them
+    block = {
+        "population": len(alive), "start_population": len(sim.agents),
+        "deaths": counts["deaths"] if "deaths" in counts else len(dead), "births": counts.get("births", 0),
         "adults": len(adults), "children": len(alive) - len(adults),
         "working": sum(1 for a in alive if a.job and a.job.hourly_wage > 0),
         "students": sum(1 for a in alive if a.job and a.job.hourly_wage <= 0),
@@ -189,7 +197,45 @@ def _city_block(sim: Simulation, people: list[_Person]) -> dict:
                  "lowered": sum(1 for x in lucks if x < 50), "mean": _int(_mean(lucks))},
         "recent_deaths": [{"id": a.id, "name": a.name, "age": a.age, "time": a.died["time"], "how": a.died["how"]}
                           for a in died],
+        "life": life.stats_block(sim),
     }
+    if parts:
+        _add_parts(block, people, parts)
+    return block
+
+
+# The city counters the townsfolk's `city_parts` adds to (people counted, never means or money).
+PART_COUNTS = ("population", "start_population", "adults", "children", "working", "students", "retired",
+               "out_of_work")
+
+
+def _add_parts(block: dict, people: list[_Person], parts: dict) -> None:
+    """Add the townsfolk to a city block (`Folk.city_parts(sim)`, F2a). Every key is optional:
+    PART_COUNTS ints (added); `mood_sum`, `health_sum` (floats) and `needs_sum` ({need: float}) over the folk
+    counted in `population` (the means then cover everyone); `adult_worths` (the folk adults' worths, ints: wealth
+    total, median, top-10 share and gini cover everyone); `in_debt` (int); `luck` ({touched, raised, lowered}, ints,
+    and `sum`). Named-only stays named-only: `recent_deaths`, `homes`, `life` (life counts both tiers itself)."""
+    named_n = block["population"]
+    for k in PART_COUNTS:
+        block[k] += int(parts.get(k, 0))
+    n = block["population"]
+    if n and parts.get("population"):
+        alive = [p.agent for p in people]
+        block["mood"] = _int((sum(a.mood for a in alive) + parts.get("mood_sum", 0.0)) / n)
+        block["health"] = _int((sum(a.health for a in alive) + parts.get("health_sum", 0.0)) / n)
+        needs = parts.get("needs_sum", {})
+        block["needs"] = {k: _int((sum(a.needs[k] for a in alive) + needs.get(k, 0.0)) / n) for k in block["needs"]}
+        luck = parts.get("luck", {})
+        for k in ("touched", "raised", "lowered"):
+            block["luck"][k] += int(luck.get(k, 0))
+        block["luck"]["mean"] = _int((sum(a.luck for a in alive) + luck.get("sum", 50.0 * (n - named_n))) / n)
+    worths = parts.get("adult_worths")
+    if worths:
+        adults = [p.worth for p in people if p.agent.is_adult] + list(worths)
+        w = block["wealth"]
+        w["total"] += sum(worths)
+        w["median"], w["top10_share"], w["gini"] = _int(median(adults)), top_share(adults), gini(adults)
+        w["in_debt"] += int(parts.get("in_debt", 0))
 
 
 def _counter_json(block: dict) -> dict:
@@ -209,20 +255,29 @@ def _llm_block(sim: Simulation) -> dict:
     }
 
 
-def _districts(sim: Simulation, people: list[_Person]) -> list[dict]:
-    """Every district with at least one home, in town order."""
+def _districts(sim: Simulation, people: list[_Person], parts: dict | None = None) -> list[dict]:
+    """Every district with at least one home, in town order (the region's after Millbrook's in the region).
+    `parts["districts"]` ({district id: {"people": int, "mood_sum": float, "adult_worths": [ints]}}, the
+    townsfolk's `city_parts`) adds the townsfolk living there."""
     from . import housing
     from .town import DISTRICTS
     district = _district_of_place(sim)
+    folk = (parts or {}).get("districts", {})
     out = []
-    for did, name, _, _ in DISTRICTS:
+    names = ([(d["id"], d["name"]) for d in sim.town.districts] if getattr(sim, "world", "millbrook") == "region"
+             else [(did, name) for did, name, _, _ in DISTRICTS])
+    for did, name in names:
         homes = [h for h in sim.homes.values() if district.get(h.place) == did]
         if not homes:
             continue
         here = [p for p in people if district.get(sim.homes[sim.households[p.agent.household_id].home_id].place) == did]
+        f = folk.get(did, {})
+        n = len(here) + int(f.get("people", 0))
+        worths = [p.worth for p in here if p.agent.is_adult] + list(f.get("adult_worths", ()))
         out.append({
-            "id": did, "name": name, "people": len(here), "mood": _int(_mean([p.agent.mood for p in here])),
-            "median_worth": _int(median([p.worth for p in here if p.agent.is_adult])),
+            "id": did, "name": name, "people": n,
+            "mood": _int((sum(p.agent.mood for p in here) + f.get("mood_sum", 0.0)) / n) if n else 0,
+            "median_worth": _int(median(worths)),
             "homes": len(homes), "vacant": sum(1 for h in homes if h.household is None),
             "shabby_plus": sum(1 for pid, lot in sim.lots.items() if district.get(pid) == did
                                and housing.stage_of(lot.condition) >= 2),
@@ -257,11 +312,48 @@ def stats_json(sim: Simulation, full: bool = False) -> dict:
     the samples recorded since the previous push, and each sample goes in one push only.
     """
     people = _people(sim)
+    parts = sim.folk.city_parts(sim) if sim.folk.n else None
     samples = list(sim.stats.samples) if full else sim.stats.take_new_samples()
-    return {"type": "stats", "full": bool(full), "tick": sim.clock.tick, "time": sim.clock.stamp(),
-            "day": sim.clock.day, "city": _city_block(sim, people), "llm": _llm_block(sim),
-            "districts": _districts(sim, people), "households": _households(sim),
-            "people": _people_rows(sim, people), "samples": samples}
+    out = {"type": "stats", "full": bool(full), "tick": sim.clock.tick, "time": sim.clock.stamp(),
+           "day": sim.clock.day, "city": _city_block(sim, people, parts), "llm": _llm_block(sim),
+           "districts": _districts(sim, people, parts), "households": _households(sim),
+           "people": _people_rows(sim, people), "samples": samples}
+    if sim.folk.n:
+        out["folk"] = sim.folk.stats_json(sim)  # {v, worth, worth_24h, mood, health, luck}: ints by index
+    if getattr(sim, "world", "millbrook") == "region":
+        out["region"] = region_block(sim, out["city"])
+    return out
+
+
+def region_block(sim: Simulation, city: dict) -> dict:
+    """`stats.region` (view.md 4.3), region world only: everyone, the jobs board, how people get to work, and the
+    trains and buses now and today. Folk-side numbers come from `Folk.region_parts(sim)` when the townsfolk have it
+    ({folk, commute: {walk, car, bus, train, bike}, train_riders_today, train_lines_today: {line id: n},
+    bus_riders_today}); otherwise they are 0."""
+    named = sum(1 for a in sim.agents.values() if a.alive)
+    get = getattr(sim.folk, "region_parts", None)
+    fp = get(sim) if get is not None else {}
+    board = sim.life.board
+    filled = sum(1 for h in board.holder if h is not None)
+    trains = sim.trains()
+    counts, today = sim.life.counts, sim.life.today
+    commute = {"walk": 0, "car": 0, "bus": 0, "train": 0, "bike": 0}
+    for k, v in fp.get("commute", {}).items():
+        commute[k] = commute.get(k, 0) + int(v)
+    lines = fp.get("train_lines_today", {})
+    return {
+        "population": city["population"], "named": named, "folk": int(fp.get("folk", len(sim.folk.living()))),
+        "births": counts.get("births", 0), "deaths": counts.get("deaths", 0),
+        "births_today": today.get("births", 0), "deaths_today": today.get("deaths", 0),
+        "jobs": {"total": len(board.jobs), "filled": filled, "open": len(board.jobs) - filled},
+        "commute": commute,
+        "train": {"riders_now": sum(t.get("riders", 0) for t in trains),
+                  "riders_today": int(fp.get("train_riders_today", 0)),
+                  "lines": [{"id": line["id"], "riders_today": int(lines.get(line["id"], 0))}
+                            for line in ((sim.town.rail or {}).get("lines") or [])]},
+        "bus": {"riders_now": sum(1 for a in sim.agents.values() if a.alive and a.riding),
+                "riders_today": int(fp.get("bus_riders_today", 0))},
+    }
 
 
 # --- the LLM log ----------------------------------------------------------------------------------------------
@@ -345,7 +437,7 @@ class CityStats:
         if not getattr(sim, "agents", None):
             return None
         people = _people(sim)
-        city = _city_block(sim, people)
+        city = _city_block(sim, people, sim.folk.city_parts(sim) if sim.folk.n else None)
         homes = city["homes"]
         self.samples.append({
             "tick": sim.clock.tick, "day": sim.clock.day, "pop": city["population"], "mood": city["mood"],
@@ -361,6 +453,7 @@ class CityStats:
             ring.append(p.worth)
             del ring[:-WORTH_HOURS]
         self._check_richest(sim, [p for p in people if p.agent.is_adult])
+        sim.folk.sample_hour(sim)  # the townsfolk's worth rings (stats.folk.worth_24h)
         return None
 
     def _check_richest(self, sim: Simulation, adults: list[_Person]) -> None:
