@@ -2,10 +2,12 @@
 
 The view is a set of classic browser scripts that share one global, window.CityView. These tests keep
 it that way: every file is present, nothing uses ES module syntax, nothing reaches for the network or
-for image files (or data:image URIs), view.css styles only .cv-* classes, the dev fixture has the PLAN 3.2
-and 3.3 shapes, and (when Node is installed) every script parses and the scripts define only CityView.
+for image files (or data:image URIs), view.css styles only .cv-* classes, the page's ticker is marked for
+the view's labels to avoid, the view's stage palette is the dashboard's, the dev fixture has the PLAN 3.2
+and 3.3 shapes, the timetable still has the bus meetings the browser smoke test draws, and (when Node is
+installed) every script parses and the scripts define only CityView.
 With Node and Playwright installed and GOAL_SLOW=1, tests/browser/view_smoke.cjs runs the view in headless
-Chromium (about 80 s).
+Chromium (about 2 minutes).
 """
 
 import json
@@ -100,6 +102,25 @@ class ClientViewFiles(unittest.TestCase):
         for name in FACADE:
             self.assertRegex(text, rf"\b{name}\b", f"view.js has no {name}")
 
+    def test_ticker_is_kept_clear_of_labels(self):
+        # name plates and badges keep off every element marked data-cv-avoid (review ART-4)
+        html = (ROOT / "client" / "index.html").read_text()
+        tag = re.search(r"<div\s+id=\"ticker\"[^>]*>", html)
+        self.assertIsNotNone(tag, "client/index.html has no #ticker")
+        self.assertRegex(tag.group(0), r"\sdata-cv-avoid\b", "the ticker is not marked data-cv-avoid")
+
+    def test_stage_palette_is_the_dashboards(self):
+        # one Condition palette for the map overlay, the minimap and the dashboard's legends (review H6)
+        palette = re.compile(r"const STAGE_COLOR = (\[[^\]]*\])")
+        dash = palette.search((ROOT / "client" / "dashboard.js").read_text())
+        own = re.search(r"CV\.STAGE_COLORS = (\[[^\]]*\])", (VIEW / "art.js").read_text())
+        self.assertIsNotNone(dash, "dashboard.js has no STAGE_COLOR")
+        self.assertIsNotNone(own, "art.js has no CV.STAGE_COLORS")
+        self.assertEqual(json.loads(own.group(1)), json.loads(dash.group(1)))
+        for name in VIEW_SCRIPTS:
+            if name != "art.js":
+                self.assertNotRegex((VIEW / name).read_text(), r"STAGE_COLS?\s*=", f"{name} keeps a stage palette of its own")
+
     def test_dev_page_loads_every_script(self):
         html = (DEV / "view.html").read_text()
         for name in VIEW_SCRIPTS:
@@ -187,8 +208,30 @@ class ClientViewFixture(unittest.TestCase):
             self.assertTrue(agent["inside"] is None or agent["inside"] in known, agent["id"])
 
 
+class ClientViewBusScenes(unittest.TestCase):
+    # view_smoke.cjs's buses run draws the real timetable (transit.bus_rows) for ticks 360-400 and 0-2; these
+    # are the meetings it is about (review ART-3), so a timetable change that drops them shows here.
+    def setUp(self):
+        from gameofailife import transit
+        self.rows = lambda t: {b["id"]: b for b in transit.bus_rows(t)}
+
+    def test_line_1_and_2_turn_across_each_other_at_willow_and_main(self):
+        # 06:04: 1a heading south and 2a heading west both reach (3, 25); 06:05: 1a goes east, 2a north
+        before, at, after = self.rows(363), self.rows(364), self.rows(365)
+        self.assertEqual((before["1a"]["dir"], before["2a"]["dir"]), ("s", "w"))
+        self.assertEqual(((at["1a"]["x"], at["1a"]["y"]), (at["2a"]["x"], at["2a"]["y"])), ((3, 25), (3, 25)))
+        self.assertEqual((at["1a"]["dir"], at["2a"]["dir"]), ("e", "n"))
+        self.assertGreater(after["1a"]["x"], 3)
+        self.assertLess(after["2a"]["y"], 25)
+
+    def test_two_buses_share_a_tile_at_tick_0(self):
+        # the first frame of the fresh view in the smoke test
+        at = self.rows(0)
+        self.assertEqual(sorted(b for b in at if (at[b]["x"], at[b]["y"]) == (3, 25)), ["1a", "2a"])
+
+
 class ClientViewBrowser(unittest.TestCase):
-    @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the browser run of the city view (about 80 s) runs with GOAL_SLOW=1")
+    @unittest.skipUnless(os.environ.get("GOAL_SLOW") == "1", "the browser run of the city view (about 2 minutes) runs with GOAL_SLOW=1")
     @unittest.skipUnless(shutil.which("node"), "node is not installed")
     def test_view_smoke(self):
         # tests/browser/view_smoke.cjs prints SKIP and exits 0 without Playwright or a browser to launch

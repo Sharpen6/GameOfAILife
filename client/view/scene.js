@@ -293,9 +293,17 @@
     // SALE / RENT / LET board stand on them (PLAN decision 83), so they read even when the door is on a wall
     // turned away from the camera. A house's lot is its garden; a block of flats has none, so its paved apron
     // stands in. road: the side of the tile that meets the road (the camera-nearest one on a corner tile).
-    // Ties go to the tile nearer the door.
+    // Ties go to the tile nearer the door. A tile where a nearer building would hide most of the board
+    // (hidden: 55 Main Street's corner behind the Grand Arcade) goes after those where it shows.
+    // Worked out once per static rebuild.
     const SIDES = [["n", 0, -1], ["e", 1, 0], ["s", 0, 1], ["w", -1, 0]];
+    let frontCache = new Map();
     function frontTiles(p, i) {
+      let out = frontCache.get(i);
+      if (!out) { out = frontTilesOf(p, i); frontCache.set(i, out); }
+      return out;
+    }
+    function frontTilesOf(p, i) {
       const own = [];
       if (isHouseLike(p)) own.push(...lotTiles[i]);
       else for (let y = p.y - 2; y < p.y + p.h + 2; y++) for (let x = p.x - 2; x < p.x + p.w + 2; x++) {
@@ -307,13 +315,41 @@
         const road = SIDES.filter(([, dx, dy]) => at(x + dx, y + dy) === "#")
           .sort((a, b) => proj.depth(x + b[1] + 0.5, y + b[2] + 0.5) - proj.depth(x + a[1] + 0.5, y + a[2] + 0.5));
         if (!road.length) continue;
-        out.push({ x, y, road: road[0][0], depth: proj.depth(x + 0.5, y + 0.5), drive: driveOf[y * W + x] === i, near: Math.abs(x - ex) + Math.abs(y - ey) });
+        const t = { x, y, road: road[0][0], depth: proj.depth(x + 0.5, y + 0.5), drive: driveOf[y * W + x] === i, near: Math.abs(x - ex) + Math.abs(y - ey) };
+        t.hidden = boardCover(p, t) > 0.34;
+        out.push(t);
       }
-      out.sort((a, b) => b.depth - a.depth || a.near - b.near || b.x - a.x || b.y - a.y);
+      out.sort((a, b) => a.hidden - b.hidden || b.depth - a.depth || a.near - b.near || b.x - a.x || b.y - a.y);
       return out;
     }
-    // The van takes the camera-nearest road lot tile; the board takes it too, or the next one while the van
-    // or a car parked on the driveway (carOn) has it.
+    // Where a board on lot tile t stands: a quarter tile in from the road edge (further in beside the van),
+    // leaning toward its own home.
+    function signAt(p, t, byVan) {
+      let [a, b] = towardRoad(t, byVan ? 0.4 : 0.25);
+      if (t.road === "n" || t.road === "s") a += Math.max(-0.22, Math.min(0.22, p.x + p.w / 2 - a));
+      else b += Math.max(-0.22, Math.min(0.22, p.y + p.h / 2 - b));
+      return [a, b];
+    }
+    // The world rect of a board on lot tile t (the board, not its post), and its depth.
+    function boardRect(p, t) {
+      const [a, b] = signAt(p, t, false), spr = art.sign("sale"), w = proj.toWorld(a, b);
+      const x0 = Math.round(w[0] - spr.ax) + 1, y0 = Math.round(w[1] - spr.ay) + 1;
+      return { x0, y0, x1: x0 + 24, y1: y0 + 12, depth: proj.depth(a, b) };
+    }
+    // The share of a board on lot tile t that buildings nearer the camera cover.
+    function boardCover(p, t) {
+      const { x0, y0, x1, y1, depth } = boardRect(p, t);
+      const near = buildings.filter(B => B.b.ox < x1 && B.b.ox + B.b.c.width > x0 && B.b.oy < y1 && B.b.oy + B.b.c.height > y0);
+      if (!near.length) return 0;
+      let n = 0, hid = 0;
+      for (let x = x0 + 1; x < x1; x += 2) for (let y = y0 + 1; y < y1; y += 2) {
+        n++;
+        if (near.some(B => { const sl = B.slices.find(q => x >= q.wx && x < q.wx + q.sw); return !!sl && sl.depth > depth && opaqueAt(B, x, y); })) hid++;
+      }
+      return hid / n;
+    }
+    // The van takes the camera-nearest road lot tile where a board would show; the board takes it too, or the
+    // next one while the van or a car parked on the driveway (carOn) has it.
     function lotSpots(p, i, moving, carOn) {
       const front = frontTiles(p, i);
       const van = moving && front.length ? front[0] : null;
@@ -323,9 +359,10 @@
     scene.lotSpots = id => {
       const i = placeById.get(id), p = places[i];
       if (!p || p.kind !== "home") return null;
+      if (dirty || !statics.length) buildStatics();
       const l = scene.looks[p.id] || {}, car = scene.parked.has(p.id), s = lotSpots(p, i, !!l.moving, car);
       const xy = t => t ? [t.x, t.y] : null;
-      return { front: s.front.map(t => ({ x: t.x, y: t.y, depth: t.depth, drive: t.drive, road: t.road })), van: l.moving ? xy(s.van) : null,
+      return { front: s.front.map(t => ({ x: t.x, y: t.y, depth: t.depth, drive: t.drive, road: t.road, hidden: t.hidden })), van: l.moving ? xy(s.van) : null,
         sign: (isHouseLike(p) ? l.listing : l.anyListed) ? xy(s.sign) : null, car };
     };
     // The homes with a car parked on the driveway now (the movers set it every frame). A listed home's board
@@ -375,6 +412,7 @@
         rec.center = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2, b.height / 2);
         buildings.push(rec);
       });
+      frontCache = new Map(); // the lots' front tiles depend on the buildings just drawn
       // trees, benches, park furniture
       const woods = (town.districts.find(d => d.id === "east_woods") || { rects: [] }).rects;
       for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -391,27 +429,31 @@
         if (pathMask[i] && hash(`b${x},${y}`) % 4 === 0) addSprite(list, art.bench(), x + 0.82, y + 0.3, proj.depth(x + 0.82, y + 0.3), "p");
       }
       // street lamps on the north kerb of east-west roads and the west kerb of north-south roads; a lamp never
-      // stands in front of a door's walk, the tile beside it or a lot's board (SALE, RENT, LET): it moves a
-      // tile along, or goes
-      const boards = new Set();
+      // stands in front of a door's walk, the tile beside it or a lot's board (SALE, RENT, LET), nor in front
+      // of the board on screen: it moves a tile along, or goes
+      const boards = new Set(), boardRects = [];
       places.forEach((p, i) => {
         if (p.entry) boards.add(p.entry[1] * W + p.entry[0]);
         const b = besideDoor(p, i);
         if (b) boards.add(b[1] * W + b[0]);
         // the board's tile with and without a car on the driveway, so a car coming home never moves a lamp
-        if (p.kind === "home") for (const car of [false, true]) { const t = lotSpots(p, i, false, car).sign; if (t) boards.add(t.y * W + t.x); }
+        if (p.kind === "home") for (const car of [false, true]) { const t = lotSpots(p, i, false, car).sign; if (t) { boards.add(t.y * W + t.x); boardRects.push(boardRect(p, t)); } }
       });
       lampPts = [];
       const nearJ = (x, y) => junctionSet.has(y * W + x) || junctionSet.has(y * W + x + 1) || junctionSet.has(y * W + x - 1) || junctionSet.has((y + 1) * W + x) || junctionSet.has((y - 1) * W + x);
-      const lampOk = (x, y, bx, by) => at(x, y) === "#" && at(bx, by) !== "#" && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx);
+      const coversBoard = (lx, ly) => { // the lamp at tile point (lx, ly) is drawn over a board's face
+        const w = proj.toWorld(lx, ly), d = proj.depth(lx, ly), x0 = w[0] - 2, y0 = w[1] - 41, x1 = w[0] + 9, y1 = w[1];
+        return boardRects.some(r => d > r.depth && x0 < r.x1 && x1 > r.x0 && y0 < r.y1 && y1 > r.y0);
+      };
+      const lampOk = (x, y, bx, by, lx, ly) => at(x, y) === "#" && at(bx, by) !== "#" && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx) && !coversBoard(lx, ly);
       for (const ry of town.road_rows) for (let x0 = 2; x0 < W; x0 += 4) {
-        const x = [x0, x0 + 1, x0 - 1].find(a => a >= 0 && a < W && lampOk(a, ry, a, ry - 1));
+        const x = [x0, x0 + 1, x0 - 1].find(a => a >= 0 && a < W && lampOk(a, ry, a, ry - 1, a + 0.5, ry + 0.07));
         if (x == null) continue;
         addSprite(list, art.lamp(), x + 0.5, ry + 0.07, proj.depth(x + 0.5, ry + 0.07), "l");
         lampPts.push([x + 0.5, ry + 0.07]);
       }
       for (const rx of town.road_cols) for (let y0 = 2; y0 < H; y0 += 4) {
-        const y = [y0, y0 + 1, y0 - 1].find(b => b >= 0 && b < H && lampOk(rx, b, rx - 1, b));
+        const y = [y0, y0 + 1, y0 - 1].find(b => b >= 0 && b < H && lampOk(rx, b, rx - 1, b, rx + 0.07, b + 0.5));
         if (y == null) continue;
         addSprite(list, art.lamp(), rx + 0.07, y + 0.5, proj.depth(rx + 0.07, y + 0.5), "l");
         lampPts.push([rx + 0.07, y + 0.5]);
@@ -479,9 +521,7 @@
           if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3, snowy), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
         }
         if (listed && spots.sign) { // the board, a quarter tile in from the road edge, leaning toward its own home
-          const t = spots.sign, alongX = t.road === "n" || t.road === "s";
-          let [a, b] = towardRoad(t, t === spots.van ? 0.4 : 0.25);
-          if (alongX) a += Math.max(-0.22, Math.min(0.22, p.x + p.w / 2 - a)); else b += Math.max(-0.22, Math.min(0.22, p.y + p.h / 2 - b));
+          const [a, b] = signAt(p, spots.sign, spots.sign === spots.van);
           addSprite(list, art.sign(listed), a, b, proj.depth(a, b), "s", i);
         }
         if (spots.van) { // the moving van, backed onto the lot along the road
@@ -735,14 +775,19 @@
       return false;
     }
     // A glow sprite with the nearer building slices cut out of it, or null when nothing nearer overlaps it.
-    function maskedGlow(src, gx, gy, depth, self) {
+    // out: a scratch canvas to cut it in (reused every frame for moving lights) instead of a new one.
+    function maskedGlow(src, gx, gy, depth, self, out) {
       const w = src.width, h = src.height;
       let c = null, q = null;
       for (const r of buildings) {
         if (r === self) continue;
         for (const it of r.slices) {
           if (it.depth <= depth + 0.3 || it.wx >= gx + w || it.wx + it.sw <= gx || it.wy >= gy + h || it.wy + it.sh <= gy) continue;
-          if (!c) { c = CV.canvas(w, h); q = c.getContext("2d"); q.drawImage(src, 0, 0); q.globalCompositeOperation = "destination-out"; }
+          if (!c) {
+            c = out || CV.canvas(w, h); q = c.getContext("2d");
+            if (out) { if (c.width !== w || c.height !== h) { c.width = w; c.height = h; } q.setTransform(1, 0, 0, 1, 0, 0); q.globalCompositeOperation = "source-over"; q.clearRect(0, 0, w, h); }
+            q.drawImage(src, 0, 0); q.globalCompositeOperation = "destination-out";
+          }
           q.drawImage(it.img, it.sx, it.sy, it.sw, it.sh, it.wx - gx, it.wy - gy, it.sw, it.sh);
         }
       }
@@ -1041,7 +1086,7 @@
       const ov = scene.overlay;
       if (ov && (ov.colors || ov.values)) {
         const cond = ov.name === "condition";
-        const col = val => cond ? ["#3ec46a", "#a8d84a", "#f2c84a", "#f08a3a", "#e0402c"][Math.max(0, Math.min(4, Math.round(val)))] : `hsl(${Math.round(10 + 110 * Math.max(0, Math.min(1, val)))} 70% 50%)`;
+        const col = val => cond ? CV.stageColors()[Math.max(0, Math.min(4, Math.round(val)))] : `hsl(${Math.round(10 + 110 * Math.max(0, Math.min(1, val)))} 70% 50%)`;
         // one path per place, filled once, so neighbouring diamonds leave no seams or darker edges
         g.globalAlpha = 0.5;
         const add = pts => pts.forEach(([a, b], k) => k ? g.lineTo(a, b) : g.moveTo(a, b));
@@ -1114,6 +1159,7 @@
       }
     }
 
+    let hlScratch = null;
     function emissive(v, night, now, gh) {
       const S = v.S, lit = litPlaces(), base = Math.min(1, night * 0.95);
       g.globalCompositeOperation = "lighter";
@@ -1140,7 +1186,15 @@
           const b = rec.b, vis = occ.porch.get(rec) || [], imgs = occ.porchImg.get(rec) || [];
           [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) glow(rec, img, q[0] - 22, q[1] - 12); });
         }
-        for (const m of scene.movers) if (m.lights != null && m.moving) { const spr = art.headlights(m.lights); blit(spr.c, 0, 0, spr.c.width, spr.c.height, m.cx - spr.ax, m.cy - spr.ay, v); }
+        // headlight cones, cut by the buildings nearer the camera like the lamp pools (a bus behind the bank
+        // lights the road, not the bank's roof)
+        for (const m of scene.movers) if (m.lights != null && m.moving) {
+          const spr = art.headlights(m.lights), gx = m.cx - spr.ax, gy = m.cy - spr.ay, w = spr.c.width, h = spr.c.height;
+          if (gx > v.x1 || gy > v.y1 || gx + w < v.x0 || gy + h < v.y0) continue;
+          if (!hlScratch) hlScratch = CV.canvas(w, h);
+          const img = maskedGlow(spr.c, gx, gy, m.depth, null, hlScratch) || spr.c;
+          blit(img, 0, 0, w, h, gx, gy, v);
+        }
       }
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       // bulbs, neon and beacons sit on top at full strength
@@ -1215,13 +1269,15 @@
         // a plate cut by the screen edge slides inside, as long as it still sits over its anchor
         const m = (padR ? 10 : 4) * k, dx = r[0] < m ? m - r[0] : r[2] > cv.width - m ? cv.width - m - r[2] : 0;
         if (dx) { if (Math.abs(dx) > w / 2 - 6 * k) return null; r = [r[0] + dx, r[1], r[2] + dx, r[3]]; }
-        if (!force && hit(r)) { // try just above, then just below, before giving up
+        // the badge pinned to the corner sticks out above the plate, so it must be clear too
+        const pin = q => [q[2] - 12 * k, q[1] - 9 * k, q[2] + 6 * k, q[1] + 9 * k], clash = q => hit(q) || (padR > 0 && hit(pin(q)));
+        if (!force && clash(r)) { // try just above, then just below, before giving up
           const up = [r[0], r[1] - h - 2 * k, r[2], r[3] - h - 2 * k], dn = [r[0], r[1] + h + 2 * k, r[2], r[3] + h + 2 * k];
-          r = !hit(up) && !offScreen(up) ? up : !hit(dn) && !offScreen(dn) ? dn : null;
+          r = !clash(up) && !offScreen(up) ? up : !clash(dn) && !offScreen(dn) ? dn : null;
           if (!r) return null;
         }
         placed.push(r);
-        if (padR) placed.push([r[2] - 12 * k, r[1] - 9 * k, r[2] + 6 * k, r[1] + 9 * k]);
+        if (padR) placed.push(pin(r));
         g.fillStyle = bg; roundRect(r[0], r[1], w, h, 4 * k); g.fill();
         g.fillStyle = fg; g.fillText(text, (r[0] + r[2] - padR) / 2, (r[1] + r[3]) / 2 + 0.5 * k);
         return r;
