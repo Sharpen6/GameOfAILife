@@ -85,7 +85,10 @@
   window.__step = n => {
     if (!stub) return null;
     let fr = null;
-    for (let k = 0; k < (n || 1); k++) { tick++; fr = stub.frame(tick); view.setState(fr.state, fr.speed || 1); }
+    for (let k = 0; k < (n || 1); k++) {
+      tick++; fr = stub.frame(tick); view.setState(fr.state, fr.speed || 1);
+      if (view.events) view.events(fr.events || []); // as client/game.js: a frame's events become pings
+    }
     return fr;
   };
   const start = () => {

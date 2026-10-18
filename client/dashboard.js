@@ -70,7 +70,8 @@
   const OVERLAYS = [["", "None"], ["wealth", "Wealth"], ["mood", "Mood"], ["condition", "Condition"]];
   const FORK_KINDS = [["work", "work"], ["sleep", "sleep"], ["hunger", "hunger"], ["payday", "payday"],
     ["groceries", "groceries"], ["lonely", "lonely"], ["free_time", "free time"], ["invite", "invite"],
-    ["house_hunt", "house hunt"], ["upkeep", "upkeep"], ["repair", "repair"], ["housing_trouble", "housing trouble"]];
+    ["house_hunt", "house hunt"], ["upkeep", "upkeep"], ["repair", "repair"], ["housing_trouble", "housing trouble"],
+    ["family", "family evening"]];
   const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const TIER_LABEL = { flat: "flat", house: "house", big_house: "big house" };
   // forks: habit and profile decisions kept; llm: controller decisions (model, timeout) kept. Forks a
