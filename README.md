@@ -2,7 +2,7 @@
 
 A living city simulation where every resident is an AI agent with a home, a family, a job, a bank balance, friends and a memory. Any AI model (Claude, ChatGPT, Gemini) or any program that speaks the game's WebSocket API can play a character. The player is God: they see everything and can change an agent's luck, and nothing more.
 
-**Status:** version 2. Millbrook is now an 80 by 50 tile city of seven districts and about 60 people, drawn isometrically in the style of SimCity, with buses on two lines and a housing market where households buy better homes and homes visibly run down. God's screen ranks everyone from richest to poorest and carries the city's News and a log of every decision the AI players made. Any program can connect over a WebSocket to play characters. Jump to [Play it](#play-it) to run it, and see [What's in this build](#whats-in-this-build) for what works today. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. Most of the design is still ahead of the code.
+**Status:** version 3. Millbrook, v2's city of about 60 people, is now the north-west corner of a 256 by 192 tile region of 17 districts, with two railway lines and about 1,000 townsfolk who live ordinary lives around the 60 characters the AI players play. Everyone talks, makes friends and rivals, dates, moves in, marries and splits up, falls ill, has babies and dies, is hired, reviewed, promoted and laid off, and settles their money each week. It is drawn isometrically in the style of SimCity, with the housing market and buses of v2, and God's screen ranks the 60 from richest to poorest and carries the city's News and a log of every decision the AI players made. Any program can connect over a WebSocket to play characters. Jump to [Play it](#play-it) to run it, and see [What's in v3](#whats-in-v3) for what is new and [What came in v2](#what-came-in-v2) for the rest. The full game design is below and in the shared [design doc](https://claude.ai/code/artifact/17763a70-98be-4eee-af2f-2f2b226f7a40), which also has the diagrams. Much of the design is still ahead of the code.
 
 ## Contents
 
@@ -28,7 +28,8 @@ A living city simulation where every resident is an AI agent with a home, a fami
 - [Roadmap](#roadmap)
 - [Decisions so far](#decisions-so-far)
 - [Play it](#play-it)
-- [What's in this build](#whats-in-this-build)
+- [What's in v3](#whats-in-v3)
+- [What came in v2](#what-came-in-v2)
 - [Project layout](#project-layout)
 
 
@@ -489,6 +490,7 @@ The game is built in five phases, each ending at a gate that proves the layer wo
 - God has no Faith or other resource; the only powers are observing and changing luck.
 - The first playable city has 20 agents in one neighbourhood.
 - Version 2 follows what the first players asked for: homes worth buying that visibly fall apart when neglected, a SimCity-style isometric view with bigger tiles, a city of about 60 people in seven districts with buses, and a main screen with the wealth ranking from richest to poorest, the News and the LLM decisions log.
+- Version 3 follows what the owner asked for next: as realistic as possible, people who meet and deal with each other, trains, a much larger map, and a thousand more people who live ordinary lives without an AI model, like the city of SimCity 4. The 60 named characters stay the ones the AI players play; v2's town still runs on its own with `--world millbrook`.
 - One player, one God, per city.
 - A web app comes first, and the first build goes straight to the Pokémon-style web map. Controllers connect over a WebSocket API only. It runs live, asks each character's model for answers, and falls back to default answers when a reply takes too long.
 - The first city runs on Claude only, with other models added later. Players bring their own API keys.
@@ -505,7 +507,7 @@ From the repository root:
 
     python3 -m gameofailife
 
-Then open <http://localhost:8000> in your browser. You are God.
+Then open <http://localhost:8000> in your browser. You are God. The city starts as the region around Millbrook with 1,000 townsfolk; `--world millbrook` runs v2's town alone.
 
 ![Millbrook from above: the isometric city with the City tab open](docs/screenshots/city-iso.png)
 
@@ -520,16 +522,19 @@ Useful flags:
 | `--luck-log FILE` | off | Appends every hidden odds roll (base odds, odds after Luck, the roll) to a JSONL file for analysis. The game itself never shows the odds. |
 | `--headless` | off | Simulates without a server and prints what happened. |
 | `--days N` | `3` | How many days to simulate with `--headless`. |
+| `--world` | `region` | `region`: Millbrook in the 256 by 192 tile region with its railway and townsfolk. `millbrook`: v2's 80 by 50 tile town alone, with no region, trains or townsfolk (v3's social life, health, babies, careers and weekly money still apply to its 60). |
+| `--folk N` | `1000` | How many townsfolk live in the region (`0` for a region with nobody but the 60; always 0 with `--world millbrook`). |
 
 ### What you see and can do as God
 
-- **The city.** Millbrook is an 80 by 50 tile city drawn isometrically, SimCity-style, with big tiles and buildings you can tell apart at a glance: the Brightline Tech tower, City Hall, the hospital with its helipad, the bank, the school, the shops and cafes, the factory by the river, blocks of flats, family houses and big houses with pools. Drag to pan, scroll or pinch to zoom, and use the buttons for zoom and the whole city. The View menu switches between the isometric map and a flat top-down one and opens the minimap. People walk, run, drive, ride the buses or take a taxi, an ambulance takes anyone who falls very ill to the hospital, cars and taxis wait at red lights, two bus lines of four buses each carry their riders round the middle of town on the timetable, planes cross the sky three times a day, rain falls (snow in winter) and the city darkens at night with lit windows.
+- **The region.** The page opens on Millbrook and Riverton Central at a quarter zoom. Zoomed out, the region becomes a simple coloured map with lit windows at night; zoomed in, every building is drawn in full: Riverton's towers with their roof plant and blinking beacons, brick blocks and row houses, the stations, the stadium, the mall, factories, farmland that changes with the seasons, highways, bridges and level crossings. Townsfolk walk and drive the streets, and the trains of the Riverton and Southfield lines glide along their tracks with their doors open at the platforms; hover over a train to see how many ride it. In the region the View menu adds Go to (Millbrook, each district with how many people are there now, and the stations) and a Transit layer that picks out the railway; the keys M, G and T do the same.
+- **Millbrook.** Millbrook is an 80 by 50 tile town drawn isometrically, SimCity-style, with big tiles and buildings you can tell apart at a glance: the Brightline Tech tower, City Hall, the hospital with its helipad, the bank, the school, the shops and cafes, the factory by the river, blocks of flats, family houses and big houses with pools. Drag to pan, scroll or pinch to zoom, and use the buttons for zoom and the whole city. The View menu switches between the isometric map and a flat top-down one and opens the minimap. People walk, run, drive, ride the buses or take a taxi, an ambulance takes anyone who falls very ill to the hospital, cars and taxis wait at red lights, two bus lines of four buses each carry their riders round the middle of town on the timetable, planes cross the sky three times a day, rain falls (snow in winter) and the city darkens at night with lit windows.
 - **Hover and click.** Hover over a person to see what they are doing, or over a building to see its name, hours and who is inside. Click a person to open them. Click an empty home, or click a home a second time, to open its home card (the first click on a building with people inside opens the first of them).
-- **The HUD.** Across the top of the map: the population, the mood, the city's wealth, the homes for sale and to let, how many homes are neglected, and how many characters the AI players play and how many are thinking right now. Click one to open its part of the dashboard; the neglected count shows the condition colours on the map.
-- **City tab.** The city at a glance: population and deaths, mood, wealth (median, the richest tenth's share, the Gini index), homes (owned, rented, for sale and to let, and how run-down they are, stage by stage), jobs, the AI players, the needs, each district, and charts of the last seven days.
+- **The HUD.** Across the top of the map: the population (the named characters), the mood, the city's wealth, the homes for sale and to let, how many homes are neglected, and how many characters the AI players play and how many are thinking right now. Click one to open its part of the dashboard; the neglected count shows the condition colours on the map.
+- **City tab.** The city at a glance, townsfolk included in the region: population, births and deaths, mood, wealth (median, the richest tenth's share, the Gini index), homes (owned, rented, for sale and to let, and how run-down they are, stage by stage), jobs, the AI players, the needs, each district, and charts of the last seven days.
 - **News tab.** The city's story: the headlines (deaths, home purchases and evictions, new friendships and falling-outs, big wins and losses, a new richest person), then everything notable, filtered by Major, Notable or Everything, by topic (Homes, Money, People, Health, AI), by a person, or by searching. Major news also pops up as a toast over the map and runs along the ticker at the bottom.
 - **LLM log tab.** Every decision an AI player was asked to make, newest first: who decided, the question, the four options, the one chosen, the controller and model, how long the answer took and the reason it gave. A decision the controller missed shows the default that was played, and a late answer shows up on it as "answered after N s, saved to the profile". Filter it by person, or to show the timeouts, or the answers that went against the character's habit.
-- **People tab.** Everyone from richest to poorest, with their worth split into cash, savings and their share of a home they own, and the change over the last 24 hours. Switch to everyone (children included) or households, or sort by something else. Click a person to open them: needs, money, health, mood, what they own (their home included), their recent decisions, the people they know and their memories.
+- **People tab.** The 60 named from richest to poorest, with their worth split into cash, savings and their share of a home they own, and the change over the last 24 hours. Switch to everyone (children included) or households, or sort by something else. Click a person to open them: needs, money, health, mood, what they own (their home included), their recent decisions, the people they know and their memories.
 - **Home cards.** Click a home on the map, or the home in a person's Owns block, to open its card: the residents, owned or rented, the condition and how run-down it looks, the value, the listing and the asking price or rent, any emergency, and the history of who lived there.
 - **Map colours.** The chips over the map, or the City tab's Map colours, colour the homes by Wealth, Mood or Condition, or by None.
 - **Luck.** The slider in a person's panel is your only power over the world. It runs from 0 to 100, everyone starts at 50, and it tilts the hidden odds of every outcome. The character never knows.
@@ -577,13 +582,13 @@ This runs three game days as fast as your computer allows, prints every headline
 
     python3 port/build.py
 
-This writes `port/dist/millbrook.html`, one self-contained page that runs the whole city in your browser: the same engine, ported line for line to JavaScript, with the same map, people, homes, buses, News, ranking and luck. Open the file directly; it needs no server and makes no network requests. `?seed=N` picks the city (1 is Millbrook), `?speed=N` starts at that speed, and `?dice=N` fixes the outcome dice, which are fresh on every load otherwise. Nobody plays characters in this version: there are no controllers, so everyone lives on habit and their play-style defaults, the LLM log stays empty, and there are no character pages.
+This writes `port/dist/millbrook.html`, one self-contained page that runs the whole city in your browser: the same engine, ported line for line to JavaScript, with the same region, trains, townsfolk, people, homes, buses, News, ranking and luck. Open the file directly; it needs no server and makes no network requests. It starts the region with 1,000 townsfolk. `?world=millbrook` runs v2's town alone and `?folk=N` sets how many townsfolk live in the region; `?seed=N` picks the city (1 is Millbrook), `?speed=N` starts at that speed, and `?dice=N` fixes the outcome dice, which are fresh on every load otherwise. If the region cannot start in your browser, the page falls back to Millbrook alone and says so at the top for a few seconds. Nobody plays characters in this version: there are no controllers, so everyone lives on habit and their play-style defaults, the LLM log stays empty, and there are no character pages.
 
 ### Run the tests
 
     python3 -m unittest discover -s tests
 
-The default run takes about a minute. The slow tests (the housing economy soak over many game weeks, the 7-day headless runs, the city view's and the full app's browser tests, and the browser version's page check and two longest side-by-side runs) run with `GOAL_SLOW=1`:
+The default run takes about five minutes. The slow tests (the long soaks of the housing market, the townsfolk's days and life in the region, the 7-day headless runs, the city view's and the full app's browser tests, and the browser version's page check and longest side-by-side runs) run with `GOAL_SLOW=1`:
 
     GOAL_SLOW=1 python3 -m unittest discover -s tests
 
@@ -593,12 +598,106 @@ The browser tests need Node and Playwright with a Chromium, and the full app's t
     node tests/browser/view_smoke.cjs         # the city view on the dev fixture
     node tests/browser/dashboard_smoke.cjs    # the dashboard on its fixture
     node tests/browser/god_view_smoke.cjs     # the God view against the real server
+    node tests/browser/full_app_folk_smoke.cjs  # the real server in the region with 1,000 townsfolk, desktop and phone
+    node tests/browser/region_view_smoke.cjs  # drawing the region: first frame, panning, still views, night, seasons
+    node tests/browser/region_movers_smoke.cjs  # trains, crowds and cars on the region from the real engine
+    node tests/browser/art_specimens.cjs      # every building style drawn, timed and checked
+    node port/tools/page_check.cjs            # the built browser page: it runs the region, with no errors
 
-`FULL_SHOTS=docs/screenshots node tests/browser/full_app_smoke.cjs` also refreshes the screenshots in this README. `client/dev/view.html` and `client/dev/dashboard.html` open the city view and the dashboard on fixtures, with no server. The city view's fixture is the real seed-1 city on its first morning; after a change to the simulation, `python3 -m tests.test_integration --write-fixture` makes it again (a test fails until then).
+`python3 -m tests.perf_folk` measures what the 1,000 townsfolk cost the engine, the server and the browser version, and fails when the engine's or the server's CPU time is over its limit.
 
-## What's in this build
+`FULL_SHOTS=docs/screenshots node tests/browser/full_app_smoke.cjs` also refreshes the screenshots in this README. `client/dev/view.html` and `client/dev/dashboard.html` open the city view and the dashboard on fixtures, with no server. The city view's fixture is the real seed-1 city on its first morning; after a change to the simulation, `python3 -m tests.test_integration --write-fixture` makes it again (a test fails until then), and `python3 -m tests.test_folk_protocol --write-fixture` makes the region's.
 
-This build answers what the first players asked for: homes worth buying and homes that visibly fall apart, a city that looks like SimCity with bigger tiles, a much bigger city, and a main screen that shows who is rich, what is happening and what the AI players decided. A lot of the design above is still not built.
+## What's in v3
+
+Version 3 answers what the owner asked for next: as realistic as possible, people who meet and deal with each other, trains, a much larger map, and a thousand more people who live ordinary lives without an AI model behind them, like the city of SimCity 4. The 60 named characters are still the ones the AI players play; around them now lives a whole region.
+
+**The region and its districts**
+
+- Millbrook is now the leafy north-west corner of a 256 by 192 tile region, about twelve times the area of v2's town. Across the river lie Northgate, The Heights and North Woods; in the middle, Riverton Downtown's 8 to 30-floor offices round Central Station, Midtown's towers and the Ironworks' factories; to the south, Quayside, Willow Hills and Southfield with their homes, schools, a stadium and a mall; Route 9's highways and Greenacre's farms on the edges. That is 10 new districts beside Millbrook's 7.
+- 334 new places (575 homes, 1,241 job slots, 5 schools, 105 shops, cafes and markets, 9 stations) and 656 more buildings that fill the streets; with Millbrook's 35 the map has 1,019 buildings, 30 of them 10 floors or more. Millbrook's own streets and buildings are exactly v2's.
+- The map is drawn in code like v2's: towers with setbacks, roof plant and a blinking beacon, brick blocks, row houses, a station with its clock turret, a stadium with floodlights, a mall, warehouses and factories, farmland that changes with the seasons, highways, road and rail bridges and level crossings. Zoomed out, the region turns into a simple coloured map so the whole thing stays smooth; zoomed in, every building is drawn in full.
+
+**Trains**
+
+- Two railway lines run on a fixed timetable, a train every 10 minutes each way: the Riverton Line (Millbrook, Northgate, Quayside, Central, Midtown and the Ironworks; trains R1 to R6) and the Southfield Line (Central, Southfield, Fairview and Willow Hills; S1 to S4). A ride costs $3 for ages 18 to 64 and is free for children and pensioners; changing lines at Central takes 2 minutes and costs nothing.
+- Townsfolk walk to the station, wait on the platform, ride and walk on from the station where they get off; drivers park and ride when the station is close. You see the four-car trains glide along their tracks with their doors open at the platforms, and hovering over one says how many ride it.
+
+**1,000 townsfolk**
+
+- About 1,000 townsfolk (ids `f0`, `f1`, ...) live in about 420 households in the region's homes: children, working adults and pensioners, each with a name unique among all 1,060 people, an age, six personality traits, needs, health, money and savings, and for most a job and a school.
+- They live default lives: they get up, go to work or school on foot, by car or by train, start at their own time (a quarter or half an hour either side of the hour, so the morning rush is spread out), shop, eat, see friends, go out in the evening and go home to bed. No AI model plays them and they never get forks, but the same hidden dice decide what happens to them, tilted by their own Luck. On the map, hovering over one says "A townsperson"; their own pages in God's view are for the next build (see below).
+- Their money is real: take-home pay at the end of each shift, a $400 pension on Fridays for those over 65 without a paid job, and on Sunday the rent or property tax, the bills and some saving. Groceries come from the nearest grocer, or are delivered for $8 more when none is in reach; someone off sick eats at home. A household three Sundays in the red moves to a cheaper home or leaves town.
+- The 60 named and the townsfolk share the city: they work side by side, meet in cafes and parks, become friends and can date. The 60 still live, work and shop only in Millbrook (see below).
+
+**Social life**
+
+- Everyone talks: people in the same room (at home, at work, at school, in a cafe or a park) chat a few times a day about the weather, work, school, money, family, health, the news or love, warmly, pleasantly, awkwardly or in an argument. You see a speech bubble over the place for each talk.
+- Talk moves how two people feel about each other. From it come new friends, falling-outs and rivals, flirting, asking out, dating, moving in together, engagements, weddings (on a Saturday afternoon in a park), break-ups and divorces, loans between friends and family, and rows at work or at home.
+- Eight new social forks reach the named characters with four options each: a crush, being asked out, a date, moving in, proposing and answering a proposal, relationship trouble, a partner who wants to split, and a friend in need of money. Each fork says who the other person is and how the character feels about them. A named character can text and invite townsfolk they know. Romance between a named character and a townsperson goes as far as dating.
+
+**Life events: health, babies, work and money**
+
+- Each person has their own birthday (a year is 360 game days). People fall ill (colds, the flu, a stomach bug, back pain, a broken bone, a heart attack or a stroke, and chronic conditions from 30), may see a doctor, pass a cold on at home, and go to hospital when it is serious, by ambulance for a named character. Ill people stay off work or school.
+- Couples have babies: a named couple's baby is a new named character who grows up in the city (Shira Peretz's baby arrives on day 4 of every new city), and townsfolk have townsfolk babies. People die of old age and illness, and their partners and friends grieve.
+- One job board holds every job in the region. Standing at work rises and falls shift by shift; every 90 days comes a review that can bring a raise (about one review in four at luck 50), a warning, a promotion or, for the long-failing, the sack. People are laid off, offered better jobs, helped into work by friends, retire, and draw a benefit while out of work.
+- Each adult's week is settled on Sunday: spending that grows with pay and shrinks slowly (and stops while the household is in the red), unexpected bills and windfalls, the children's costs and interest on debt.
+
+**How the 60 decide: the fixes from the long test run**
+
+- A character whose AI player is thinking sets off for work the usual way at once and switches when the answer lands, so slow models no longer make everyone late (at work at the start of their shift: 16-20 of 534 before, 518-519 after, over 14 days).
+- Opposite outcomes of one choice never both happen; first meetings happen only between people who are actually near each other; lonely characters spend the evening with someone at home or play with a friend instead of phoning a housemate; family dinners are on Saturday evenings and nobody leaves a small child alone; people sleep in on days off and go to bed later at weekends; an idle day at home ends in going out; rain changes plans; savings goals, invitations to walk in the park, and the controller's page (today's schedule, what came of recent choices, how many game minutes each second of thinking costs) are all reworked; children's pages read like school, not work.
+- A character's play style still learns from the AI player's choices, but now drifts at most a quarter of the way from where it started and slowly eases back.
+- The News is readable again: routine talk, accepted invitations, family dinners and townsfolk's household troubles go to the log and to people's memories, not to the headlines.
+
+**Running it**
+
+- `python3 -m gameofailife` starts the region with 1,000 townsfolk. `--folk N` sets how many townsfolk live in it, and `--world millbrook` runs v2's town alone, exactly as it was (no region, no trains, no townsfolk, with v3's social life, health and careers for the 60).
+- `python3 port/build.py` writes the browser version, which also starts the region with 1,000 townsfolk; add `?world=millbrook` or `?folk=N` to the page's address. If the region cannot start in a browser, the page falls back to Millbrook and says so.
+
+**Measured on this build**
+
+Seeds 1 to 3, the region with 1,000 townsfolk, on a 4-CPU machine at a load average under 3:
+
+- **Trains:** 319 to 382 boardings each weekday over 30 days (seed 1: 319-344, seed 2: 348-382, seed 3: 330-371).
+- **Friends and couples:** by the end of day 7, 35 to 45 new friendships (3 or 4 of them with one of the 60) and 2 to 5 new couples on top of the 292-296 a city starts with; one birth (Shira Peretz's baby) and no deaths.
+- **The streets at 08:00 on a weekday:** 103 to 126 townsfolk are out of doors in the whole region, and 43 to 63 of them in the view the page opens on.
+- **Money:** after 30 days the median adult is worth 9.2-9.6% more than at the start (21% more after 60 days on seed 1, with 5% of people in debt and a Gini index of 0.52).
+- **Work and health:** over 60 days on seed 1, 205 reviews brought 55 raises; 6 people were laid off and 65 hired; about one person in ten is ill at any time. With every Luck at 0 instead of 50, the same 60 days bring 9 raises in 198 reviews, and twice as many people are ill at the end.
+- **News:** 8.6 to 9.4 headlines a day on average, and at most 16 or 17 on any day.
+- **Hunger:** nobody starves by day 7. Over 30 days 1, 5 and 1 townsfolk starved on seeds 1 to 3, all of them people who had run out of money (see below).
+- **Speed:** with 1,000 townsfolk a game minute costs 0.99 ms of CPU on average and 6.3 ms at the 99th percentile (0.31 and 1.2 ms without them); the server runs speed 16 (38.4 ticks a second) on 2.65 ms of CPU a tick with God watching; the browser version runs a game day in 1.2 s. God's first message is 431 KB.
+- **Long runs (soaks) on this build:** 60 game days of life on seed 1 (and the same with every Luck at 0), 7 days of the townsfolk's days, 120 days of Millbrook's housing market on seeds 1 to 3, 7 days on seeds 1 to 3 checking that the 60 live exactly the same lives in the region as in Millbrook alone (with nobody else in the region), and 60 days of the 60's own housing market in the region. All passed.
+
+**Cut, or left for later**
+
+- **The dashboard is still about the 60.** The HUD's people count, the People tab, the wealth ranking and the LLM log show the 60 named; the City tab's population, wealth, homes and districts count all 1,060. There is no list of the townsfolk, no townsperson's page, no News filter by townsperson or topic and no region card in the dashboard yet. The server already sends a townsperson's page and the full roster (`get_agent` with an id like `f17`, and `get_folk`), for the next build.
+- **Townsfolk homes and newcomers:** townsfolk do not move to bigger or better homes, buy homes or do them up, and nobody new moves to town. Moving somewhere cheaper, or leaving town, after three Sundays in the red is in. There is no morning digest of the townsfolk's news.
+- **Poverty has no floor.** A townsperson with no money and an empty fridge goes hungry and can starve: in one 30-day run a single mother without a job whose rent was more than her $200 benefit starved in her second week, and her two eight-year-olds, left alone in the house, starved three weeks later. There is no help from family or friends with food, no food bank, and no one takes in orphaned children.
+- **Fewer questions for the AI players than planned:** falling ill, being laid off and retiring are settled by the character's play style, without a fork. Nobody goes to nursery or college, and grown-up children do not move out of their parents' home.
+- **The 60 stay in Millbrook:** they live, work and shop only there (so they are never in a region house hunt or a long commute), and none of them takes the train.
+- **Not in this build at all:** the 60 riding trains, townsfolk becoming named characters, parties, and job offers as forks for the 60.
+- **The view:** no overhead wires over the tracks and no fog. A townsperson cannot be followed on the map from the dashboard.
+- **Behind the scenes:** the homes' condition and listings carry no version number (`housing_version` in the plan), so the server sends them again every 40th frame as well as whenever they change.
+- **Left over from the long test run:** the housing forks' pages (each home's tier, bedrooms, condition and weekly cost, what each upkeep option does), the repair helper offered only from friends and family, buses (fewer at night and midday, offered for far outings, riders drawn on the bus), staff at the Diner and errands to the bank and City Hall, and keeping the game's pace from the real clock.
+- **Targets missed on this build:**
+  - The view the page opens on shows 43 to 63 townsfolk out of doors at 08:00, not the 150 to 210 the design aimed for.
+  - Drawing speed, measured in a headless test browser drawing in software at a load average of 0.7: panning across the region at 1280 by 800 has a worst frame of 61 ms and a 95th percentile of 30 ms (targets 50 and 25); at 1440 by 900 on a high-density screen, with the resolution lowered as it goes, 99 and 50 ms; a still view of Millbrook's Downtown at zoom 1/2 has a median of 12.6 ms (target 12, met on some runs). Opening the region, panning on a phone and in the top-down view, a still view of Riverton Downtown, the lights at night and the change of season are within their targets.
+  - Drawing a building's picture once takes at most 8.1 to 10.7 ms against a limit of 10 ms (missed on one of two runs).
+
+**Still not built from the design**
+
+- Natural-language conversations and meetings with a time and an agenda: characters talk in short lines, text and invite, but do not hold a conversation.
+- The named characters taking the train, working or living outside Millbrook, and townsfolk becoming named characters.
+- Flights to take, bikes, businesses, banks and mortgages, schools with grades, university, government, elections, crime and religion.
+- The other four needs (hygiene, bladder, comfort, safety), emotions, the Big Five personality and skills.
+- Saving, loading, replaying or branching a world.
+- Creating brand-new characters or editing the starter cast's identity: only play style and Luck can be changed.
+- Per-model comparisons, the fortune log and Luck history in the God view.
+
+## What came in v2
+
+Version 2 answered what the first players asked for: homes worth buying and homes that visibly fall apart, a city that looks like SimCity with bigger tiles, a much bigger city, and a main screen that shows who is rich, what is happening and what the AI players decided. Its town is still the north-west corner of v3's region, and runs alone with `--world millbrook`.
 
 **Better homes, and neglect you can see**
 
@@ -626,7 +725,7 @@ This build answers what the first players asked for: homes worth buying and home
 - LLM log: every decision the AI players were asked for, with the model, the reason, the answer time, timeouts and late answers.
 - The City tab, the HUD, home cards, map colours and a phone layout, all fed by a stats message the server pushes every few seconds.
 
-**Still from the first build**
+**From the first build**
 
 - A clock of one tick per game minute, about ten real minutes per game day at 1x, with weekdays, weekends and seasons of 90 days.
 - Four needs (hunger, energy, social, fun) that fall over time and are restored by sleeping, eating, seeing people and having fun.
@@ -637,29 +736,37 @@ This build answers what the first players asked for: homes worth buying and home
 - Health that drops when characters go hungry or exhausted, or live in a neglected home, hospital visits, and deaths from old age or from health running out.
 - Text messages and invitations between characters, sent by controllers. Characters also invite a friend out to a cafe on their own.
 
-**Not built yet (design only)**
-
-- Births, pregnancy, children growing up, and generations.
-- Creating brand-new characters or editing the starter cast's identity. Only play style and Luck can be changed.
-- Taking a flight, bikes, the metro and rush hour. The planes fly, but nobody gets on.
-- Finding, changing or losing jobs, promotions, businesses, banks, loans and mortgages.
-- Saving, loading, replaying or branching a world.
-- Natural-language conversations and meetings with a time and an agenda. Characters can text and invite, but not hold a conversation.
-- The other four needs (hygiene, bladder, comfort, safety), emotions, the Big Five personality and skills.
-- Illness and contagion, schools with grades, government, elections, crime and religion.
-- Per-model comparisons, the fortune log and Luck history in the God view.
-
 ## Project layout
 
 ```
 GameOfAILife/
 ├── gameofailife/            the game server (Python standard library only)
-│   ├── __main__.py          command line: python3 -m gameofailife (and --headless)
+│   ├── __main__.py          command line: python3 -m gameofailife (--world, --folk, --headless)
 │   ├── clock.py             game time, days, weekdays and seasons
 │   ├── rng.py               the seeded dice and portable rounding
-│   ├── town.py              the 80 x 50 map: streets, districts, the 39 places, trees
+│   ├── dice.py              keyed dice: one fresh stream per (seed, purpose, ids), the same in Python and JS
+│   ├── town.py              Millbrook's 80 x 50 map: streets, districts, the 39 places, trees
+│   ├── region.py            the 256 x 192 region around Millbrook, read from data/region.json
+│   ├── regiongen.py         writes data/region.json (python3 -m gameofailife.regiongen --check)
+│   ├── data/region.json     the region: districts, streets, highways, rail, places, homes and job slots
+│   ├── roads.py             the road graph the townsfolk walk and drive on
+│   ├── rail.py              the two railway lines, their timetable, boarding and fares
 │   ├── cast.py              the starter cast: about 60 people in 27 households
 │   ├── agent.py             characters: needs, jobs, households, relationships, play style
+│   ├── people.py            one contract for both kinds of people, the 60 named and the townsfolk
+│   ├── folk.py              the townsfolk's days: the wheel, their choices, trips, pages and crowds
+│   ├── folk_gen.py          the townsfolk and their households, homes, jobs, schools, cars and money
+│   ├── folk_model.py        a townsperson, a townsfolk household and a trip
+│   ├── folk_names.py        the townsfolk's first names and surnames
+│   ├── folk_transit.py      how townsfolk get about: on foot, by car or by train
+│   ├── folk_life.py         townsfolk money: pay, pensions, Sunday rent and bills, arrears, leaving town
+│   ├── social.py            talk, friends, rivals, romance, dates, moving in, weddings, splits, loans
+│   ├── social_forks.py      the eight social forks of the 60
+│   ├── talk.py              what people say: topics, openers, replies and answers to texts
+│   ├── life.py              illness, doctors and hospital, pregnancy and babies, birthdays and death
+│   ├── life_tables.py       the yearly odds by age behind life.py
+│   ├── career.py            the job board, standing at work, reviews, raises, promotions, layoffs, hiring
+│   ├── money.py             each adult's week: lifestyle spending, shocks, debt interest, children's costs
 │   ├── travel.py            getting around: trip times on foot, by car, taxi and bus, the lights
 │   ├── transit.py           the bus lines, stops and timetable, and the daily flights
 │   ├── housing.py           homes, their condition, the market, moves, rent, tax and emergencies
@@ -673,16 +780,19 @@ GameOfAILife/
 ├── client/                  the God view in the browser
 │   ├── index.html, game.js, style.css      the page, the socket and the header
 │   ├── dashboard.js, dashboard.css         the City, News, LLM log and People tabs, HUD, toasts, home cards
-│   ├── view/                the isometric city view (projection, art, buildings, people, camera, minimap)
+│   ├── view/                the isometric city view: projection, art, buildings, towers, rail and train art,
+│   │                        the region's levels of detail, crowds, trains, people, camera and minimap
 │   ├── character.html       the character page
-│   └── dev/                 view.html and dashboard.html on fixtures, with no server
+│   └── dev/                 view.html, region.html, specimens.html and dashboard.html on fixtures, no server
 ├── port/                    the browser version: build.py, src/ (the engine in JavaScript) and tools/
+│                            (page_check.cjs and the parity_*.cjs side-by-side checks)
 ├── examples/
 │   ├── simple_controller.py     a rule-based controller
 │   └── claude_controller.py     Claude plays characters
 ├── docs/
 │   ├── protocol.md          the WebSocket API reference
 │   └── screenshots/
-└── tests/                   python3 -m unittest discover -s tests
+└── tests/                   python3 -m unittest discover -s tests; perf_folk.py (python3 -m tests.perf_folk)
+    ├── fixtures/            the seed-1 cast, region and townsfolk the tests compare against
     └── browser/             Playwright smoke tests (node tests/browser/<name>.cjs)
 ```
