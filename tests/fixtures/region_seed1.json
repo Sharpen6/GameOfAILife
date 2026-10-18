@@ -1,0 +1,196 @@
+{
+ "region_sha1": "3db25cc30ec506054ef76123d518967734a34c59",
+ "hour0_sha1": "29a45ed5f37906a194b6dc91ab70d1af0f492436",
+ "tiles_sha1": "d8531578bd4c9c99e43c90344d09ff644c3659aa",
+ "places": 334,
+ "kinds": {
+  "bank": 1,
+  "cafe": 43,
+  "home": 177,
+  "hospital": 1,
+  "market": 4,
+  "office": 14,
+  "park": 6,
+  "school": 5,
+  "shop": 58,
+  "station": 9,
+  "townhall": 4,
+  "venue": 3,
+  "works": 9
+ },
+ "homes": 575,
+ "tiers": {
+  "big_house": 22,
+  "flat": 388,
+  "house": 165
+ },
+ "homes_by_district": {
+  "east_woods": 32,
+  "midtown": 104,
+  "northgate": 98,
+  "quayside": 100,
+  "southfield": 79,
+  "the_heights": 22,
+  "willow_hills": 140
+ },
+ "start": {
+  "for_sale": 3,
+  "let": 501,
+  "owned": 71
+ },
+ "start_occupied": 572,
+ "slots": {
+  "region": 1241,
+  "millbrook": 142
+ },
+ "slots_by_district": {
+  "downtown_riverton": 379,
+  "ironworks": 319,
+  "midtown": 195,
+  "millbrook": 142,
+  "north_woods": 10,
+  "northgate": 58,
+  "quayside": 52,
+  "southfield": 138,
+  "the_works": 4,
+  "willow_hills": 86
+ },
+ "decor": 656,
+ "junctions": 284,
+ "stops": {
+  "R": {
+   "millbrook_station": [
+    4,
+    184
+   ],
+   "northgate_station": [
+    30,
+    158
+   ],
+   "quayside_station": [
+    65,
+    121
+   ],
+   "central_station": [
+    91,
+    97
+   ],
+   "midtown_station": [
+    143,
+    45
+   ],
+   "ironworks_station": [
+    182,
+    6
+   ]
+  },
+  "S": {
+   "central_station": [
+    4,
+    116
+   ],
+   "southfield_station": [
+    26,
+    94
+   ],
+   "fairview_station": [
+    74,
+    44
+   ],
+   "willow_hills_station": [
+    112,
+    6
+   ]
+  }
+ },
+ "track_tiles": {
+  "R": {
+   "out": 189,
+   "in": 189
+  },
+  "S": {
+   "out": 119,
+   "in": 121
+  }
+ },
+ "run_minutes": {
+  "R": {
+   "out": [
+    0,
+    3,
+    8,
+    12,
+    19,
+    24
+   ],
+   "in": [
+    0,
+    4,
+    11,
+    15,
+    20,
+    24
+   ]
+  },
+  "S": {
+   "out": [
+    0,
+    3,
+    9,
+    14
+   ],
+   "in": [
+    0,
+    4,
+    10,
+    14
+   ]
+  }
+ },
+ "price_medians": {
+  "east_woods/flat": [
+   10400.0,
+   255.0
+  ],
+  "midtown/flat": [
+   11000.0,
+   320.0
+  ],
+  "northgate/flat": [
+   8200.0,
+   210.0
+  ],
+  "northgate/house": [
+   14000.0,
+   335.0
+  ],
+  "quayside/flat": [
+   7900.0,
+   202.5
+  ],
+  "quayside/house": [
+   12400.0,
+   310.0
+  ],
+  "southfield/flat": [
+   8700.0,
+   205.0
+  ],
+  "southfield/house": [
+   15800,
+   340
+  ],
+  "the_heights/big_house": [
+   76000.0,
+   1135.0
+  ],
+  "willow_hills/flat": [
+   10400.0,
+   227.5
+  ],
+  "willow_hills/house": [
+   17400.0,
+   380.0
+  ]
+ }
+}
