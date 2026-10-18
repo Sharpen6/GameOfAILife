@@ -1407,8 +1407,9 @@ with two warnings they are fired (`job_lost`); at 85 or more after 120 days in t
 certain from 67), after which the person does not look for work. Anyone may be laid off (`job_lost`). A worker
 at 50 or more may be offered a job paying 10% to 25% more and take it (`job_new`). A job seeker 18 to 64 has a
 daily chance of a job (`job_new`), better with higher standing and better again when a friend (affinity 40 or
-more) works where a job is open, which is then the job taken; otherwise at no more than 1.25 times their last
-wage, a named character takes the best paid, a townsperson the nearest. A new hire meets up to 4 coworkers there
+more) works where a job is open (for a townsperson, one they can reach), which is then the job taken; otherwise
+at no more than 1.25 times their last wage, a named character takes the best paid, a townsperson the nearest.
+Raises and promotions belong to the holder: a job left behind is advertised at its own title and pay. A new hire meets up to 4 coworkers there
 (`coworker` relationships at 15 to 25). A laid-off or fired person gets $200 a week for 13 weeks while under 65.
 
 **Money.** Each adult's week is settled on Sunday between 09:00 and 19:00, at a minute of their own: the benefit;
