@@ -967,4 +967,4 @@ def stats_block(sim) -> dict:
     lc = sim.life
     return {"ill_now": ill_now, "in_hospital": in_hosp, "couples": partnered // 2, "births": lc.counts["births"],
             "deaths": lc.counts["deaths"], "jobless": jobless, "in_debt": in_debt,
-            "talks_today": lc.today["talks"], "friendships_today": lc.today["new_friend"]}
+            "talks_today": lc.today["talks"], "friendships_today": lc.today["friendships"]}  # social._count's keys

@@ -877,7 +877,7 @@
     const lc = sim.life;
     return { ill_now, in_hospital: in_hosp, couples: Math.floor(partnered / 2), births: cget(lc.counts, "births"),
       deaths: cget(lc.counts, "deaths"), jobless, in_debt, talks_today: cget(lc.today, "talks"),
-      friendships_today: cget(lc.today, "new_friend") };
+      friendships_today: cget(lc.today, "friendships") }; // social._count's keys
   }
 
   G.life = {

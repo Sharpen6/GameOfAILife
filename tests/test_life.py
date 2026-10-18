@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from gameofailife import career, dice, folk, life, life_tables, people
-from gameofailife.agent import Job, RelationKind
+from gameofailife import career, dice, folk, life, life_tables, people, social
+from gameofailife.agent import Job, RelationKind, Relationship
 from gameofailife.folk_model import Person
 from gameofailife.sim import Simulation
 
@@ -168,6 +168,20 @@ class SkeletonTest(unittest.TestCase):
         self.assertEqual(set(block), {"ill_now", "in_hospital", "couples", "births", "deaths", "jobless", "in_debt",
                                       "talks_today", "friendships_today"})
         self.assertTrue(all(isinstance(v, int) for v in block.values()))
+
+    def test_friendships_today_counts_the_days_new_friends(self):
+        """city.life.friendships_today counts the friendships made since midnight (social counts them as
+        "friendships"; the block read a key nothing wrote, so it said 0 every day), and talks_today the talks."""
+        sim = life_sim()
+        a, b = sim.agents["dana"], sim.agents["sara"]
+        for x, y in ((a, b), (b, a)):
+            x.relationships[y.id] = Relationship(RelationKind.ACQUAINTANCE, 39.5)
+        self.assertEqual(life.stats_block(sim)["friendships_today"], 0)
+        a.relationships[b.id].affinity = 40.5
+        social.on_affinity(sim, a.id, b.id, 39.5, 40.5)
+        self.assertIs(a.relationships[b.id].kind, RelationKind.FRIEND)
+        self.assertEqual(life.stats_block(sim)["friendships_today"], 1)
+        self.assertEqual(life.stats_block(sim)["friendships_today"], sim.life.today["friendships"])
 
 
 def run_to(sim: Simulation, tick: int) -> None:
