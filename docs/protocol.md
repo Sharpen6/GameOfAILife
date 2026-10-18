@@ -1333,10 +1333,14 @@ partner (grief for 30 days) and saddens their friends and family.
 character's `work.standing`) moves after every shift, more for the diligent, and drifts toward 50; a pupil's
 moves +0.5 a day at school as in v2. Every 90 days a worker with 30 days in the job has a review: at 50 or
 more a 4-7% raise may follow (`raise`); under 25 a warning (`warning`); at 40 or more the warnings clear; under 20
-with two warnings they are fired (`job_lost`). Anyone may be laid off (`job_lost`). A job seeker 18 to 64 has a
-daily chance of a job (`job_new`), better with higher standing, at no more than 1.25 times their last wage: a
-named character takes the best paid, a townsperson the nearest. A laid-off or fired person gets $200 a week for
-13 weeks while under 65.
+with two warnings they are fired (`job_lost`); at 85 or more after 120 days in the job a promotion may follow
+(`promotion`: "senior ", then "head ", at 1.2 times the pay); from 65 a review may end in retirement (`retired`,
+certain from 67), after which the person does not look for work. Anyone may be laid off (`job_lost`). A worker
+at 50 or more may be offered a job paying 10% to 25% more and take it (`job_new`). A job seeker 18 to 64 has a
+daily chance of a job (`job_new`), better with higher standing and better again when a friend (affinity 40 or
+more) works where a job is open, which is then the job taken; otherwise at no more than 1.25 times their last
+wage, a named character takes the best paid, a townsperson the nearest. A new hire meets up to 4 coworkers there
+(`coworker` relationships at 15 to 25). A laid-off or fired person gets $200 a week for 13 weeks while under 65.
 
 **Money.** Each adult's week is settled on Sunday between 09:00 and 19:00, at a minute of their own: the benefit;
 lifestyle spending, which rises quickly with pay and falls slowly (halved while the household tightens its
@@ -1351,7 +1355,7 @@ a negative purse.
 | Agent page | `life` | `{"stage", "birthday", "partner", "children", "friends", "rivals", "conditions", "chronic", "pregnant", "work", "money", "talks"}`. `partner`: `null` or `{"id", "name", "kind", "married", "days"}` (`kind` `partner` or `dating`); `children`: `[{"id", "name", "age"}]`; `friends`: a count; `rivals`: `[{"id", "name"}]`; `conditions`: `[{"id", "label", "days_left", "off_work"}]`; `chronic`: condition ids; `pregnant`: `null` or `{"with", "name", "days_left"}`; `work`: `{"standing", "warnings", "days_in_job", "jobless_days", "benefit"}` (`days_in_job` `null` without a job, `jobless_days` `null` unless looking for work); `money`: `{"lifestyle", "debt", "loans": [{"id", "with", "name", "dir", "amount"}]}` (`dir` `lent` or `borrowed`); `talks`: see [Social](#social). |
 | Fork | `you.life` | `{"partner", "children", "conditions", "standing", "jobless_days", "debt"}`: `partner` `null` or `{"id", "name", "kind", "married"}`, `children` a count, `conditions` labels such as `"the flu"`, `debt` whole dollars owed beyond savings. |
 | Stats | `city.life` | `{"ill_now", "in_hospital", "couples", "births", "deaths", "jobless", "in_debt", "talks_today", "friendships_today"}`, all integers, over the named and the townsfolk; `births` and `deaths` since the start (`city.births` and `city.deaths` are the same counts). |
-| Event | `tag` | Life's tags: `expecting`, `birth`, `ill`, `recovered`, `doctor`, `chronic`, `hospital`, `discharged`, `death`, `came_of_age`, `raise`, `warning`, `job_new`, `job_lost`, `expense` and `windfall`. A townsperson's events reach the log only at importance 1 or more. |
+| Event | `tag` | Life's tags: `expecting`, `birth`, `ill`, `recovered`, `doctor`, `chronic`, `hospital`, `discharged`, `death`, `came_of_age`, `raise`, `warning`, `promotion`, `retired`, `job_new`, `job_lost`, `expense` and `windfall`. A townsperson's events reach the log only at importance 1 or more. |
 
 ## View data
 
