@@ -88,7 +88,7 @@
   const FLIGHT_MINUTES = 12; // the daily planes (transit.FLIGHTS) take this long to cross the sky
   const WANDER = ["walk_park", "play"]; // activities that stroll around their park
   const WANDER_EVERY = 1; // minutes per tile of a stroll in the park (walking pace, so an hour reaches its far end and back)
-  const MEET = ["hang_out", "play"]; // activities an invite meets at: the host waits doing it, the guest comes to do it
+  const MEET = ["hang_out", "play", "walk_park"]; // activities an invite meets at: the host waits doing it, the guest comes to do it
   const MEET_TILES = 3; // how near two people outdoors must be for a first meeting (_meet_someone)
   const IDLE_FUN = 1.6; // how much faster fun drains while sitting idle (FIXLISTS 8)
   const RECENT_FORKS = 8; // decisions the fork message's `you.recent` carries, with what came of each
@@ -910,14 +910,22 @@
     // The option to play when an answer lands after the character set off for work (FIXLISTS 1), and why when it is
     // not the one chosen. Any way to work: already at work, the way they went; the chosen way when it still gets
     // them in on time from here; else the fastest way still on time (or simply the fastest). The played option's
-    // hidden late odds are worked out again for when they get in. A choice to stay home stands.
+    // hidden late odds are worked out again for when they get in. A choice to stay home stands; made after they got
+    // in, it pays the minutes already worked. More than WORK_LATE late, the same rules hold: someone already at work
+    // keeps working.
     _retime(agent, fork, choice) {
       const goes = [];
       fork.options.forEach((o, i) => { if (o.steps.some(s => s[0] === "work")) goes.push(i); });
-      const start = this._shift_start_tick(agent);
-      if (start === null || !goes.includes(choice)) return [choice, ""];
-      const tick = this.clock.tick;
       const working = agent.state === "busy" && agent.activity === "work";
+      if (!goes.includes(choice) || !agent.job) {
+        if (working) this._end_activity(agent); // the minutes already worked are paid
+        return [choice, ""];
+      }
+      const tick = this.clock.tick;
+      let start = this._shift_start_tick(agent);
+      if (start === null) { // past the late limit: today's start all the same (worked_today is set only in _decide)
+        start = tick - this.clock.minute_of_day + agent.job.start_hour * 60;
+      }
       const mins = {};
       const prov = agent.provisional ?? 0;
       for (const i of goes) {
@@ -1399,7 +1407,8 @@
         if (host.state === "busy") host.busy_until = Math.max(host.busy_until, hold);
         else this._host_hold.set(host.id, hold);
       } else if (this._interruptible(host)) {
-        host.plan = [[this.town.places.get(place_id).kind === "park" ? "play" : "hang_out", place_id]];
+        const park = this.town.places.get(place_id).kind === "park"; // adults walk there, children play (invite_fork's meet)
+        host.plan = [[park ? (host.is_adult ? "walk_park" : "play") : "hang_out", place_id]];
         host.usual_plan = true;
         host.state = "idle";
         this._host_hold.set(host.id, hold + this.walk_minutes(host, place_id));

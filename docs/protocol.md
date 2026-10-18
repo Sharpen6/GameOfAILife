@@ -769,8 +769,10 @@ option plays if it is still on time, else the fastest option still on time (or
 the fastest of all), and the decided fork's `reason` gets a note such as
 `"already at work by then: Walk to work instead"` or `"too late for that by
 then: Run to work instead"`. Hidden outcomes are rolled once, for the option
-actually played, with its lateness odds re-timed for the minutes left. Other
-forks still wait with the character standing, but a fork still open when it is
+actually played, with its lateness odds re-timed for the minutes left. The
+same rules hold however late the answer lands, so someone already at work keeps
+working. A choice to stay home (calling in sick) stands; made after they got
+in, it pays the minutes already worked. Other forks still wait with the character standing, but a fork still open when it is
 time to leave for work is decided by its profile default (`by` `"timeout"`,
 reason `"Time to leave for work; played the default."`).
 
