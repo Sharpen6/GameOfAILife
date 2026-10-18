@@ -40,8 +40,8 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..", "..");
 const SHOTS = process.env.FULL_SHOTS ? path.resolve(process.cwd(), process.env.FULL_SHOTS) : "";
 const SIZES = [["desktop", { width: 1440, height: 900 }, false], ["phone", { width: 390, height: 844 }, true]];
-const SCRIPTS = ["view/proj.js", "view/art.js", "view/buildings.js", "view/actors.js", "view/scene.js", "view/movers.js",
-  "view/camera.js", "view/minimap.js", "view/view.js", "dashboard.js", "game.js"];
+const SCRIPTS = ["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart", "scene", "movers",
+  "crowd", "trains", "pings", "camera", "minimap", "view"].map(n => `view/${n}.js`).concat(["dashboard.js", "game.js"]);
 const CONTROLLER = "smoke-bot", MODEL = "fake-model-1";
 const LATE_MS = 6500; // the late answer: after the 5 s window, inside the 10 s one
 const MAJOR_WAIT_MS = 150000; // at 16x a game day is 37.5 s, and the seed-1 city has a few major events a day

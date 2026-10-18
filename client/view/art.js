@@ -74,6 +74,8 @@
     const n = pts.length;
     for (let i = 0; i < n; i++) { const x = pts[i][0]; if (x < minX) minX = x; if (x > maxX) maxX = x; }
     const x0 = Math.round(minX), x1 = Math.round(maxX);
+    // neighbouring columns with the same span go out as one rect (same pixels, far fewer calls)
+    let runX = 0, runA = 0, runB = 0;
     for (let x = x0; x < x1; x++) {
       const cx = x + 0.5;
       let lo = Infinity, hi = -Infinity;
@@ -84,9 +86,14 @@
         if (y < lo) lo = y;
         if (y > hi) hi = y;
       }
-      const ya = Math.round(lo), yb = Math.round(hi);
-      if (yb > ya) g.fillRect(x, ya, 1, yb - ya);
+      let ya = Math.round(lo), yb = Math.round(hi);
+      if (!(yb > ya)) { ya = 0; yb = 0; }
+      if (ya !== runA || yb !== runB) {
+        if (runB > runA) g.fillRect(runX, runA, x - runX, runB - runA);
+        runX = x; runA = ya; runB = yb;
+      }
     }
+    if (runB > runA) g.fillRect(runX, runA, x1 - runX, runB - runA);
   }
   CV.poly = poly;
   const px = (g, x, y, w, h, c) => { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), w, h); };
@@ -182,6 +189,81 @@
       flower: [], leaf: ["#8a9a96", "#b8c6c2", "#d8e2df", "#eef4f2", "#ffffff"], snow: true },
   };
   CV.SEASON = SEASON;
+
+  // --- ground: the only place tile art is chosen (view.md 3.8, 4.5) ------------------------------------------
+  // CV.groundKey(R, x, y, season) -> [drawer, ...args]; art[drawer](...args) is the tw x (th + 24) tile. Codes are
+  // region.md 3.1's: . grass, # street, B D building lots, P park, T tree (grass under it), e entry walk, ~ water,
+  // b road bridge, x level crossing, F farmland, = rail, r rail bridge, S platform, H highway, h highway bridge.
+  // R needs w, h and either tiles (rows of code characters) or code (Uint8Array) with CODE (code character or
+  // name -> int). An optional R.groundOverride(x, y, season) -> key | null lets the scene keep its own choice for a
+  // tile (Millbrook's lawns, drives and lots). Off the map, streets run on (as v2's roads do at the map edge).
+  const CODE_NAMES = { grass: ".", street: "#", road: "#", building: "B", lot: "D", park: "P", tree: "T", entry: "e",
+    water: "~", road_bridge: "b", bridge: "b", crossing: "x", farm: "F", farmland: "F", rail: "=", rail_bridge: "r",
+    platform: "S", highway: "H", highway_bridge: "h", frozen: "?" };
+  const readers = new WeakMap();
+  function codeReader(R) {
+    let f = readers.get(R);
+    if (f) return f;
+    const W = R.w, Hh = R.h;
+    if (R.tiles) f = (x, y) => x < 0 || y < 0 || x >= W || y >= Hh ? null : R.tiles[y][x];
+    else if (typeof R.charAt === "function") f = (x, y) => x < 0 || y < 0 || x >= W || y >= Hh ? null : R.charAt(x, y);
+    else {
+      const inv = [];
+      for (const k of Object.keys(R.CODE || {})) inv[R.CODE[k]] = k.length === 1 ? k : CODE_NAMES[k] || ".";
+      f = (x, y) => x < 0 || y < 0 || x >= W || y >= Hh ? null : inv[R.code[y * W + x]] || ".";
+    }
+    readers.set(R, f);
+    return f;
+  }
+  CV.tileVariant = (x, y) => hash(x * 7919 + y * 104729 + 13) % 8; // scene.js's per-tile variant
+  const STREETS = "#bx", ROADLIKE = "#bxHh", RAILS = "=rx", HIGHWAYS = "Hh", OVER_WATER = "~brh";
+  CV.groundKey = function (R, x, y, season) {
+    if (typeof R.groundOverride === "function") { const o = R.groundOverride(x, y, season); if (o) return o; }
+    const at = codeReader(R), c = at(x, y), v = CV.tileVariant(x, y), s = season || "summer";
+    const W = R.w, Hh = R.h;
+    // streets run off the map's edges (v2's isRoad)
+    const isIn = (a, b, set) => {
+      if (a >= 0 && b >= 0 && a < W && b < Hh) return set.indexOf(at(a, b)) >= 0;
+      const cx = Math.max(0, Math.min(W - 1, a)), cy = Math.max(0, Math.min(Hh - 1, b));
+      if (b >= 0 && b < Hh) return set.indexOf(at(cx, b)) >= 0;
+      if (a >= 0 && a < W) return b < 0 && set.indexOf(at(a, 0)) >= 0;
+      return false;
+    };
+    const mask4 = set => (isIn(x, y - 1, set) ? 1 : 0) | (isIn(x + 1, y, set) ? 2 : 0) | (isIn(x, y + 1, set) ? 4 : 0) | (isIn(x - 1, y, set) ? 8 : 0);
+    const diag4 = set => (isIn(x + 1, y - 1, set) ? 1 : 0) | (isIn(x + 1, y + 1, set) ? 2 : 0) | (isIn(x - 1, y + 1, set) ? 4 : 0) | (isIn(x - 1, y - 1, set) ? 8 : 0);
+    const mb = R.millbrook || CV.MILLBROOK || [0, 0, 80, 50];
+    const inMill = x >= mb[0] && y >= mb[1] && x < mb[0] + mb[2] && y < mb[1] + mb[3];
+    switch (c) {
+      case "#": {
+        // an 80 x 50 town keeps v2's rule (streets meet streets only); in the region streets also meet bridges,
+        // crossings and highway ramps, and outside Millbrook's rectangle they gain edge lines
+        const set = W <= 80 && Hh <= 50 ? "#" : ROADLIKE;
+        return inMill ? ["road", mask4(set), diag4(set), s, v % 4] : ["road", mask4(set), diag4(set), s, v % 4, 1];
+      }
+      case "~": {
+        const L = (a, b) => { const t = at(a, b); return t !== null && OVER_WATER.indexOf(t) < 0; };
+        return ["water", (L(x, y - 1) ? 1 : 0) | (L(x + 1, y) ? 2 : 0) | (L(x, y + 1) ? 4 : 0) | (L(x - 1, y) ? 8 : 0), v % 4];
+      }
+      case "b": return ["roadBridge", mask4(ROADLIKE), s, v % 4];
+      case "x": return ["crossing", mask4(ROADLIKE), mask4(RAILS + "S"), s, v % 4];
+      case "=": return ["rail", mask4(RAILS), s, v % 4];
+      case "r": return ["railBridge", mask4(RAILS), s, v % 4];
+      case "S": return ["platform", mask4(RAILS), s, v % 2];
+      case "H": return ["highway", mask4(HIGHWAYS), mask4("#bx"), s, v % 4];
+      case "h": return ["highwayBridge", mask4(HIGHWAYS), s, v % 4];
+      case "F": return ["farm", s, (hash((x >> 3) * 31 + (y >> 2) * 7 + 5) % 6) * 2 + ((x >> 3) + (y >> 2)) % 2];
+      case "P": return ["park", s, v % 4];
+      case "B": case "D": return ["apron", v % 4, 0, s];
+      case "e": return ["entry", s, "y", true, 0];
+      default: return ["grass", s, v];
+    }
+  };
+  // The tile for a key, falling back to grass for a drawer this build does not have.
+  CV.groundTileOf = function (art, key) {
+    const f = art[key[0]];
+    if (typeof f === "function") return f.apply(art, key.slice(1));
+    return art.grass(key.find(a => typeof a === "string" && SEASON[a]) || "summer", 0);
+  };
 
   // --- the art object, bound to one projection --------------------------------------------------------
   CV.makeArt = function (proj) {
@@ -564,7 +646,9 @@
     // mask bits: 1 N, 2 E, 4 S, 8 W road neighbours; diag bits: 1 NE, 2 SE, 4 SW, 8 NW road diagonals.
     const SW = 0.17;
     art.SIDEWALK = SW;
-    art.road = (mask, diag, season, v) => groundTile(`r:${mask}:${diag}:${season}:${v}`, g => {
+    // marks (region streets): white edge lines inside the gutters of straight runs, and zebras on every arm of a
+    // junction (v2's own junction zebras stay as they are).
+    art.road = (mask, diag, season, v, marks) => groundTile(`r:${mask}:${diag}:${season}:${v}${marks ? ":m" : ""}`, g => {
       const snow = SEASON[season].snow;
       const asphalt = snow ? "#666a72" : "#50545c";
       poly(g, D(0, 0, 1, 1), asphalt);
@@ -600,6 +684,11 @@
         poly(g, D(0.08, 0.475, 0.38, 0.525), line); poly(g, D(0.58, 0.475, 0.88, 0.525), line);
       } else if ((mask & 5) && !(mask & 10)) {
         poly(g, D(0.475, 0.08, 0.525, 0.38), line); poly(g, D(0.475, 0.58, 0.525, 0.88), line);
+      }
+      if (marks && arms <= 2) { // edge lines a little inside each kerb of a straight run
+        const e = snow ? "#f6f6f6" : "#e8e8e2", a = k + 0.05, b = 1 - k - 0.05;
+        if ((mask & 10) && !(mask & 5)) { if (N) poly(g, D(0, a, 1, a + 0.022), e); if (S) poly(g, D(0, b - 0.022, 1, b), e); }
+        else if ((mask & 5) && !(mask & 10)) { if (Wd) poly(g, D(a, 0, a + 0.022, 1), e); if (E) poly(g, D(b - 0.022, 0, b, 1), e); }
       }
       if (snow) speckle(g, v * 3 + 1, ["#f4f6f8", "#dfe3e6"], 10);
     });
