@@ -676,13 +676,18 @@ def infect(sim, a, b) -> None:
 
 def die(sim, p, how: str) -> None:
     """Every death goes through here: a named through `sim._die` (whose last line calls `on_death`), a townsperson
-    through `folk.kill`, its death event and `on_death`."""
+    here (`alive` and `died` as `sim._die` sets them; `folk.kill` never changes `alive`), then `folk.kill`, its
+    death event, `housing.on_death` (an emptied household's home is vacated) and `on_death`."""
     if not p.alive:
         return
     if _named(sim, p):
         sim._die(p, how)
         on_death(sim, p)  # a no-op once sim._die has called it (the hooks)
         return
+    from . import housing
+
+    p.alive = False
+    p.died = {"tick": sim.clock.tick, "time": sim.clock.stamp(), "how": how}
     _folk().kill(sim, p, how)
     loved = False
     for oid, r in p.relationships.items():
@@ -690,6 +695,7 @@ def die(sim, p, how: str) -> None:
         if o is not None and o.alive and _named(sim, o) and r.affinity >= 40:
             loved = True
     _event(sim, p, f"{p.name} {how}, aged {p.age}.", "death", importance=2 if loved else 1)
+    housing.on_death(sim, p)
     on_death(sim, p)
 
 

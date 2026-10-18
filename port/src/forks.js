@@ -463,7 +463,8 @@
   function work_fork(sim, agent) {
     const job = agent.job;
     if (!job || agent.worked_today === sim.clock.day) return null;
-    if (G.life.in_hospital(agent)) return null; // on the ward: no shift today
+    // on the ward, or kept off work by an illness (L2): no shift today
+    if (G.life.in_hospital(agent) || !G.life.can_work(sim, agent)) return null;
     const minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day;
     if (!job.workdays.includes(sim.clock.weekday) || !(-WORK_LATE <= minutes_to_start && minutes_to_start <= 180)) return null;
     const walk_minutes = sim.walk_minutes(agent, job.place_id);

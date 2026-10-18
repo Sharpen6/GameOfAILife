@@ -759,10 +759,15 @@ class Folk:
             ]
         elif kind == "day_off":
             spend = int(15 + 45 * (1 - thrift))
+            # Low on groceries, the shopping trip is for groceries (L2's integrator item 1): the retired and the
+            # jobless have no after_work choice, the only other place they are offered.
+            shop = (Option("Buy groceries", "buy_groceries", self._pick(p, "groceries", now, 25), 25, GROCERY_COST,
+                           {"thrift": 0.2, "family": 0.3}, {}, 1.0) if low else
+                    Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
+                           {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05))
             opts = [
                 Option("Stay home", home_act, home, 120, 0, {"family": 0.3}, relax_gains, 0.15),
-                Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
-                       {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05),
+                shop,
                 self._hang_option(sim, p, now, 120),
                 ((self._day_out_option(p, now, spend) if (p.i + now // DAY) % 2 == 0 else None)
                  or self._park_option(p, now, 90)),

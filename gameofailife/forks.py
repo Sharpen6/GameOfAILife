@@ -472,8 +472,8 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     if not job or agent.worked_today == sim.clock.day:
         return None
     from . import life  # lazy: life imports this module
-    if life.in_hospital(agent):
-        return None  # on the ward: no shift today
+    if life.in_hospital(agent) or not life.can_work(sim, agent):
+        return None  # on the ward, or kept off work by an illness (L2): no shift today
     minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day
     if not job.workdays.count(sim.clock.weekday) or not -WORK_LATE <= minutes_to_start <= 180:
         return None

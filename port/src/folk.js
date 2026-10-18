@@ -769,10 +769,15 @@
         ];
       } else if (kind === "day_off") {
         const spend = Math.trunc(15 + 45 * (1 - thrift));
+        // Low on groceries, the shopping trip is for groceries: see folk.py.
+        const shop = low
+          ? new Option("Buy groceries", "buy_groceries", this._pick(p, "groceries", now, 25), 25, GROCERY_COST,
+            { thrift: 0.2, family: 0.3 }, {}, 1.0)
+          : new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
+            { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05);
         opts = [
           new Option("Stay home", home_act, home, 120, 0, { family: 0.3 }, relax_gains, 0.15),
-          new Option("Go shopping", "shopping", this._pick(p, "shopping", now, 60), 60, spend,
-            { thrift: -0.5, adventure: 0.2 }, ACT.shopping[0], 0.05),
+          shop,
           this._hang_option(sim, p, now, 120),
           ((p.i + Math.floor(now / DAY)) % 2 === 0 ? this._day_out_option(p, now, spend) : null) ||
             this._park_option(p, now, 90),

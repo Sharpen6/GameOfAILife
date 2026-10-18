@@ -615,6 +615,8 @@
       on_death(sim, p); // a no-op once sim._die has called it (the hooks)
       return;
     }
+    p.alive = false;
+    p.died = { tick: sim.clock.tick, time: sim.clock.stamp(), how: how };
     G.folk.kill(sim, p, how);
     let loved = false;
     for (const [oid, r] of p.relationships) {
@@ -622,6 +624,7 @@
       if (o !== null && o !== undefined && o.alive && _named(sim, o) && r.affinity >= 40) loved = true;
     }
     _event(sim, p, `${p.name} ${how}, aged ${p.age}.`, "death", loved ? 2 : 1);
+    G.housing.on_death(sim, p);
     on_death(sim, p);
   }
 
