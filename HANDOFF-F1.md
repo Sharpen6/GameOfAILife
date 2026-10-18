@@ -1,8 +1,10 @@
 # HANDOFF F1: townsfolk population and folk money core
 
 Branch `v3-f1`. Tags: `v3-skel-folkmodel` (folk_model), `v3-folk-gen` (generation, folk money, its JS twin).
-Merged: v3-skel-tags, v3-skel-people, v3-skel-life, v3-skel-region, v3-region-homes (latest f6edd0d),
-v3-rail-trips, v3-rail-js, v3-skel-hooks. The integrator deletes this file.
+Merged: v3-skel-tags, v3-skel-people, v3-skel-life, v3-skel-region (latest fa53ec8), v3-region-homes (latest
+f6edd0d), v3-rail-trips, v3-rail-js, v3-skel-hooks. The integrator deletes this file. Full suite on this HEAD
+(`GOAL_SKIP_DEVFIXTURE=1`): 877 tests, 10 skipped, 3 failures, all in `tests.test_people` and already failing on
+`v3-skel-hooks` alone (item 4 below).
 
 ## Done
 - `folk_model.py/.js`: Person (life.md 3.2 protocol, `__slots__`, lazy needs), FolkHousehold, Trip, namespaces
