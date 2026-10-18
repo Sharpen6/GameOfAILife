@@ -199,7 +199,6 @@
       const home = sim.homes.get(hh.home_id);
       if (home === undefined || home.household !== hh.id) continue;
       const mem = members(folk, hh);
-      const ids = mem.map(p => p.id);
       let live = home.emergency;
       if (live && _fix(sim, folk, hh, home)) live = null;
       if (live && now - live.since >= H.EMERGENCY_DAYS * H.DAY) {
@@ -224,8 +223,7 @@
           if (roll < prob) {
             p.health = Math.max(0.0, p.health + H.CHILL.health);
             p.adjust("fun", H.CHILL.fun);
-            sim.event(`${p.name} catches a chill in the damp house.`, p, null,
-              { tag: "damp_chill", place: home.place });
+            _remember(sim, [p], `${p.name} catches a chill in the damp house.`); // routine: no News
           }
         }
       }
@@ -242,8 +240,7 @@
             (sim.weather || "clear") === "rain" ? ["roof"] : []);
           const kind = rr.pick(kinds);
           home.emergency = { kind, since: now };
-          sim.event(H.EMERGENCY_NEWS[kind].replace("{home}", home.name), null, null,
-            { tag: "emergency", agents: ids, place: home.place });
+          _remember(sim, mem, H.EMERGENCY_NEWS[kind].replace("{home}", home.name)); // routine: no News
         }
       }
     }

@@ -18,9 +18,10 @@ WEALTH_SPEND = 0.004
 DEBT_RATE = 0.004  # a week, on -(cash + savings)
 CHRONIC_COST = 15.0  # a week, each treated chronic condition
 CHILD_COST = ((3, 70.0), (5, 60.0), (18, 30.0))  # (under this age, a week): baby, 3-4, 5-17
-# Shocks (WEEK_MONEY): (id, weekly odds, lo, hi, needs: "car" | "job" | None, text)
+# Shocks (WEEK_MONEY): (id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | None, text). "owner": only in a home
+# the household owns, since the landlord replaces a let home's appliances as it does its repairs (housing).
 BAD = (("car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs"),
-       ("appliance", 0.015, 200, 600, None, "replaces a broken appliance for ${a}"),
+       ("appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}"),
        ("dentist", 0.015, 100, 800, None, "has a ${a} dentist's bill"),
        ("phone", 0.01, 150, 400, None, "replaces a broken phone for ${a}"),
        ("fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine"),
@@ -54,6 +55,15 @@ def _importance(sim, p, amount: int) -> int:
     return 2 if amount >= 5000 else 1 if amount >= 1000 else 0
 
 
+def _owns_home(sim, p) -> bool:
+    """`p`'s household owns the home it lives in."""
+    from . import people
+
+    hh = people.household(sim, p)
+    home = sim.homes.get(hh.home_id) if hh is not None else None
+    return home is not None and home.owner == hh.id
+
+
 def _shock(sim, p, rr, table, valence: int, what: str) -> int:
     """One roll on the sum of the eligible shocks' odds (luck-shifted, logged), then a plain draw by weight;
     returns the amount (0 for none)."""
@@ -66,6 +76,8 @@ def _shock(sim, p, rr, table, valence: int, what: str) -> int:
         if need == "car" and not p.owns_car:
             continue
         if need == "job" and not (p.job is not None and p.job.hourly_wage > 0):
+            continue
+        if need == "owner" and not _owns_home(sim, p):
             continue
         rows.append(row)
         total += row[1]
@@ -86,9 +98,10 @@ def _shock(sim, p, rr, table, valence: int, what: str) -> int:
 
 
 def weekly(sim, p) -> None:
-    """`p`'s money week (an adult's Sunday slot, life.md 5.8): the benefit; lifestyle spending; one bad and one
-    good shock; interest on debt; treated chronic conditions; and, for the household's richest adult, the
-    children's costs."""
+    """`p`'s money week (an adult's Sunday slot, life.md 5.8): the benefit; lifestyle spending (none while the
+    household is in the red after last Sunday's bills, halved while it tightens its belt); one bad and one good
+    shock; interest on debt; treated chronic conditions; and, for the household's richest adult, the children's
+    costs."""
     from . import career, dice, housing, people
 
     life = p.life
@@ -121,7 +134,9 @@ def weekly(sim, p) -> None:
         if spare > 0:
             spend += WEALTH_SPEND * spare
         tight = life.tight_until > sim.clock.tick
-    if tight:
+    if hh is not None and hh.last_funds is not None and hh.last_funds < 0:  # in the red after last Sunday's bills:
+        spend = 0.0  # no extras until out of it (the habit itself still follows the pay)
+    elif tight:
         spend *= 0.5
     p.money -= spend
     rr = dice.stream(people.dice_seed(sim), dice.WEEK_MONEY, p.id, sim.clock.day)

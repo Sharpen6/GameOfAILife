@@ -97,18 +97,34 @@ class Profile:
     """
 
     TRAITS = ("thrift", "family", "social", "diligence", "health", "adventure")
+    DRIFT_CAP = 0.25  # learning moves a trait at most this far from where the character started (FIXLISTS 9) ...
+    DRIFT_DECAY = 0.03  # ... and each lesson first eases every trait this share of the way back there
 
     traits: dict[str, float]
     prompt: str = ""
     prompt_edited: bool = False  # the player wrote the prompt by hand
     learned: list[str] = field(default_factory=list)
+    start: dict[str, float] | None = None  # the traits before the first lesson (set then, and by set_traits)
 
     def learn(self, tags: dict[str, float], note: str, rate: float = 0.04) -> None:
-        for trait, value in tags.items():
-            if trait in self.traits:
-                self.traits[trait] = round(max(0.0, min(1.0, self.traits[trait] + rate * value)), 3)
+        """One lesson from a controller's choice: every trait first eases DRIFT_DECAY of the way back to its start,
+        then moves by `rate` x its tag, staying within DRIFT_CAP of the start (and within 0-1). So a controller's
+        steady style shows, a run of mixed choices wanders only a little, and nobody drifts to the extremes."""
+        if self.start is None:
+            self.start = dict(self.traits)
+        for trait, value in self.traits.items():
+            start = self.start.get(trait, value)
+            step = rate * tags.get(trait, 0.0)
+            x = start + (value - start) * (1 - self.DRIFT_DECAY) + step
+            self.traits[trait] = round(max(0.0, start - self.DRIFT_CAP, min(1.0, start + self.DRIFT_CAP, x)), 3)
         self.learned.append(note)
         del self.learned[:-10]
+
+    def set_traits(self, new: dict[str, float]) -> None:
+        """Traits set by hand (`set_profile`): the new values are where learning starts from from now on."""
+        self.traits.update(new)
+        if self.start is not None:
+            self.start.update(new)
 
     def describe(self, agent: Agent) -> str:
         t = self.traits

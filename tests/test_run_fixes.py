@@ -24,6 +24,7 @@ from gameofailife import forks, stats
 from gameofailife.sim import Simulation
 
 SPEED = 8  # the 2-hour run's speed: a game day in about 79 seconds
+TRAITS = ("thrift", "family", "social", "diligence", "health", "adventure")  # agent.Profile.TRAITS
 
 
 class FakeClock:
@@ -693,6 +694,93 @@ class TraitDrift(unittest.TestCase):
         self.assertAlmostEqual(dana.profile.traits["social"], round(before["social"] + 0.04 * (1.2 - 0.6), 3))
         sim._learn(dana, fork, 0, "")
         self.assertLess(dana.profile.traits["social"], round(before["social"] + 0.04 * 0.6, 3))
+
+    # The cap and the slow way back (agent.Profile.learn, D's handoff to L1): a steady style moves a trait at most
+    # DRIFT_CAP from the start, mixed choices wander only a little, and the start pulls a trait back.
+
+    @staticmethod
+    def lessons(n: int, seed: int = 7) -> list[dict]:
+        """`n` lessons as Profile.learn gets them from `_learn`: the chosen option's tags minus the four's mean,
+        for random picks among four options with random tags (one fixed stream, so Node replays the same list)."""
+        import random
+
+        rng = random.Random(seed)
+        out = []
+        for _ in range(n):
+            opts = [{t: round(rng.uniform(-0.8, 0.8), 2) for t in rng.sample(TRAITS, 3)} for _ in range(4)]
+            pick = opts[rng.randrange(4)]
+            keys = sorted({k for o in opts for k in o})
+            out.append({k: pick.get(k, 0.0) - sum(o.get(k, 0.0) for o in opts) / 4 for k in keys})
+        return out
+
+    def test_a_steady_style_is_capped_and_eases_back(self):
+        from gameofailife.agent import Profile
+
+        p = Profile({t: 0.5 for t in TRAITS} | {"thrift": 0.6})
+        for _ in range(200):  # always the thriftiest of four, by a wide margin
+            p.learn({"thrift": 0.6, "adventure": -0.4}, "money: chose 'Save it'")
+        self.assertEqual(p.traits["thrift"], round(0.6 + Profile.DRIFT_CAP, 3))
+        self.assertEqual(p.traits["adventure"], round(0.5 - Profile.DRIFT_CAP, 3))
+        self.assertEqual(p.traits["social"], 0.5)  # untaught traits stay where they started
+        for _ in range(150):  # then choices that set nothing apart: back towards the start, slowly
+            p.learn({}, "chose something ordinary")
+        self.assertLess(abs(p.traits["thrift"] - 0.6), 0.02)
+        self.assertLess(abs(p.traits["adventure"] - 0.5), 0.02)
+        q = Profile({t: 0.5 for t in TRAITS})
+        q.learn({"thrift": 0.6}, "")
+        q.learn({}, "")
+        self.assertEqual(q.traits["thrift"], round(0.5 + 0.024 * (1 - Profile.DRIFT_DECAY), 3))  # 3% back a lesson
+
+    def test_mixed_choices_wander_only_a_little(self):
+        from gameofailife.agent import Profile
+
+        p = Profile({t: 0.5 for t in TRAITS})
+        far = 0.0
+        for tags in self.lessons(600):
+            p.learn(tags, "")
+            far = max(far, max(abs(v - 0.5) for v in p.traits.values()))
+        self.assertLess(far, Profile.DRIFT_CAP)  # v2 drifted to the extremes under random choices (REPORT 17)
+        self.assertLess(sum(abs(v - 0.5) for v in p.traits.values()) / len(TRAITS), 0.1)
+
+    def test_traits_set_by_hand_are_the_new_start(self):
+        sim = Simulation(1)
+        dana = sim.agents["dana"]
+        dana.profile.learn({"thrift": 0.5}, "")
+        self.assertTrue(sim.set_profile("dana", traits={"thrift": 0.95}))
+        dana.profile.learn({"thrift": 0.5}, "")
+        self.assertEqual(dana.profile.traits["thrift"], 0.97)  # 0.95 + 0.02, not pulled back to the old cap
+        self.assertEqual(dana.profile.start["thrift"], 0.95)
+
+    @unittest.skipUnless(shutil.which("node"), "needs node")
+    def test_the_port_learns_the_same(self):
+        from gameofailife.agent import Profile
+
+        # Random lessons, a steady style into the cap, plain lessons back, then traits set by hand (a null lesson)
+        # and a steady style from the new start.
+        lessons = (self.lessons(300) + [{"thrift": 0.6, "health": -0.6}] * 40 + [{}] * 30 + [None]
+                   + [{"thrift": 0.6, "health": 0.6}] * 20)
+        by_hand = {"thrift": 0.9, "health": 0.1}
+        start = {"thrift": 0.24, "family": 0.37, "social": 0.27, "diligence": 0.32, "health": 0.93, "adventure": 0.5}
+        p = Profile(dict(start))
+        want = []
+        for tags in lessons:
+            if tags is None:
+                p.set_traits(dict(by_hand))
+            else:
+                p.learn(tags, "")
+            want.append(dict(p.traits))
+        self.assertEqual(want[-1]["thrift"], 1.0)  # 0.9 + 0.25 is past 1: the 0-1 clamp holds
+        self.assertEqual(want[-1]["health"], 0.35)  # from the hand-set 0.1, at most DRIFT_CAP
+        root = Path(__file__).resolve().parent.parent
+        script = ("const G = require(process.argv[1]).load(); const [start, lessons, byHand] = JSON.parse(process.argv[2]);"
+                  "const p = new G.agent.Profile(Object.assign({}, start)); const out = [];"
+                  "for (const t of lessons) { if (t === null) p.set_traits(Object.assign({}, byHand)); else p.learn(t, '');"
+                  " out.push(Object.assign({}, p.traits)); }"
+                  "process.stdout.write(JSON.stringify(out));")
+        run = subprocess.run(["node", "-e", script, str(root / "port/tools/engine.cjs"), json.dumps([start, lessons, by_hand])],
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+        self.assertEqual(json.loads(run.stdout), want)
 
 
 class LogVariety(unittest.TestCase):

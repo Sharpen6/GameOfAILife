@@ -1288,7 +1288,7 @@ class Simulation:
                          "ignore": "ignores"}[extra["answer"]]
                 self.event(f"{agent.name} {words} {host.name.split()[0]}'s invite.", agent,
                            tag="invite_accepted" if extra["answer"] == "accept" else "invite_declined",
-                           agents=[host.id], place=inv["place"])
+                           importance=0, agents=[host.id], place=inv["place"])  # routine: the log, not the News
                 host.remember(self.clock.stamp(), f"{agent.name.split()[0]} {words} my invite to "
                                                   f"{self.town.places[inv['place']].name}.")  # the host's page (FIXLISTS 14)
                 self._deliver(host, {"type": "invite_answer", "invite_id": inv["id"], "from": agent.id,
@@ -1352,7 +1352,7 @@ class Simulation:
             who = names([self.agents[m] for m in family]) if family else ""
             self.event(f"{agent.name} takes {who} out to dinner at {place}." if family else
                        f"{agent.name} goes out to dinner at {place}.", agent, tag="family_dinner", agents=family,
-                       place=where)
+                       place=where, importance=0)  # the week's family evening is routine: the log, not the News
         if "together" in extra:  # time at home together: the other joins in if free (FIXLISTS 5, 6)
             other = self.agents.get(extra["together"])
             if other and other.alive and other.inside == self.home_of(other) and self._interruptible(other):
@@ -1467,7 +1467,7 @@ class Simulation:
         # Convert every trait before changing any, so a bad value raises with the profile untouched.
         new = {t: round(max(0.0, min(1.0, float(v))), 3)
                for t, v in (traits if isinstance(traits, dict) else {}).items() if t in agent.profile.traits}
-        agent.profile.traits.update(new)
+        agent.profile.set_traits(new)  # where learning starts from now on
         if isinstance(prompt, str) and prompt.strip():
             agent.profile.prompt = prompt.strip()[:1000]
             agent.profile.prompt_edited = True

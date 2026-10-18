@@ -376,8 +376,14 @@ class NightlyTest(unittest.TestCase):
         worth0 = {x.id: household_cents(folk, x) for x in owned}
         self.nights(sim, 2, 21)
         tags = [ev["tag"] for ev in sim.events]
-        self.assertGreater(tags.count("emergency"), 5)
-        self.assertNotIn("emergency_settled", tags)  # importance 0: memory only (PLAN 2.8)
+        # A townsfolk home's emergency and a chill in a damp house are routine (life soak: the News stays readable):
+        # the residents remember them, and they never reach the News or the log (PLAN 2.8: memory only).
+        for quiet in ("emergency", "damp_chill", "emergency_settled"):
+            self.assertNotIn(quiet, tags)
+        parts = [text.split("{home}") for text in housing.EMERGENCY_NEWS.values()]
+        broke = {m for p in folk.people for m in p.memory if any(a in m and b in m for a, b in parts)}
+        self.assertGreater(len(broke), 5)  # stamped lines, one per emergency and resident
+        self.assertTrue(any(" catches a chill in the damp house." in m for p in mem for m in p.memory))
         fixed = [p.id for p in folk.people if any(" is fixed." in m for m in p.memory)]
         self.assertGreater(len(fixed), 0)
         whats = {row[3] for row in folk.luck_log}  # every luck-shifted roll is logged (life.md 5.11)
@@ -393,6 +399,7 @@ class NightlyTest(unittest.TestCase):
         again.lots[again.homes[hh.home_id].place].condition = 5.0
         self.nights(again, 1, 21)
         self.assertEqual([ev["text"] for ev in again.events], [ev["text"] for ev in sim.events])
+        self.assertEqual([p.memory for p in again.folk.people], [p.memory for p in folk.people])
 
 
 class NodeParityTest(unittest.TestCase):

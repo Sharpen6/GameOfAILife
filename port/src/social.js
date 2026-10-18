@@ -1312,7 +1312,8 @@
       if (yes) f.send_to(sim, guest, inv.place, "hang_out", 90);
       const words = yes ? "accepts" : "declines";
       sim.event(`${guest.name} ${words} ${_first(host.name)}'s invite.`, host, null,
-        { tag: yes ? "invite_accepted" : "invite_declined", agents: [guest.id], place: inv.place });
+        { tag: yes ? "invite_accepted" : "invite_declined", importance: 0, agents: [guest.id], place: inv.place });
+      // routine: the log, not the News
       sim._deliver(host, { type: "invite_answer", invite_id: iid, from: guest.id, answer: yes ? "accept" : "decline" });
     }
   }

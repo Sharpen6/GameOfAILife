@@ -1380,7 +1380,8 @@ def _answer_folk_invites(sim) -> None:
             f.send_to(sim, guest, inv["place"], "hang_out", 90)
         words = "accepts" if yes else "declines"
         sim.event(f"{guest.name} {words} {_first(host.name)}'s invite.", host,
-                  tag="invite_accepted" if yes else "invite_declined", agents=[guest.id], place=inv["place"])
+                  tag="invite_accepted" if yes else "invite_declined", importance=0, agents=[guest.id],
+                  place=inv["place"])  # routine: the log, not the News
         sim._deliver(host, {"type": "invite_answer", "invite_id": iid, "from": guest.id,
                             "answer": "accept" if yes else "decline"})
 

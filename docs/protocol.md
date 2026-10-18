@@ -431,7 +431,7 @@ Director plays when no controller answers.
 |------------|---------|
 | `agent_id` | Character id. |
 | `prompt`   | Optional string. If non-blank it replaces the prompt (trimmed, cut to 1000 characters) and marks the prompt as hand-edited, so it stops being rewritten automatically. `null` or blank leaves the prompt alone. |
-| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. A value that cannot be read as a number (for example `"lots"` or `null`) gets a `bad message` error, and then no trait changes. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. |
+| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. A value that cannot be read as a number (for example `"lots"` or `null`) gets a `bad message` error, and then no trait changes. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. Traits set here are where learning starts from afterwards (learning moves a trait at most 0.25 from them). |
 
 Reply: `{"type": "agent", "agent": { ...agent page... }}` with the updated page.
 Unknown id: `{"type": "error", "error": "unknown character"}`.
@@ -822,7 +822,8 @@ scores below `"Decline politely"`, whose answer goes into the host's memory
 sets it apart from the fork's other options (its tags less the four options'
 mean), not its own tags. In the event log, common outcomes read several ways,
 and a routine good night, meal, rest or family dinner is kept only in the
-decided fork's `happened` (a dinner out is its one `family_dinner` line).
+decided fork's `happened` (a dinner out is its one `family_dinner` line, of
+importance 0 like an accepted invite: the log, not the News).
 
 ### `message`
 
@@ -973,8 +974,12 @@ running while the game is paused.
 1. **0 to 5 s.** A valid `choose` is played at once:
    `accepted: true, applied: true`. The fork is decided by `"model"`, the reason
    is kept, the answer's seconds go in `answer_seconds`, and the profile learns
-   from the choice (traits move a little towards the option's style, and the
-   prompt is regenerated unless it was hand-edited).
+   from the choice (traits move a little towards what sets the option apart from
+   the fork's other options, and the prompt is regenerated unless it was
+   hand-edited). Each lesson first eases every trait 3% of the way back to where
+   it started, and learning never moves a trait more than 0.25 from there, so a
+   controller's steady style shows while mixed choices leave the character
+   itself.
 2. **At 5 s** without an answer, the Director plays the profile default. The
    fork is decided by `"timeout"` and God sees it in the next state frame.
 3. **5 to 10 s.** The first `choose` for a fork decided by timeout is not
@@ -1475,9 +1480,9 @@ two decimals), `owns_car`, a `job` (title, place, hourly wage, start and end hou
 take-home pay at the end of each shift, the $400 pension on Friday 09:00 to 65+ without a paid job, and on Sunday
 23:00 rent or property tax split by the adults plus $80 bills per adult and $40 per car, then saving. Three
 Sundays in the red move a household to a cheaper rental or out of town (`left_town`, its `agents` the folk ids).
-Folk homes have their own damp, chills and emergencies (`damp_chill`, `emergency`, `emergency_settled` naming
-folk only). With `folk_isolated`, no townsperson has a tie to the 60, a job at Millbrook's places or a seat at
-Millbrook's school.
+Folk homes have their own damp, chills and emergencies; they are routine, so the residents remember them (a
+line in each one's memory) and no event is sent. With `folk_isolated`, no townsperson has a tie to the 60, a
+job at Millbrook's places or a seat at Millbrook's school.
 
 | Where | Field | Meaning |
 |-------|-------|---------|
@@ -1558,7 +1563,7 @@ with a named character, and then only for arguments and for warm, news, love or 
 | `moved_in`, `engaged`, `wedding` | 2 | Moving in together, an engagement, the wedding (a Saturday at 14:00 in a park). |
 | `breakup`, `divorce` | 2 | A couple splits (a married couple divorces, $1,500 each). |
 | `loan` | 1 (0 for a repayment) | A loan between family or friends, repaid once the borrower holds three times it. |
-| `invite`, `invite_accepted`, `invite_declined` | 0 / 1 / 0 | Invites, to the named and to townsfolk. |
+| `invite`, `invite_accepted`, `invite_declined` | 0 | Invites, to the named and to townsfolk: the log, not the News. |
 | `text` | 0 | A named character texts a townsperson. |
 
 News about townsfolk alone (an event naming a townsperson and no named character, importance 1 or more) is capped
@@ -1627,11 +1632,12 @@ Raises and promotions belong to the holder: a job left behind is advertised at i
 (`coworker` relationships at 15 to 25). A laid-off or fired person gets $200 a week for 13 weeks while under 65.
 
 **Money.** Each adult's week is settled on Sunday between 09:00 and 19:00, at a minute of their own: the benefit;
-lifestyle spending, which rises quickly with pay and falls slowly (halved while the household tightens its
-belt); a share of wealth spent; an unexpected `expense` and an unexpected `windfall` (importance 1 from $300 and
-2 from $2,000 for a named character; from $1,000 and $5,000 for a townsperson); $15 for each treated chronic
-condition; the children's costs, paid by the household's richest adult; and 0.4% interest on debt. Savings cover
-a negative purse.
+lifestyle spending, which rises quickly with pay and falls slowly (none while the household is in the red after
+the last Sunday's bills, halved while it tightens its belt); a share of wealth spent; an unexpected `expense`
+(a broken appliance only in a home the household owns: a let home's are the landlord's) and an unexpected
+`windfall` (importance 1 from $300 and 2 from $2,000 for a named character; from $1,000 and $5,000 for a
+townsperson); $15 for each treated chronic condition; the children's costs, paid by the household's richest
+adult; and 0.4% interest on debt. Savings cover a negative purse.
 
 | Where | Field | Meaning |
 |-------|-------|---------|

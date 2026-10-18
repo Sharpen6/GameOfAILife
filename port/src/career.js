@@ -17,6 +17,9 @@
   const STANDING_PLAIN = 0.1;
   const STANDING_DRIFT = 0.02; // daily pull toward 50
   const NETWORK_AT = 40; // a friend at this affinity who works where a slot is open makes the network term
+  // At a review (every 90 days), standing 50+ may bring a 4-7% raise at these odds (luck +1): one raise a year at
+  // luck 50, so pay grows about 5.5% a year from raises (about 2% at luck 0, 9% at luck 100), a raise in 1 review of 4.
+  const [RAISE_AT, RAISE_ODDS, RAISE_PCT] = [50, 0.25, [4, 7]];
   const [PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY] = [85, 120, 0.3, 1.2]; // at a review
   const PROMOTE_TITLES = ["senior ", "head "];
   const [OFFER_AT, OFFER_YEAR, OFFER_RAISE] = [50, 0.15, [1.10, 1.25]]; // daily offer odds (x PACE / 360), pay band
@@ -170,9 +173,9 @@
       retire(sim, p, rr);
       return;
     }
-    if (rep >= 50 && _hit(sim, p, "raise", 0.5, +1, rr)) {
+    if (rep >= RAISE_AT && _hit(sim, p, "raise", RAISE_ODDS, +1, rr)) {
       G.life.cadd(counts, "raises");
-      const pct = rr.int(4, 7);
+      const pct = rr.int(RAISE_PCT[0], RAISE_PCT[1]);
       p.job.hourly_wage = G.py.pyRound(p.job.hourly_wage * (100 + pct) / 100, 2);
       _event(sim, p, `${p.name} gets a ${pct}% raise at ${_place_name(sim, p.job)}.`, "raise", named ? null : 0);
     }
@@ -338,8 +341,8 @@
   G.career = {
     LAYOFF_YEAR, REOPEN_DAYS, HIRE_BASE, HIRE_REP, HIRE_NETWORK, HIRE_AGES, PAY_CAP, BENEFIT, BENEFIT_WEEKS,
     STANDING_GOOD, STANDING_BAD, STANDING_PLAIN, STANDING_DRIFT, NETWORK_AT, COWORKER_AFFINITY, NEW_COWORKERS,
-    PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY, PROMOTE_TITLES, OFFER_AT, OFFER_YEAR, OFFER_RAISE, RETIRE_AGE,
-    RETIRE_ODDS, JobBoard, board, _hit, _place_name, _event, worker, on_shift_end, daily, review, promote, retire,
-    lose_job, _pick, network_slot, _cap, hire, coworkers, offer, benefit,
+    RAISE_AT, RAISE_ODDS, RAISE_PCT, PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY, PROMOTE_TITLES, OFFER_AT,
+    OFFER_YEAR, OFFER_RAISE, RETIRE_AGE, RETIRE_ODDS, JobBoard, board, _hit, _place_name, _event, worker,
+    on_shift_end, daily, review, promote, retire, lose_job, _pick, network_slot, _cap, hire, coworkers, offer, benefit,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

@@ -12,9 +12,10 @@
   const DEBT_RATE = 0.004; // a week, on -(cash + savings)
   const CHRONIC_COST = 15.0; // a week, each treated chronic condition
   const CHILD_COST = [[3, 70.0], [5, 60.0], [18, 30.0]]; // (under this age, a week): baby, 3-4, 5-17
-  // Shocks (WEEK_MONEY): [id, weekly odds, lo, hi, needs: "car" | "job" | null, text]
+  // Shocks (WEEK_MONEY): [id, weekly odds, lo, hi, needs: "car" | "job" | "owner" | null, text]. "owner": only in a
+  // home the household owns, since the landlord replaces a let home's appliances as it does its repairs (housing).
   const BAD = [["car_repair", 0.02, 300, 1200, "car", "pays ${a} for car repairs"],
-    ["appliance", 0.015, 200, 600, null, "replaces a broken appliance for ${a}"],
+    ["appliance", 0.015, 200, 600, "owner", "replaces a broken appliance for ${a}"],
     ["dentist", 0.015, 100, 800, null, "has a ${a} dentist's bill"],
     ["phone", 0.01, 150, 400, null, "replaces a broken phone for ${a}"],
     ["fine", 0.01, 80, 200, "car", "gets a ${a} traffic fine"],
@@ -42,6 +43,13 @@
     return amount >= 5000 ? 2 : amount >= 1000 ? 1 : 0;
   }
 
+  // `p`'s household owns the home it lives in.
+  function _owns_home(sim, p) {
+    const hh = G.people.household(sim, p);
+    const home = hh !== null && hh !== undefined ? sim.homes.get(hh.home_id) : undefined;
+    return home !== undefined && home !== null && home.owner === hh.id;
+  }
+
   // One roll on the sum of the eligible shocks' odds, then a plain draw by weight; returns the amount.
   function _shock(sim, p, rr, table, valence, what) {
     const rows = [];
@@ -50,6 +58,7 @@
       const need = row[4];
       if (need === "car" && !p.owns_car) continue;
       if (need === "job" && !(p.job !== null && p.job.hourly_wage > 0)) continue;
+      if (need === "owner" && !_owns_home(sim, p)) continue;
       rows.push(row);
       total += row[1];
     }
@@ -97,7 +106,10 @@
       if (spare > 0) spend += WEALTH_SPEND * spare;
       tight = life.tight_until > sim.clock.tick;
     }
-    if (tight) spend *= 0.5;
+    // In the red after last Sunday's bills: no extras until out of it (the habit itself still follows the pay).
+    if (hh !== null && hh !== undefined && hh.last_funds !== null && hh.last_funds !== undefined && hh.last_funds < 0) {
+      spend = 0.0;
+    } else if (tight) spend *= 0.5;
     p.money -= spend;
     const rr = dice.stream(people.dice_seed(sim), dice.WEEK_MONEY, p.id, sim.clock.day);
     _shock(sim, p, rr, BAD, -1, "shock_bad");
@@ -127,6 +139,6 @@
 
   G.money = {
     SUNDAY, WINDOW, LIFESTYLE_BASE, LIFESTYLE_THRIFT, LIFESTYLE_ADVENTURE, LIFESTYLE_UP, LIFESTYLE_DOWN, WEALTH_SPEND,
-    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _shock, weekly,
+    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _owns_home, _shock, weekly,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

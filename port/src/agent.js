@@ -96,16 +96,28 @@
       this.prompt = prompt;
       this.prompt_edited = false; // the player wrote the prompt by hand
       this.learned = [];
+      this.start = null; // the traits before the first lesson (set then, and by set_traits)
     }
 
+    // One lesson from a controller's choice: every trait first eases DRIFT_DECAY of the way back to its start, then
+    // moves by `rate` x its tag, staying within DRIFT_CAP of the start (and within 0-1).
     learn(tags, note, rate = 0.04) {
-      for (const [trait, value] of Object.entries(tags)) {
-        if (hasOwn(this.traits, trait)) {
-          this.traits[trait] = pyRound(Math.max(0.0, Math.min(1.0, this.traits[trait] + rate * value)), 3);
-        }
+      if (this.start === null) this.start = Object.assign({}, this.traits);
+      for (const [trait, value] of Object.entries(this.traits)) {
+        const start = hasOwn(this.start, trait) ? this.start[trait] : value;
+        const step = rate * (hasOwn(tags, trait) ? tags[trait] : 0.0);
+        const x = start + (value - start) * (1 - Profile.DRIFT_DECAY) + step;
+        this.traits[trait] = pyRound(Math.max(0.0, start - Profile.DRIFT_CAP,
+          Math.min(1.0, start + Profile.DRIFT_CAP, x)), 3);
       }
       this.learned.push(note);
       keepLast(this.learned, 10);
+    }
+
+    // Traits set by hand (set_profile): the new values are where learning starts from from now on.
+    set_traits(fresh) {
+      Object.assign(this.traits, fresh);
+      if (this.start !== null) Object.assign(this.start, fresh);
     }
 
     describe(agent) {
@@ -117,6 +129,8 @@
     }
   }
   Profile.TRAITS = TRAITS;
+  Profile.DRIFT_CAP = 0.25; // learning moves a trait at most this far from where the character started ...
+  Profile.DRIFT_DECAY = 0.03; // ... and each lesson first eases every trait this share of the way back there
 
   // new Agent({id, name, age, household_id, money, job, owns_car, x, y, profile, inside?, savings?}): Python's
   // keyword arguments.

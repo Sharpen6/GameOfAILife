@@ -25,6 +25,9 @@ STANDING_BAD = (0.08, -1.5)  # bad shift: odds .08 (luck -1), standing -1.5
 STANDING_PLAIN = 0.1
 STANDING_DRIFT = 0.02  # daily pull toward 50
 NETWORK_AT = 40  # a friend at this affinity who works where a slot is open makes the network term
+# At a review (every 90 days), standing 50+ may bring a 4-7% raise at these odds (luck +1): one raise a year at luck
+# 50, so pay grows about 5.5% a year from raises (about 2% at luck 0, 9% at luck 100), a raise in 1 review of 4.
+RAISE_AT, RAISE_ODDS, RAISE_PCT = 50, 0.25, (4, 7)
 PROMOTE_AT, PROMOTE_DAYS, PROMOTE_ODDS, PROMOTE_PAY = 85, 120, 0.3, 1.2  # at a review: standing, days in the job
 PROMOTE_TITLES = ("senior ", "head ")
 OFFER_AT, OFFER_YEAR, OFFER_RAISE = 50, 0.15, (1.10, 1.25)  # a worker's daily offer odds (x PACE / 360), pay band
@@ -191,8 +194,8 @@ def offer(sim, p, rr) -> bool:
 
 
 def review(sim, p, rr) -> None:
-    """Every 90 days (life.md 5.7): 50+ a 4-7% raise at `odds(.5, +1)`; under 25 a warning; 40+ clears them;
-    under 20 with 2 warnings, fired."""
+    """Every 90 days (life.md 5.7): 50+ a 4-7% raise at `odds(RAISE_ODDS, +1)`; under 25 a warning; 40+ clears
+    them; under 20 with 2 warnings, fired."""
     life = p.life
     rep = p.reputation
     counts = sim.life.counts
@@ -200,9 +203,9 @@ def review(sim, p, rr) -> None:
     if p.age >= RETIRE_AGE and rr.random() < RETIRE_ODDS[min(p.age - RETIRE_AGE, len(RETIRE_ODDS) - 1)]:
         retire(sim, p, rr)
         return
-    if rep >= 50 and _hit(sim, p, "raise", 0.5, +1, rr):
+    if rep >= RAISE_AT and _hit(sim, p, "raise", RAISE_ODDS, +1, rr):
         counts["raises"] += 1
-        pct = rr.int(4, 7)
+        pct = rr.int(RAISE_PCT[0], RAISE_PCT[1])
         p.job.hourly_wage = round(p.job.hourly_wage * (100 + pct) / 100, 2)
         _event(sim, p, f"{p.name} gets a {pct}% raise at {_place_name(sim, p.job)}.", "raise",
                None if p.id in sim.agents else 0)
