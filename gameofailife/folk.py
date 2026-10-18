@@ -36,6 +36,7 @@ SHIFT_MARGIN = 10  # minutes spare before a shift, on average: each person keeps
 SHIFT_SPREAD = 5
 LATE_GRACE = 5  # minutes late before reputation suffers
 EVENING = 19 * 60  # choices after this are "evening" ones
+DINNER_FROM, DINNER_UNTIL, DINNER_MINUTES = 17 * 60 + 30, 19 * 60 + 30, 45  # the family dinner, once a day
 STROLL_EVERY = 5  # minutes between a park stroller's hops
 STROLL_MINUTES = 10  # one way of a stroll round the block when no park is in reach
 FAV_WALK, FAV_CAR, FAV_KEEP = 25, 15, 3  # favourites: the nearest FAV_KEEP within these minutes
@@ -43,7 +44,7 @@ UNAVAILABLE = -9.0  # the score of an option whose place is shut or full
 CPU_KEEP = 1440  # ticks of CPU timings kept for the perf report
 WARD = "ward"
 FREE = ("relax_home", "eat_home", "walk_park", "coffee", "eat_out", "shopping", "hang_out", "buy_groceries",
-        "idle", "stroll")  # activities that can be interrupted (is_free)
+        "idle", "stroll", "movie", "golf", "read")  # activities that can be interrupted (is_free)
 
 # activity -> (need gains over the whole stay, outdoors). Decay is folk_model's (DECAY_SCALE by activity).
 ACT = {
@@ -62,6 +63,9 @@ ACT = {
     "hang_out": ({"social": 40, "fun": 25}, False),
     "walk_park": ({"fun": 30, "social": 4}, True),
     "stroll": ({"fun": 15}, True),
+    "movie": ({"fun": 45, "social": 10}, False),
+    "golf": ({"fun": 40, "social": 15}, False),
+    "read": ({"fun": 25}, False),
     "ward": ({"hunger": 40}, False),
     "idle": ({}, False),
 }
@@ -76,6 +80,12 @@ LEISURE = {  # favourite key -> (place kind, styles or None for any)
     "park": ("park", None),
 }
 GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST = 35, 4, 14, 20, 8
+# A day out (folk.md 5 day_off d), by (kind, style): (activity, label, cost or None for the shopping spend, min age)
+DAY_OUT = {("shop", "mall"): ("shopping", "A day at the mall", None, 0),
+           ("venue", "cinema"): ("movie", "See a film", 12, 0),
+           ("venue", "clubhouse"): ("golf", "A round of golf", 40, 40),
+           ("townhall", "library"): ("read", "Read at the library", 0, 0)}
+DAY_OUT_WALK, DAY_OUT_CAR, DAY_OUT_MINUTES = 40, 25, 150  # reach from home, and the stay
 GROCERY_MEALS = 10
 # Outcomes of an outing (folk.md 5), keyed dice into the luck log: (what, valence, chance, money, fun)
 BARGAIN = ("bargain", 1, 0.05, 15, 0)  # shopping or groceries
@@ -140,7 +150,8 @@ class Folk:
         self.strollers: dict[int, str] = {}  # people strolling in a park -> the park
         self.luck_log = deque(maxlen=5000)
         self.counters = {"steps": 0, "choices": 0, "habit": 0, "shifts": 0, "school_days": 0, "trips": 0,
-                         "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0}
+                         "boardings": 0, "train_trips": 0, "late": 0, "sick_days": 0, "starved": 0,
+                         "school_runs": 0}
         self.today = {"boardings": 0, "train_trips": 0, "lines": {}}  # since midnight
         self._lines = None  # train id -> line id
         self.cpu = deque(maxlen=CPU_KEEP)  # process_time per tick, seconds
@@ -161,6 +172,7 @@ class Folk:
         self._bed: dict[int, int] = {}
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
+        self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
         Person.clock = sim.clock
         Person.town = town
         Person.locate = self._locate
@@ -489,12 +501,40 @@ class Folk:
                     self._go_home(sim, p, now, "sick_home", self._wake_tick(p, now))
                     return
                 work = "school" if job.title == "student" or p.age < 18 else "work"
+                if work == "school" and mode == "car":
+                    self._school_run(p, now, job.place_id)
                 self._go(sim, p, now, job.place_id, work, until=day * DAY + job.end_hour * 60, prefer=mode)
                 return
         if night:
             self._go_home(sim, p, now, "sleep", self._wake_tick(p, now))
             return
+        if DINNER_FROM <= m < DINNER_UNTIL and home is not None and p.inside == home and self._dinner(p, now, day):
+            return
         self.choose(sim, p, now, "evening" if m >= EVENING else "day_off")
+
+    def _dinner(self, p, now: int, day: int) -> bool:
+        """The family dinner (folk.md 5 case 7): once a day, 45 minutes with the members relaxing at home, one
+        grocery each. Needs someone to eat with and food in the house."""
+        hh = self.hh_of(p)
+        if hh is None or hh.dinner_day == day or hh.groceries <= 0:
+            return False
+        diners = []
+        for mid in hh.member_ids:
+            q = self.person(mid)
+            if q is not None and q is not p and q.alive and not q.gone and q.trip is None and q.inside == p.inside \
+                    and q.activity == "relax_home":
+                diners.append(q)
+        if not diners:
+            return False
+        hh.dinner_day = day
+        hh.groceries = max(0, hh.groceries - len(diners) - 1)
+        for q in diners:
+            self._gain(q, now)
+            self.settle(q, now)
+            self.ends.pop(q.i, None)
+            self._begin(q, now, "dinner_home", DINNER_MINUTES)
+        self._begin(p, now, "dinner_home", DINNER_MINUTES)
+        return True
 
     def _begin(self, p, now: int, activity: str, minutes: int) -> None:
         """A stay where the person is. A leisure stay ends when the place shuts; at a shut place it is home."""
@@ -564,9 +604,47 @@ class Folk:
         self.stay[p.i] = (now, arrive)
         self.schedule(p, arrive)
 
+    def _school_run(self, child, now: int, school: str) -> None:
+        """A parent with a car drives a pupil to school and straight back home (folk.md 4's school runs), so the
+        car is on the street both ways and the pupil rides as its passenger. Only a member relaxing or eating at
+        home, and only when they are back before they set off for their own shift."""
+        hh = self.hh_of(child)
+        home = self.home_place(child)
+        if hh is None or home is None or child.inside != home or child.trip is not None:
+            return
+        day = now // DAY
+        for mid in hh.member_ids:
+            d = self.person(mid)
+            if d is None or d.age < 18 or not d.alive or d.gone or not d.owns_car or d.trip is not None:
+                continue
+            if d.inside != home or d.activity not in ("relax_home", "eat_home"):
+                continue
+            out = folk_transit.road_leg(self.town, DRIVE, home, school, now)
+            back = folk_transit.road_leg(self.town, DRIVE, school, home, out[2])
+            job = d.job
+            if job is not None and day % 7 in job.workdays and d.worked_day != day and \
+                    back[2] - day * DAY > self._set_off(d):
+                continue
+            self._gain(d, now)
+            self.settle(d, now)
+            self.ends.pop(d.i, None)
+            self._leave(d)
+            d.trip = Trip([out, back], home, "relax_home", back[2] + 1, "car")
+            d.state = "travelling"
+            d.activity = "school_run"
+            d.activity_place = school
+            self.out[d.i] = None
+            self.counters["trips"] += 1
+            self.counters["school_runs"] += 1
+            self.stay[d.i] = (now, back[2])
+            self.schedule(d, back[2])
+            self._driven[child.i] = (d.i, now)
+            return
+
     def _arrive(self, sim, p, now: int) -> None:
         t = p.trip
         p.trip = None
+        self._driven.pop(p.i, None)
         self.out.pop(p.i, None)
         p.activity = t.then
         p.state = "busy"
@@ -667,7 +745,8 @@ class Folk:
                 Option("Go shopping", "shopping", self._pick(p, "shopping", now, 60), 60, spend,
                        {"thrift": -0.5, "adventure": 0.2}, ACT["shopping"][0], 0.05),
                 self._hang_option(sim, p, now, 120),
-                self._park_option(p, now, 90),
+                ((self._day_out_option(p, now, spend) if (p.i + now // DAY) % 2 == 0 else None)
+                 or self._park_option(p, now, 90)),
             ]
         else:  # evening
             left = max(30, bed - m) if m < bed else 30
@@ -687,6 +766,33 @@ class Folk:
                           ACT["walk_park"][0], 0.1)
         return Option("A walk round the block", "stroll", self.home_place(p), 2 * STROLL_MINUTES, 0,
                       {"health": 0.4}, ACT["stroll"][0], 0.05)
+
+    def _day_out_option(self, p, now: int, spend: int) -> Option | None:
+        """A day out at the nearest usable mall, cinema, golf club (40+) or library in reach, or None."""
+        home = self.home_place(p)
+        if home is None:
+            return None
+        car = self._has_car(p)
+        ck = (home, "day_out", car)
+        got = self._fav_cache.get(ck)
+        if got is None:
+            net = folk_transit.net(self.town)
+            cands = []
+            for pid, place in self.town.places.items():
+                if (place.kind, place.style) not in DAY_OUT or not self.allowed(pid):
+                    continue
+                w = net.minutes(home, pid, "walk")
+                if w <= DAY_OUT_WALK or (car and net.minutes(home, pid, "car") <= DAY_OUT_CAR):
+                    cands.append((w, pid))
+            cands.sort()
+            got = self._fav_cache[ck] = [pid for _, pid in cands]
+        for pid in got:
+            place = self.town.places[pid]
+            act, label, cost, age = DAY_OUT[(place.kind, place.style)]
+            if p.age >= age and self._usable(pid, now, DAY_OUT_MINUTES):
+                return Option(label, act, pid, DAY_OUT_MINUTES, spend if cost is None else cost,
+                              {"adventure": 0.4, "thrift": -0.2}, ACT[act][0], 0.1)
+        return None
 
     def _hang_option(self, sim, p, now: int, minutes: int) -> Option:
         cafe = self._pick(p, "coffee", now, minutes) or self._pick(p, "eat_out", now, minutes)
@@ -922,17 +1028,24 @@ class Folk:
         return None  # RIDE: aboard
 
     def _passenger(self, p, leg) -> bool:
-        """A child in a car is drawn as the school run's car, unless a lower-indexed sibling rides the same one."""
+        """A child in a car rides in a parent's school run, or is drawn as the car itself unless a sibling it shares
+        the car with is the passenger of a school run or has a lower index."""
+        t0 = p.trip.legs[0][1]
+        run = self._driven.get(p.i)
+        if run is not None and run[1] == t0:
+            return True
         hh = self.hh_of(p)
         if hh is None:
             return False
         for mid in hh.member_ids:
             q = self.people[int(mid[1:])]
-            if q.i >= p.i:
+            if q is p:
                 continue
             if q.trip is not None and q.trip.dest == p.trip.dest and q.age < 18 and q.trip.mode == p.trip.mode:
-                if q.trip.legs and q.trip.legs[0][1] == p.trip.legs[0][1] and q.trip.legs[0][0] == leg[0]:
-                    return True
+                if q.trip.legs and q.trip.legs[0][1] == t0 and q.trip.legs[0][0] == leg[0]:
+                    qr = self._driven.get(q.i)
+                    if q.i < p.i or (qr is not None and qr[1] == t0):
+                        return True
         return False
 
     def crowd(self, sim) -> list[int]:
