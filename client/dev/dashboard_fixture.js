@@ -498,6 +498,14 @@
       h: [[], [], [], []],
       major: true,
     },
+    family: { // forks.family_fork: Saturday evening, once a week for a household's adults
+      q: () => "It's Saturday evening and everyone's home. What shall we do?",
+      o: (a, w) => [`Take ${w.family} out to dinner at Corner Cafe`, `Cook a big dinner for ${w.family}`,
+        `A games night at home with ${w.family}`, "Let everyone do their own thing tonight"],
+      r: ["We've all earned a night out together.", "A proper meal with all of us round the table.",
+        "Nothing beats a board game with this lot.", "Everyone's tired, a quiet night is fine."],
+      h: [["A lovely evening together"], ["Makes a really tasty meal"], ["Laughs with the family"], ["A quiet night in"]],
+    },
     housing_trouble: {
       q: () => "The household is $640 in the red after the week's bills. What do you do?",
       o: () => ["Rent Elm Court, flat 1A at $180/week", "Ask Rina Mizrahi for help", "Cut back on everything",
@@ -921,9 +929,11 @@
 
   // --- decided forks ---------------------------------------------------------------------------------
 
-  function kindsFor(W, a) {
+  function kindsFor(W, a, tick) {
     const ks = ["hunger", "sleep", "lonely", "free_time", "invite"];
     if (a.age >= 18) ks.push("groceries");
+    const day = Math.floor(tick / 1440) % 7, m = tick % 1440; // Saturday 17:00-18:30, as forks.DINNER_FROM/UNTIL
+    if (a.age >= 18 && day === 5 && m >= 17 * 60 && m <= 20 * 60 - 90 && familyOf(W, a).length) ks.push("family");
     if (a.job && a.job.hourly_wage) ks.push("work", "work", "payday");
     const hh = W.hh[a.hh];
     if (a.age >= 18 && tenure(W, a.hh) === "owned") ks.push("upkeep");
@@ -931,12 +941,19 @@
     if (a.hh === "peretz" && a.age >= 18) ks.push("housing_trouble");
     return ks;
   }
+  // The rest of a's household, alive: who comes to the family evening.
+  function familyOf(W, a) { return W.hh[a.hh].members.filter(id => id !== a.id && W.byId[id].alive).map(id => W.byId[id]); }
+  function namesOf(people) {
+    const first = people.map(p => p.first);
+    return first.length > 1 ? `${first.slice(0, -1).join(", ")} and ${first[first.length - 1]}` : first.join("");
+  }
   function makeFork(W, a, tick, decidedBy, settled) {
-    const kind = W.pick(kindsFor(W, a)), T = FORK[kind];
+    const kind = W.pick(kindsFor(W, a, tick)), T = FORK[kind];
     const friends = Object.entries(a.rel).filter(([, r]) => r.kind === "friend").map(([id]) => W.byId[id].name);
     const m = tick % 1440;
     const ctx = { hm: `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`,
-      friend: friends.length ? W.pick(friends) : "an old friend", homeName: homeSpec[W.hh[a.hh].home].name };
+      friend: friends.length ? W.pick(friends) : "an old friend", homeName: homeSpec[W.hh[a.hh].home].name,
+      family: namesOf(familyOf(W, a)) };
     const options = T.o(a, ctx);
     const profile = W.ri(0, 3) === 0 ? W.ri(0, 3) : 0;
     let choice = profile;
