@@ -61,6 +61,10 @@
   };
   const GROCERY_COST = 35, COFFEE_COST = 4, MEAL_COST = 14, DINNER_COST = 20, HANG_COST = 8;
   const GROCERY_MEALS = 10;
+  // Outcomes of an outing (folk.md 5), keyed dice into the luck log: [what, valence, chance, money, fun]
+  const BARGAIN = ["bargain", 1, 0.05, 15, 0]; // shopping or groceries
+  const PICKPOCKET = ["pickpocket", -1, 0.003, -60, 0]; // any outing
+  const RAINED_OUT = ["rained_out", -1, 0.5, 0, -10]; // a park walk or stroll in the rain
 
   const actOf = a => ACT[a] || [{}, false];
   const fm = () => G.folk_model;
@@ -797,6 +801,23 @@
       this._play(sim, p, now, opt);
     }
 
+    // Bargain, pickpocket, rained out: luck-shifted keyed rolls (`dice.odds`), every roll in the luck log.
+    _outcomes(sim, p, now, activity) {
+      const rr = G.dice.stream(sim.dice_seed, fm().NS_FOLK, p.i, now, "luck");
+      const rolls = [PICKPOCKET];
+      if (activity === "shopping" || activity === "buy_groceries") rolls.unshift(BARGAIN);
+      if ((activity === "walk_park" || activity === "stroll") && sim.weather === "rain") rolls.push(RAINED_OUT);
+      for (const [what, valence, chance, money, fun] of rolls) {
+        const prob = G.dice.odds(chance, valence, p.luck);
+        const roll = rr.random();
+        G.people.log_roll(sim, p, what, prob, roll);
+        if (roll < prob) {
+          p.money += money;
+          if (fun) p.adjust("fun", fun);
+        }
+      }
+    }
+
     _play(sim, p, now, opt) {
       if (opt.place === null || opt.place === undefined) {
         opt = new Option("Go home and relax", "relax_home", this.home_place(p), 60);
@@ -809,6 +830,7 @@
         const hh = this.hh_of(p);
         if (hh !== null) hh.groceries += GROCERY_MEALS;
       }
+      if (!HOME_ACTS.includes(opt.activity)) this._outcomes(sim, p, now, opt.activity);
       if (opt.activity === "sleep") {
         this._go_home(sim, p, now, "sleep", this._wake_tick(p, now));
         return;
@@ -1377,7 +1399,7 @@
   }
 
   G.folk = {
-    DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
+    BARGAIN, PICKPOCKET, RAINED_OUT, DAY, OBVIOUS_MARGIN, NOISE, TRAVEL_COST, NIGHT_TRAVEL, NIGHT_FROM, NIGHT_UNTIL, STYLE, SHIFT_MARGIN, SHIFT_SPREAD, LATE_GRACE,
     EVENING, STROLL_EVERY, STROLL_MINUTES, FAV_WALK, FAV_CAR, FAV_KEEP, UNAVAILABLE, CPU_KEEP, WARD, FREE, ACT,
     SLEEP_ENERGY, HOME_ACTS, KEEP_OPEN, LEISURE, GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST,
     GROCERY_MEALS, urgency, Option, Folk, is_free, send_to, hospitalise, kill, on_job_change, add_person, add_baby,

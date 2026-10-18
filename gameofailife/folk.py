@@ -77,6 +77,10 @@ LEISURE = {  # favourite key -> (place kind, styles or None for any)
 }
 GROCERY_COST, COFFEE_COST, MEAL_COST, DINNER_COST, HANG_COST = 35, 4, 14, 20, 8
 GROCERY_MEALS = 10
+# Outcomes of an outing (folk.md 5), keyed dice into the luck log: (what, valence, chance, money, fun)
+BARGAIN = ("bargain", 1, 0.05, 15, 0)  # shopping or groceries
+PICKPOCKET = ("pickpocket", -1, 0.003, -60, 0)  # any outing
+RAINED_OUT = ("rained_out", -1, 0.5, 0, -10)  # a park walk or stroll in the rain
 
 
 def _dice():
@@ -788,6 +792,8 @@ class Folk:
             hh = self.hh_of(p)
             if hh is not None:
                 hh.groceries += GROCERY_MEALS
+        if opt.activity not in HOME_ACTS:
+            self._outcomes(sim, p, now, opt.activity)
         if opt.activity == "sleep":
             self._go_home(sim, p, now, "sleep", self._wake_tick(p, now))
             return
@@ -801,6 +807,23 @@ class Folk:
             self._begin(p, now, opt.activity, opt.minutes)
         else:
             self._go(sim, p, now, opt.place, opt.activity, stay=opt.minutes)
+
+    def _outcomes(self, sim, p, now: int, activity: str) -> None:
+        """Bargain, pickpocket, rained out: luck-shifted keyed rolls (`dice.odds`), every roll in the luck log."""
+        rr = _dice().stream(sim.dice_seed, NS_FOLK, p.i, now, "luck")
+        rolls = [PICKPOCKET]
+        if activity in ("shopping", "buy_groceries"):
+            rolls.insert(0, BARGAIN)
+        if activity in ("walk_park", "stroll") and getattr(sim, "weather", None) == "rain":
+            rolls.append(RAINED_OUT)
+        for what, valence, chance, money, fun in rolls:
+            prob = _dice().odds(chance, valence, p.luck)
+            roll = rr.random()
+            _people().log_roll(sim, p, what, prob, roll)
+            if roll < prob:
+                p.money += money
+                if fun:
+                    p.adjust("fun", fun)
 
     def _companion(self, sim, p, place_id, minutes) -> None:
         try:
