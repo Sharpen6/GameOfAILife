@@ -52,6 +52,9 @@
     opt = opt || {};
     const town = CV.normalizeTown(rawTown);
     const W = town.w, H = town.h, tiles = town.tiles, places = town.places;
+    // R: the tile predicates and the building list (region.js); BIG: the region path (LOD chunks, lazy sprites,
+    // decor). Older 80 x 50 and 40 x 25 towns take v2's path unchanged.
+    const R = CV.makeRegion(town), BIG = R.big;
     let proj = CV.makeProj(opt.projection || "iso", W, H, opt.rot || 0);
     let art = CV.makeArt(proj);
     const g = cv.getContext("2d");
@@ -60,8 +63,9 @@
       town, proj, cam: { x: 0, y: 0, zoom: 1 }, dpr: 1, season: "summer", minute: 600, weather: "clear", state: null,
       looks: {}, movers: [], selected: null, hover: null, hoverTile: null, highlight: null, overlay: null,
       pings: [], pingArrows: [], inset: { top: 0, right: 0, bottom: 0 }, reserved: [], quality: "high", lights: { ns: "green", ew: "red" },
-      stats: { items: 0, chunks: 0, built: 0, draw: 0, frames: 0, cacheMP: 0 },
+      stats: { items: 0, chunks: 0, built: 0, draw: 0, frames: 0, cacheMP: 0, statics_builds: 0, spriteBuilds: 0, staleSprites: 0, buildMs: 0, spriteMs: 0, boxes: 0, runs: 0, splitRuns: 0 },
     };
+    scene.R = R; scene.big = BIG;
     const placeById = new Map(places.map((p, i) => [p.id, i]));
     scene.placeById = placeById;
     const moverSources = [];
@@ -78,7 +82,7 @@
     const driveOf = new Int16Array(N).fill(-1);  // driveway tile of a home
     const entryOf = new Map();
     const variant = new Uint8Array(N);
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) variant[y * W + x] = hash(x * 7919 + y * 104729 + 13) % 8;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) variant[y * W + x] = BIG ? CV.hash2(x, y) % 8 : hash(x * 7919 + y * 104729 + 13) % 8;
     places.forEach((p, i) => {
       for (let y = p.y; y < p.y + p.h; y++) for (let x = p.x; x < p.x + p.w; x++) if (x >= 0 && y >= 0 && x < W && y < H) placeIdx[y * W + x] = i;
       if (p.entry) entryOf.set(p.entry[1] * W + p.entry[0], i);
@@ -87,15 +91,24 @@
     const downtown = (town.districts.find(d => d.id === "downtown") || { rects: [] }).rects;
     const inRects = (rects, x, y) => rects.some(r => x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]);
     const isHouseLike = p => p.kind === "home" && p.style !== "apartments";
+    // places by 8 x 8 tile cell, over their rect grown by the reach (2), in place order
+    const GC = 8, gw = Math.ceil(W / GC) + 1, cellPlaces = new Map();
+    places.forEach((p, i) => {
+      if (p.kind === "park") return;
+      for (let cy = Math.max(0, Math.floor((p.y - 2) / GC)); cy <= Math.floor((p.y + p.h + 2) / GC); cy++)
+        for (let cx = Math.max(0, Math.floor((p.x - 2) / GC)); cx <= Math.floor((p.x + p.w + 2) / GC); cx++) {
+          const k = cy * gw + cx; let l = cellPlaces.get(k); if (!l) cellPlaces.set(k, l = []); l.push(i);
+        }
+    });
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const c = tiles[y][x];
       if (c !== "." && c !== "T") continue;
       let best = -1, bd = 9;
-      places.forEach((p, i) => {
-        if (p.kind === "park") return;
+      for (const i of cellPlaces.get(Math.floor(y / GC) * gw + Math.floor(x / GC)) || []) {
+        const p = places[i];
         const d = dist(p, x, y), reach = isHouseLike(p) ? 1 : 2;
         if (d <= reach && d < bd) { bd = d; best = i; }
-      });
+      }
       if (best >= 0) {
         const p = places[best];
         if (isHouseLike(p)) lotOf[y * W + x] = best;
@@ -194,7 +207,7 @@
         if (kind === "carpark") // the aisles run out through the verge to the street at each end
           for (let y = inner[1]; y < inner[3]; y++) if ((y - inner[1]) % 3 === 1) for (const x of [rx, rx + rw - 1]) {
             const j = y * W + x, nx = x === rx ? x - 1 : x + 1;
-            if (x >= 0 && x < W && useOf[j] === USE.verge && at(nx, y) === "#") { useOf[j] = USE.park; useK[j] = 1; }
+            if (x >= 0 && x < W && useOf[j] === USE.verge && R.isStreet(nx, y)) { useOf[j] = USE.park; useK[j] = 1; }
           }
       }
     }
@@ -202,21 +215,28 @@
     scene.lotAt = (x, y) => x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] < 0 ? null : places[lotOf[y * W + x]].id;
     scene.lands = lands;
     const isRoad = (x, y) => {
-      if (x >= 0 && y >= 0 && x < W && y < H) return tiles[y][x] === "#";
+      if (x >= 0 && y >= 0 && x < W && y < H) return R.isStreet(x, y);
       // roads run off the map's edges
       const cx = Math.max(0, Math.min(W - 1, x)), cy = Math.max(0, Math.min(H - 1, y));
-      if (y >= 0 && y < H) return tiles[y][cx] === "#" && (x < 0 || x >= W);
-      if (x >= 0 && x < W) return y < 0 && tiles[0][x] === "#";
+      if (y >= 0 && y < H) return R.isStreet(cx, y) && (x < 0 || x >= W);
+      if (x >= 0 && x < W) return y < 0 && R.isStreet(x, 0);
       return false;
     };
     const stopAt = new Map();
     for (const s of town.stops) stopAt.set(s.y * W + s.x, s);
     const junctionSet = new Set(town.junctions.map(([x, y]) => y * W + x));
 
+    const NEW_CODES = CV.groundKey ? "#bx=rSHhF~" : "=rSHhF"; // the region's streets, rails, highways, farms, water: V2's tiles
     const stageOf = p => { if (p.kind !== "home") return 0; const l = scene.looks[p.id]; return l ? l.stage | 0 : 0; };
     function groundSprite(x, y) {
       const c = tiles[y][x], i = y * W + x, v = variant[i], s = scene.season;
-      if (c === "#") {
+      if (BIG && NEW_CODES.includes(c)) { // the region's codes (region.md 3.1): V2's groundKey, else a stand-in
+        if (CV.groundKey) { const k = CV.groundKey(R, x, y, s); const f = k && (typeof k[0] === "function" ? k[0] : art[k[0]]); if (f) return f.apply(art, k.slice(1)); }
+        if (c === "H" || c === "h") { const m = (a, b) => R.isRoadLike(a, b) && !R.isStreet(a, b) ? 1 : 0; return art.road(m(x, y - 1) | m(x + 1, y) << 1 | m(x, y + 1) << 2 | m(x - 1, y) << 3, 0, s, v % 4); }
+        if (c === "F") return art.meadow(s, v);
+        return art.pavement(v % 2, c === "S" ? "#c8c0b0" : "#8a8070", 0, s);
+      }
+      if (R.isStreet(x, y)) {
         const mask = (isRoad(x, y - 1) ? 1 : 0) | (isRoad(x + 1, y) ? 2 : 0) | (isRoad(x, y + 1) ? 4 : 0) | (isRoad(x - 1, y) ? 8 : 0);
         const diag = (isRoad(x + 1, y - 1) ? 1 : 0) | (isRoad(x + 1, y + 1) ? 2 : 0) | (isRoad(x - 1, y + 1) ? 4 : 0) | (isRoad(x - 1, y - 1) ? 8 : 0);
         return art.road(mask, diag, s, v % 4);
@@ -265,6 +285,7 @@
     // --- static items --------------------------------------------------------------------------------------
     // item: { img, sx, sy, sw, sh, wx, wy (world px of the sprite's top-left), depth, kind, ref }
     let statics = [], buildings = [], lampPts = [], signals = [], shelters = [], dirty = true;
+    const lowerBound = (arr, d) => { let lo = 0, hi = arr.length; while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].depth < d) lo = m + 1; else hi = m; } return lo; };
     const bCache = new Map();
     function addSprite(list, spr, tx, ty, depth, kind, ref) {
       const p = proj.toWorld(tx, ty);
@@ -313,7 +334,7 @@
       const [ex, ey] = p.entry || [p.x, p.y];
       const out = [];
       for (const [x, y] of own) {
-        const road = SIDES.filter(([, dx, dy]) => at(x + dx, y + dy) === "#")
+        const road = SIDES.filter(([, dx, dy]) => R.isStreet(x + dx, y + dy))
           .sort((a, b) => proj.depth(x + b[1] + 0.5, y + b[2] + 0.5) - proj.depth(x + a[1] + 0.5, y + a[2] + 0.5));
         if (!road.length) continue;
         const t = { x, y, road: road[0][0], depth: proj.depth(x + 0.5, y + 0.5), drive: driveOf[y * W + x] === i, near: Math.abs(x - ex) + Math.abs(y - ey) };
@@ -339,11 +360,28 @@
     }
     // The share of a board on lot tile t that buildings, and the props drawn before boards are placed
     // (bus shelters with their line plates, traffic lights, trees), nearer the camera cover.
-    let coverProps = [];
+    let coverProps = [], bGrid = null, pGrid = null;
+    // a small world-px grid (256 px cells) of objects by their rect: buildings or props near a board
+    function gridOf(list, rect) {
+      const m = new Map();
+      for (const o of list) {
+        const [x0, y0, x1, y1] = rect(o);
+        for (let gy = Math.floor(y0 / 256); gy <= Math.floor(y1 / 256); gy++) for (let gx = Math.floor(x0 / 256); gx <= Math.floor(x1 / 256); gx++) {
+          const k = gx + ":" + gy; let l = m.get(k); if (!l) m.set(k, l = []); l.push(o);
+        }
+      }
+      return m;
+    }
+    function gridGet(m, x0, y0, x1, y1) {
+      if (!m) return [];
+      const out = new Set();
+      for (let gy = Math.floor(y0 / 256); gy <= Math.floor(y1 / 256); gy++) for (let gx = Math.floor(x0 / 256); gx <= Math.floor(x1 / 256); gx++) { const l = m.get(gx + ":" + gy); if (l) for (const o of l) out.add(o); }
+      return [...out];
+    }
     function boardCover(p, t) {
       const { x0, y0, x1, y1, depth } = boardRect(p, t);
-      const near = buildings.filter(B => B.b.ox < x1 && B.b.ox + B.b.c.width > x0 && B.b.oy < y1 && B.b.oy + B.b.c.height > y0);
-      const props = coverProps.filter(it => it.depth > depth && it.wx < x1 && it.wx + it.sw > x0 && it.wy < y1 && it.wy + it.sh > y0);
+      const near = (BIG ? gridGet(bGrid, x0, y0, x1, y1) : buildings).filter(B => B.b.ox < x1 && B.b.ox + B.b.c.width > x0 && B.b.oy < y1 && B.b.oy + B.b.c.height > y0);
+      const props = (BIG ? gridGet(pGrid, x0, y0, x1, y1) : coverProps).filter(it => it.depth > depth && it.wx < x1 && it.wx + it.sw > x0 && it.wy < y1 && it.wy + it.sh > y0);
       if (!near.length && !props.length) return 0;
       let n = 0, hid = 0;
       for (let x = x0 + 1; x < x1; x += 2) for (let y = y0 + 1; y < y1; y += 2) {
@@ -392,7 +430,13 @@
     scene.setParked = set => {
       scene.parked = set;
       const key = [...set].filter(id => { const l = scene.looks[id]; return l && (l.listing || l.anyListed); }).sort().join(",");
-      if (key !== parkedKey) { parkedKey = key; dirty = true; }
+      if (key !== parkedKey) {
+        if (BIG && statics.length && !dirty) { // only the homes whose board moves
+          const a = new Set(parkedKey ? parkedKey.split(",") : []), b = new Set(key ? key.split(",") : []);
+          scene.updatePlaces([...new Set([...a, ...b])].filter(id => a.has(id) !== b.has(id)));
+        } else dirty = true;
+        parkedKey = key;
+      }
     };
     // The tile beside a home's door walk (a house's garden tile next to it, a block's apron), kept clear of lamps.
     function besideDoor(p, i) {
@@ -407,10 +451,66 @@
     // A point a quarter tile in from a lot tile's road edge, and the van's heading along that road.
     const towardRoad = (t, k) => { const [, dx, dy] = SIDES.find(q => q[0] === t.road); return [t.x + 0.5 + dx * k, t.y + 0.5 + dy * k]; };
 
+    // A home's lot items (view.md 3.3.3: also re-inserted alone when its look changes): fences or hedges, the
+    // listing board, junk, the skip and the moving van, all with ref = the place's index.
+    const LOT_KINDS = new Set(["f", "j", "s", "van"]);
+    function lotItems(list, p, i) {
+      const snowy = !!(CV.SEASON[scene.season] && CV.SEASON[scene.season].snow);
+      const look = scene.looks[p.id] || { stage: 0 };
+      const stage = look.stage | 0;
+      const spots = lotSpots(p, i, !!look.moving, scene.parked.has(p.id));
+      const listed = isHouseLike(p) ? (look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null) : look.anyListed ? "let" : null;
+      const taken = (x, y) => [spots.van, listed ? spots.sign : null].some(t => t && t.x === x && t.y === y);
+      if (isHouseLike(p)) {
+        const inLot = (x, y) => x >= 0 && y >= 0 && x < W && y < H && (lotOf[y * W + x] === i || placeIdx[y * W + x] === i || (p.entry && x === p.entry[0] && y === p.entry[1]));
+        const hedge = p.style === "big_house";
+        for (const [x, y] of lotTiles[i]) {
+          if (driveOf[y * W + x] === i) continue;
+          const v = hash(`${x}.${y}`) % 4;
+          if (hedge && dist(p, x, y) >= 2 && tiles[y][x] === "." && hash(`gt${x},${y}`) % 7 === 0) // trees in the back garden
+            { const tv = hash(`gv${x}`) % 6; addSprite(list, art.tree(scene.season, "round", tv), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "round", tv); }
+          const edges = [["n", x, y - 1, 0.5, 0.06], ["s", x, y + 1, 0.5, 0.94], ["w", x - 1, y, 0.06, 0.5], ["e", x + 1, y, 0.94, 0.5]];
+          for (const [side, nx, ny, ex, ey] of edges) {
+            if (inLot(nx, ny)) continue;
+            if (spots.van && spots.van.x === x && spots.van.y === y && side === spots.van.road) continue; // the van backed in through here
+            const spr = hedge ? art.hedge(stage, side, scene.season, v) : art.fence(stage, side, v);
+            const fit = addSprite(list, spr, x + 0.5, y + 0.5, proj.depth(x + ex, y + ey) + 0.02, "f", i);
+            if (hedge) fit.remake = s => art.hedge(stage, side, s, v);
+          }
+        }
+        // junk on the lot tile nearest the camera that the van and the board leave free
+        let best = null, bd = -1e9;
+        for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
+          if (x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] !== i || driveOf[y * W + x] === i || taken(x, y)) continue;
+          const d = proj.depth(x + 0.5, y + 0.5) - Math.abs(x - (p.x + p.w / 2)) * 0.3;
+          if (d > bd) { bd = d; best = [x, y]; }
+        }
+        if (stage >= 2 && best) addSprite(list, art.junk(stage, hash(p.id) % 3, snowy), best[0] + 0.4, best[1] + 0.35, proj.depth(best[0] + 0.4, best[1] + 0.35), "j", i);
+        if (look.works && best) addSprite(list, art.skip(), best[0] + 0.5, best[1] + 0.6, proj.depth(best[0] + 0.5, best[1] + 0.6), "j", i);
+      } else {
+        const [ex, ey] = p.entry;
+        const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => (at(a, b) === "." || at(a, b) === "e") && !taken(a, b));
+        // rubbish on the apron by the door of a run-down block: overflowing bins from shabby, then bags, a
+        // mattress and scrap
+        const o = side[1] || side[0];
+        if (stage >= 2 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3, snowy), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
+        if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3, snowy), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
+      }
+      if (listed && spots.sign) { // the board, a quarter tile in from the road edge, leaning toward its own home
+        const [a, b] = signAt(p, spots.sign, spots.sign === spots.van);
+        addSprite(list, art.sign(listed), a, b, proj.depth(a, b), "s", i);
+      }
+      if (spots.van) { // the moving van, backed onto the lot along the road
+        const t = spots.van, [a, b] = towardRoad(t, 0.08), d = t.road === "n" || t.road === "s" ? 0 : 1;
+        addSprite(list, art.van(d), a, b, proj.depth(a, b) + 0.05, "van", i);
+      }
+    }
     function buildStatics() {
+      const t0 = performance.now();
       const list = [];
       buildings = [];
-      places.forEach((p, i) => {
+      if (BIG) bigBuildings(list);
+      else places.forEach((p, i) => {
         if (p.kind === "park") return;
         const b = buildingSprite(p);
         const slices = proj.slices(p.x, p.y, p.x + p.w, p.y + p.h);
@@ -442,9 +542,11 @@
           const hv = hash(`${x},${y}`);
           const pine = inRects(woods, x, y) ? hv % 3 !== 0 : (parkAt[i] < 0 && hv % 6 === 0);
           const ox = ((hv >>> 8) % 7 - 3) * 0.04, oy = ((hv >>> 12) % 7 - 3) * 0.04;
-          addSprite(list, art.tree(scene.season, pine ? "pine" : "round", (hv >>> 4) % 6), x + 0.5 + ox, y + 0.5 + oy, proj.depth(x + 0.5 + ox, y + 0.5 + oy), "t");
+          const tk = pine ? "pine" : "round", tv = (hv >>> 4) % 6;
+          addSprite(list, art.tree(scene.season, tk, tv), x + 0.5 + ox, y + 0.5 + oy, proj.depth(x + 0.5 + ox, y + 0.5 + oy), "t").remake = s => art.tree(s, tk, tv);
         } else if (c === "P" && !pathMask[i] && hash(`b${x}:${y}`) % 11 === 0) {
-          addSprite(list, art.tree(scene.season, "bush", hash(`v${x}`) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
+          const bv = hash(`v${x}`) % 4;
+          addSprite(list, art.tree(scene.season, "bush", bv), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "bush", bv);
         }
         if (pathMask[i] && hash(`b${x},${y}`) % 4 === 0) addSprite(list, art.bench(), x + 0.82, y + 0.3, proj.depth(x + 0.82, y + 0.3), "p");
       }
@@ -469,6 +571,7 @@
       }
       // what stands nearer the camera than a board can hide it (boardCover): kerbside props placed so far
       coverProps = list.filter(it => it.kind === "t" || it.kind === "sig" || it.kind === "stop");
+      if (BIG) { bGrid = gridOf(buildings, B => [B.b.ox, B.b.oy, B.b.ox + B.b.c.width, B.b.oy + B.b.c.height]); pGrid = gridOf(coverProps, it => [it.wx, it.wy, it.wx + it.sw, it.wy + it.sh]); }
       // street lamps on the north kerb of east-west roads and the west kerb of north-south roads; a lamp never
       // stands in front of a door's walk, the tile beside it or a lot's board (SALE, RENT, LET), nor in front
       // of the board on screen: it moves a tile along, or goes
@@ -486,7 +589,7 @@
         const w = proj.toWorld(lx, ly), d = proj.depth(lx, ly), x0 = w[0] - 2, y0 = w[1] - 41, x1 = w[0] + 9, y1 = w[1];
         return boardRects.some(r => d > r.depth && x0 < r.x1 && x1 > r.x0 && y0 < r.y1 && y1 > r.y0);
       };
-      const lampOk = (x, y, bx, by, lx, ly) => at(x, y) === "#" && at(bx, by) !== "#" && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx) && !coversBoard(lx, ly);
+      const lampOk = (x, y, bx, by, lx, ly) => R.isStreet(x, y) && !R.isStreet(bx, by) && !nearJ(x, y) && !stopAt.has(y * W + x) && !boards.has(by * W + bx) && !coversBoard(lx, ly);
       for (const ry of town.road_rows) for (let x0 = 2; x0 < W; x0 += 4) {
         const x = [x0, x0 + 1, x0 - 1].find(a => a >= 0 && a < W && lampOk(a, ry, a, ry - 1, a + 0.5, ry + 0.07));
         if (x == null) continue;
@@ -500,57 +603,7 @@
         lampPts.push([rx + 0.07, y + 0.5]);
       }
       // home lots: fences or hedges, listing signs, junk, works and moving vans
-      const snowy = !!(CV.SEASON[scene.season] && CV.SEASON[scene.season].snow);
-      places.forEach((p, i) => {
-        if (p.kind !== "home") return;
-        const look = scene.looks[p.id] || { stage: 0 };
-        const stage = look.stage | 0;
-        const spots = lotSpots(p, i, !!look.moving, scene.parked.has(p.id));
-        const listed = isHouseLike(p) ? (look.listing === "for_sale" ? "sale" : look.listing === "for_rent" ? "rent" : null) : look.anyListed ? "let" : null;
-        const taken = (x, y) => [spots.van, listed ? spots.sign : null].some(t => t && t.x === x && t.y === y);
-        if (isHouseLike(p)) {
-          const inLot = (x, y) => x >= 0 && y >= 0 && x < W && y < H && (lotOf[y * W + x] === i || placeIdx[y * W + x] === i || (p.entry && x === p.entry[0] && y === p.entry[1]));
-          const hedge = p.style === "big_house";
-          for (const [x, y] of lotTiles[i]) {
-            if (driveOf[y * W + x] === i) continue;
-            const v = hash(`${x}.${y}`) % 4;
-            if (hedge && dist(p, x, y) >= 2 && tiles[y][x] === "." && hash(`gt${x},${y}`) % 7 === 0) // trees in the back garden
-              addSprite(list, art.tree(scene.season, "round", hash(`gv${x}`) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
-            const edges = [["n", x, y - 1, 0.5, 0.06], ["s", x, y + 1, 0.5, 0.94], ["w", x - 1, y, 0.06, 0.5], ["e", x + 1, y, 0.94, 0.5]];
-            for (const [side, nx, ny, ex, ey] of edges) {
-              if (inLot(nx, ny)) continue;
-              if (spots.van && spots.van.x === x && spots.van.y === y && side === spots.van.road) continue; // the van backed in through here
-              const spr = hedge ? art.hedge(stage, side, scene.season, v) : art.fence(stage, side, v);
-              addSprite(list, spr, x + 0.5, y + 0.5, proj.depth(x + ex, y + ey) + 0.02, "f", i);
-            }
-          }
-          // junk on the lot tile nearest the camera that the van and the board leave free
-          let best = null, bd = -1e9;
-          for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
-            if (x < 0 || y < 0 || x >= W || y >= H || lotOf[y * W + x] !== i || driveOf[y * W + x] === i || taken(x, y)) continue;
-            const d = proj.depth(x + 0.5, y + 0.5) - Math.abs(x - (p.x + p.w / 2)) * 0.3;
-            if (d > bd) { bd = d; best = [x, y]; }
-          }
-          if (stage >= 2 && best) addSprite(list, art.junk(stage, hash(p.id) % 3, snowy), best[0] + 0.4, best[1] + 0.35, proj.depth(best[0] + 0.4, best[1] + 0.35), "j", i);
-          if (look.works && best) addSprite(list, art.skip(), best[0] + 0.5, best[1] + 0.6, proj.depth(best[0] + 0.5, best[1] + 0.6), "j", i);
-        } else {
-          const [ex, ey] = p.entry;
-          const side = [[ex + 1, ey], [ex - 1, ey], [ex, ey + 1], [ex, ey - 1]].filter(([a, b]) => (at(a, b) === "." || at(a, b) === "e") && !taken(a, b));
-          // rubbish on the apron by the door of a run-down block: overflowing bins from shabby, then bags, a
-          // mattress and scrap
-          const o = side[1] || side[0];
-          if (stage >= 2 && o) addSprite(list, art.junk(stage >= 4 ? 4 : 2, hash(p.id) % 3, snowy), o[0] + 0.5, o[1] + 0.45, proj.depth(o[0] + 0.5, o[1] + 0.45), "j", i);
-          if (stage >= 4 && side[0] && side[0] !== o) addSprite(list, art.junk(3, (hash(p.id) + 1) % 3, snowy), side[0][0] + 0.3, side[0][1] + 0.6, proj.depth(side[0][0] + 0.3, side[0][1] + 0.6), "j", i);
-        }
-        if (listed && spots.sign) { // the board, a quarter tile in from the road edge, leaning toward its own home
-          const [a, b] = signAt(p, spots.sign, spots.sign === spots.van);
-          addSprite(list, art.sign(listed), a, b, proj.depth(a, b), "s", i);
-        }
-        if (spots.van) { // the moving van, backed onto the lot along the road
-          const t = spots.van, [a, b] = towardRoad(t, 0.08), d = t.road === "n" || t.road === "s" ? 0 : 1;
-          addSprite(list, art.van(d), a, b, proj.depth(a, b) + 0.05, "van", i);
-        }
-      });
+      places.forEach((p, i) => { if (p.kind === "home") lotItems(list, p, i); });
       // open land: goals and benches on the field, sheds and a wire fence round the allotments, parked cars,
       // containers and vans in the depot, bushes, trees and a LAND FOR SALE board on the meadows
       const deepest = pts => Math.max(...pts.map(([a, b]) => proj.depth(a, b)));
@@ -599,9 +652,9 @@
           tilesIn(USE.meadow, (x, y) => {
             if (tiles[y][x] !== ".") return;
             const h = hash(`md${x},${y}`);
-            if (h % 11 === 0) addSprite(list, art.tree(scene.season, "bush", (h >>> 4) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
-            else if (h % 29 === 1) addSprite(list, art.tree(scene.season, "round", (h >>> 4) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t");
-            const road = at(x, y + 1) === "#" || at(x + 1, y) === "#" || at(x, y - 1) === "#" || at(x - 1, y) === "#";
+            if (h % 11 === 0) addSprite(list, art.tree(scene.season, "bush", (h >>> 4) % 4), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "bush", (h >>> 4) % 4);
+            else if (h % 29 === 1) addSprite(list, art.tree(scene.season, "round", (h >>> 4) % 6), x + 0.5, y + 0.5, proj.depth(x + 0.5, y + 0.5), "t").remake = s => art.tree(s, "round", (h >>> 4) % 6);
+            const road = R.isStreet(x, y + 1) || R.isStreet(x + 1, y) || R.isStreet(x, y - 1) || R.isStreet(x - 1, y);
             if (road && proj.depth(x, y) > sd) { sd = proj.depth(x, y); sign = [x, y]; }
           });
           if (sign) addSprite(list, art.landSign(), sign[0] + 0.5, sign[1] + 0.5, proj.depth(sign[0] + 0.5, sign[1] + 0.5), "s");
@@ -621,15 +674,122 @@
       list.sort((a, b) => a.depth - b.depth || a.wx - b.wx);
       statics = list;
       dirty = false;
-      occlusion = null;
+      occlusion = null; lampOcc.clear(); lampMasks = 0;
       staticsVersion++;
+      scene.stats.statics_builds++;
+      scene.stats.staticsMs = performance.now() - t0;
     }
+    // The region's buildings (places and decor) from geometry alone (view.md 3.3.1): rect, slices, hull, label and
+    // centre come from CV.spriteBox, never from art.building. rec.b stands in for the sprite until one is
+    // attached (attach), with a canvas-shaped {width, height} so the v2 tests that read its size still work.
+    function bigBuildings(list) {
+      for (const B of R.buildings) {
+        const p = B.p, i = B.decor ? -1 : placeById.get(p.id);
+        const kp = B.kp || (B.kp = Object.assign({}, p, { variant: B.variant }));
+        const box = art.spriteBox ? art.spriteBox(kp, scene.looks[p.id]) : CV.spriteBox(kp, scene.looks[p.id], proj);
+        const b = { c: { width: box.w, height: box.h, fake: true }, ox: box.ox, oy: box.oy, height: box.height, labelZ: box.labelZ, windows: [], lights: [],
+          porch: null, neon: null, smoke: null, beacon: null, id: B.sid, litShare: p.kind === "home" ? 70 : p.style === "tower" ? 45 : 60 };
+        const slices = proj.slices(p.x, p.y, p.x + p.w, p.y + p.h);
+        const left = b.ox, right = b.ox + box.w;
+        const o0 = proj.toWorld(0, 0), o1 = proj.toWorld(p.x, p.y);
+        const rec = { i, p, b, B, big: true, decor: B.decor, slices: [], depth: Math.max(...slices.map(s => s.depth)), top: b.height, dx: o1[0] - o0[0], dy: o1[1] - o0[1], att: null, lastKey: null };
+        slices.forEach((s, k) => {
+          const x0 = k === 0 ? left : Math.max(left, s.wx0), x1 = k === slices.length - 1 ? right : Math.min(right, s.wx1);
+          if (x1 <= x0) return;
+          const it = { img: null, sx: x0 - b.ox, sy: 0, sw: x1 - x0, sh: box.h, wx: x0, wy: b.oy, depth: s.depth, kind: "b", ref: i, rec };
+          list.push(it); rec.slices.push(it);
+        });
+        const pts = [], bd = CV.bodyOf(p);
+        const hx0 = Math.min(bd.x0, p.x + 0.1), hy0 = Math.min(bd.y0, p.y + 0.1), hx1 = Math.max(bd.x1, p.x + p.w - 0.1), hy1 = Math.max(bd.y1, p.y + p.h - 0.1);
+        for (const [x, y] of [[bd.x0, bd.y0], [bd.x1, bd.y0], [bd.x1, bd.y1], [bd.x0, bd.y1]]) { pts.push(proj.toWorld(x, y, 0)); pts.push(proj.toWorld(x, y, b.height)); }
+        rec.hull = hull(pts);
+        rec.ground = hull([[hx0, hy0], [hx1, hy0], [hx1, hy1], [hx0, hy1]].map(([x, y]) => proj.toWorld(x, y, 0)));
+        rec.label = proj.toWorld((bd.x0 + bd.x1) / 2, (bd.y0 + bd.y1) / 2, b.labelZ);
+        rec.center = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2, b.height / 2);
+        rec.wx0 = b.ox; rec.wy0 = b.oy; rec.wx1 = b.ox + box.w; rec.wy1 = b.oy + box.h;
+        B.rec = rec;
+        buildings.push(rec);
+      }
+    }
+    // --- sprites of a big town (view.md 3.3.6): Map<spriteKey, entry>, LRU by area, built under the budget ------
+    // A keyed (variant) building is drawn once at the canonical origin (id = sid, x = y = 0) and placed with the
+    // shift toWorld(p.x, p.y) - toWorld(0, 0); Millbrook's places keep variant null and in-place drawing.
+    const sprites = new Map(), spriteQueue = new Map();
+    let spriteMP = 0;
+    scene.spriteCap = 16e6;
+    const recKey = rec => CV.spriteKey(rec.B.kp, rec.decor ? null : scene.looks[rec.p.id], scene.season);
+    // the browser records canvas draws and rasterises them when the canvas is first read: a one-pixel read makes
+    // that happen inside the build (and its budget) instead of in the first frame that draws it
+    const flush = c => { try { c.getContext("2d").getImageData(0, 0, 1, 1); } catch (e) { /* a tainted or lost canvas */ } };
+    CV.flushCanvas = CV.flushCanvas || flush;
+    function buildSprite(rec, key) {
+      const p = rec.p, look = rec.decor ? {} : scene.looks[p.id] || {};
+      const t0 = performance.now();
+      const s = rec.B.variant == null ? art.building(p, look, scene.season)
+        : art.building(CV.canonPlace ? CV.canonPlace(rec.B.kp) : Object.assign({}, rec.B.kp, { id: rec.B.sid, x: 0, y: 0, entry: p.entry ? [p.entry[0] - p.x, p.entry[1] - p.y] : null }), look, scene.season);
+      flush(s.c);
+      const e = { c: s.c, s, used: frameNo, mp: s.c.width * s.c.height, inPlace: rec.B.variant == null, season: scene.season, ms: performance.now() - t0 };
+      sprites.set(key, e); spriteMP += e.mp; scene.stats.spriteBuilds++;
+      evictSprites();
+      return e;
+    }
+    function evictSprites() {
+      if (spriteMP <= scene.spriteCap) return;
+      const old = [...sprites.entries()].filter(([, e]) => e.used < frameNo).sort((a, b) => a[1].used - b[1].used);
+      for (const [k, e] of old) { if (spriteMP <= scene.spriteCap) break; sprites.delete(k); spriteMP -= e.mp; }
+    }
+    function attach(rec, e) {
+      if (rec.att === e) return;
+      rec.att = e;
+      const s = e.s, dx = e.inPlace ? 0 : rec.dx, dy = e.inPlace ? 0 : rec.dy, sh = q => q ? [q[0] + dx, q[1] + dy] : null;
+      Object.assign(rec.b, { c: e.c, windows: dx || dy ? (s.windows || []).map(w => w.map(sh)) : (s.windows || []), lights: (s.lights || []).map(sh),
+        porch: sh(s.porch), neon: s.neon ? [s.neon[0] + dx, s.neon[1] + dy, s.neon[2], s.neon[3]] : null, smoke: sh(s.smoke), beacon: sh(s.beacon),
+        litShare: s.litShare, glows: null, mask: null });
+    }
+    // The sprite to draw for rec now: its key's, else the last key drawn (a season or look change) while the new
+    // one waits in the queue; null when it has none yet (a box stands in).
+    function spriteOf(rec, queue) {
+      const key = recKey(rec);
+      let e = sprites.get(key);
+      if (e) { e.used = frameNo; rec.lastKey = key; attach(rec, e); return e; }
+      if (queue !== false) {
+        const q = spriteQueue.get(key), d = Math.hypot((rec.wx0 + rec.wx1) / 2 - scene.cam.x, (rec.wy0 + rec.wy1) / 2 - scene.cam.y);
+        if (!q || q.d > d) spriteQueue.set(key, { rec, d, f: frameNo });
+      }
+      e = rec.lastKey ? sprites.get(rec.lastKey) : null;
+      if (e) { e.used = frameNo; attach(rec, e); scene.stats.staleSprites++; return e; }
+      return null;
+    }
+    // Build queued sprites, nearest first, within ms (and at least one when nothing else was built this frame).
+    // A sprite's cost is estimated from its area (ms per px, learned): while the camera moves, one that would
+    // overrun what is left of the budget waits (its box stands in) and smaller ones go first.
+    let avgSprite = 2, msPerPx = 2e-5;
+    function buildQueued(budget, ms, still) {
+      const jobs = [...spriteQueue.entries()].filter(([, j]) => j.f >= frameNo - 1).sort((a, b) => a[1].d - b[1].d);
+      let spent = 0;
+      for (const [k, j] of jobs) {
+        if (sprites.has(k)) { spriteQueue.delete(k); continue; }
+        if (spent >= ms || (budget.builds > 0 && budget.left() < Math.min(4, avgSprite))) break;
+        const area = (j.rec.wx1 - j.rec.wx0) * (j.rec.wy1 - j.rec.wy0), est = area * msPerPx;
+        if (!still && !budget.unlimited && est > Math.max(budget.left(), 4)) continue;
+        const a = performance.now();
+        budget.run(() => buildSprite(j.rec, k));
+        const dt = performance.now() - a;
+        spent += dt; avgSprite = avgSprite * 0.8 + dt * 0.2;
+        if (area > 0) msPerPx = msPerPx * 0.8 + (dt / area) * 0.2;
+        spriteQueue.delete(k);
+      }
+      for (const [k, j] of spriteQueue) if (j.f < frameNo - 1) spriteQueue.delete(k);
+      return spent;
+    }
+    scene.sprites = { map: sprites, queue: spriteQueue, mp: () => spriteMP, has: rec => sprites.has(recKey(rec)), build: (rec) => buildSprite(rec, recKey(rec)), keyOf: recKey, spriteOf };
     let staticsVersion = 0;
 
     // --- opaque-pixel masks of building sprites: exact x-ray and "is this person hidden" tests -------------
     function maskOf(rec) {
       const b = rec.b;
       if (b.mask) return b.mask;
+      if (b.c.fake) return { m: new Uint8Array(0), w: 0, h: 0, n: 0 }; // no sprite yet: nothing opaque
       const w = b.c.width, h = b.c.height;
       const c = CV.canvas(w, h), q = c.getContext("2d", { willReadFrequently: true });
       q.drawImage(b.c, 0, 0);
@@ -815,8 +975,50 @@
       }
       return c;
     }
+    // Lazy lamp occlusion for a big town (view.md 3.3.7): a visible lamp's hidden flag and masked pool are worked
+    // out the first time it shows, from the buildings near it, once every nearer one has its sprite (until then
+    // the pool shows unmasked); at most 300 masks are kept and 2 ms a frame spent.
+    const lampOcc = new Map();
+    let lampMasks = 0, lampMs = 0;
+    function hiddenAtIn(list, wx, wy, depth) {
+      for (const r of list) {
+        if (!inHull(r.hull, wx, wy)) continue;
+        const sl = r.slices.find(it => wx >= it.wx && wx < it.wx + it.sw);
+        if (sl && sl.depth > depth + 0.3) return true;
+      }
+      return false;
+    }
+    function maskedGlowIn(src, gx, gy, depth, list) {
+      const w = src.width, h = src.height;
+      let c = null, q = null;
+      for (const r of list) for (const it of r.slices) {
+        if (it.depth <= depth + 0.3 || it.wx >= gx + w || it.wx + it.sw <= gx || it.wy >= gy + h || it.wy + it.sh <= gy) continue;
+        if (!c) { c = CV.canvas(w, h); q = c.getContext("2d"); q.drawImage(src, 0, 0); q.globalCompositeOperation = "destination-out"; }
+        q.drawImage(r.att.c, it.sx, it.sy, it.sw, it.sh, it.wx - gx, it.wy - gy, it.sw, it.sh);
+      }
+      return c;
+    }
+    function lampState(k, lx, ly) {
+      const o0 = lampOcc.get(k);
+      if (o0) return o0;
+      if (lampMs >= 2) return null;
+      const a = performance.now();
+      const d = proj.depth(lx, ly), top = proj.toWorld(lx, ly, 39), p = proj.toWorld(lx, ly, 0);
+      const w = lampGlow.width, h = lampGlow.height, gx = p[0] - 48, gy = p[1] - 25;
+      const near = inRect(Math.min(gx, top[0]) - 2, Math.min(gy, top[1]) - 2, gx + w + 2, gy + h + 2).filter(r => r.big && r.slices.some(it => it.depth > d + 0.3));
+      if (near.some(r => !r.att)) { lampMs += performance.now() - a; return null; }
+      const hidden = hiddenAtIn(near, top[0] + 6, top[1], d);
+      const img = hidden || lampMasks >= 300 ? null : maskedGlowIn(lampGlow, gx, gy, d, near);
+      if (img) lampMasks++;
+      const o = { hidden, img };
+      lampOcc.set(k, o);
+      lampMs += performance.now() - a;
+      return o;
+    }
     function occlusionOf() {
       if (occlusion) return occlusion;
+      // a big town works its lamps out lazily (lampState); porch pools draw without masks
+      if (BIG) return (occlusion = { lamps: lampPts.map(() => false), lampImg: [], porch: new Map(), porchImg: new Map() });
       const lamps = [], lampImg = [];
       lampPts.forEach(([lx, ly]) => {
         const d = proj.depth(lx, ly), top = proj.toWorld(lx, ly, 39), p = proj.toWorld(lx, ly, 0);
@@ -843,13 +1045,30 @@
     let B = proj.bounds(); B.y1 += 24;
     const levels = new Map(); // level -> Map(key -> {c, used})
     let frameNo = 0;
+    const staleOk = BIG; let staleN = 0;
     function chunk(level, cx, cy, mayBuild) {
       let m = levels.get(level); if (!m) levels.set(level, m = new Map());
       const key = cx + "," + cy;
       let ch = m.get(key);
-      if (!ch && mayBuild()) { ch = { c: renderChunk(level, cx, cy), used: 0 }; m.set(key, ch); scene.stats.built++; evict(); }
+      if ((!ch || (ch.stale && staleOk)) && mayBuild()) {
+        const a = performance.now();
+        ch = { c: BIG ? budget.run(() => renderChunk(level, cx, cy)) : renderChunk(level, cx, cy), used: 0 }; m.set(key, ch); scene.stats.built++;
+        scene.stats.chunkMs = performance.now() - a; evict();
+      }
+      else if (ch && ch.stale) staleN++;
       if (ch) ch.used = frameNo;
       return ch;
+    }
+    // the near ground cache in device px, and a trim to cap (the low view's share of the chunk budget)
+    const nearPx = () => { let t = 0; for (const m of levels.values()) for (const v of m.values()) t += v.c.width * v.c.height; return t; };
+    function trimNear(cap) {
+      for (;;) {
+        let total = 0, old = null;
+        for (const m of levels.values()) for (const [k, v] of m) { total += v.c.width * v.c.height; if (v.used < frameNo && (!old || v.used < old[2].used)) old = [m, k, v]; }
+        scene.stats.cacheMP = total / 1e6;
+        if (total <= cap || !old) return;
+        old[0].delete(old[1]);
+      }
     }
     function evict() {
       const budget = scene.chunkBudget || 12e6;
@@ -868,9 +1087,14 @@
     function renderChunk(level, cx, cy) {
       const size = Math.round(CH * level);
       const c = CV.canvas(size, size), q = c.getContext("2d");
+      if (level < 1 && BIG) { // a big town paints its smaller levels directly, unfiltered (tiles sit on even px)
+        paintChunk(q, cx, cy, level);
+        flush(c);
+        return c;
+      }
       if (level < 1) {
         const m1 = levels.get(1), have = m1 && m1.get(cx + "," + cy);
-        let src = have && have.c;
+        let src = have && !have.stale && have.c;
         if (!src) {
           if (!scratch) scratch = CV.canvas(CH, CH);
           const sq = scratch.getContext("2d");
@@ -880,18 +1104,27 @@
         }
         q.imageSmoothingEnabled = true; q.imageSmoothingQuality = "high";
         q.drawImage(src, 0, 0, CH, CH, 0, 0, size, size);
+        if (BIG) flush(c);
         return c;
       }
       paintChunk(q, cx, cy);
+      if (BIG) flush(c);
       return c;
     }
-    function paintChunk(q, cx, cy) {
+    function paintChunk(q, cx, cy, k) {
       const wx0 = B.x0 + cx * CH, wy0 = B.y0 + cy * CH;
+      k = k || 1;
       q.imageSmoothingEnabled = false;
-      q.setTransform(1, 0, 0, 1, -wx0, -wy0);
+      q.setTransform(k, 0, 0, k, -wx0 * k, -wy0 * k);
       const off = art.tileOffset, iso = proj.kind === "iso";
       const front = iso ? proj.faces : [];
-      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let tx0 = 0, ty0 = 0, tx1 = W - 1, ty1 = H - 1;
+      if (BIG) { // only the tiles under the chunk (its corners in tile space, a margin for the tile's height)
+        const cs = [[wx0, wy0 - 60], [wx0 + CH, wy0 - 60], [wx0, wy0 + CH + 8], [wx0 + CH, wy0 + CH + 8]].map(([a, b]) => proj.toTile(a, b));
+        tx0 = Math.max(0, Math.floor(Math.min(...cs.map(q => q[0]))) - 2); tx1 = Math.min(W - 1, Math.ceil(Math.max(...cs.map(q => q[0]))) + 2);
+        ty0 = Math.max(0, Math.floor(Math.min(...cs.map(q => q[1]))) - 2); ty1 = Math.min(H - 1, Math.ceil(Math.max(...cs.map(q => q[1]))) + 2);
+      }
+      for (let y = ty0; y <= ty1; y++) for (let x = tx0; x <= tx1; x++) {
         const p0 = proj.toWorld(x, y);
         const tx = p0[0] - off[0], ty = p0[1] - off[1];
         if (tx > wx0 + CH || tx + proj.tw < wx0 || ty > wy0 + CH || ty + proj.th + 24 < wy0) continue;
@@ -908,8 +1141,9 @@
       }
       // building shadows lie on the ground, cast to the east-north-east
       q.fillStyle = "rgba(8,16,8,0.22)";
+      const nearChunk = p => { if (!BIG) return true; const c0 = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2); return c0[0] > wx0 - 400 && c0[0] < wx0 + CH + 400 && c0[1] > wy0 - 300 && c0[1] < wy0 + CH + 300; };
       for (const p of places) {
-        if (p.kind === "park") continue;
+        if (p.kind === "park" || !nearChunk(p)) continue;
         const fl = p.floors || 1;
         const hgt = Math.min(2.6, 0.45 + fl * (p.style === "house" ? 0.45 : 0.32) + (p.style === "big_house" ? 0.3 : 0));
         const b = CV.bodyOf(p);
@@ -920,7 +1154,7 @@
       }
       // pools and the fountain basin are ground too
       for (const p of places) {
-        if (p.style !== "big_house") continue;
+        if (p.style !== "big_house" || !nearChunk(p)) continue;
         const b = CV.bodyOf(p);
         if (b.pool) { const look = scene.looks[p.id]; art.pool(q, b.pool, look ? look.stage | 0 : 0, 0, 0, scene.season); }
       }
@@ -991,6 +1225,13 @@
     }
     function glowOf(rec, share) {
       const b = rec.b, pct = share == null ? b.litShare : share;
+      // a region building shares V2's glow of its sprite (art.glow, one canvas per sprite key and share)
+      if (BIG && rec.big && art.glow) {
+        const e = rec.att;
+        if (!e) return null;
+        const gl = art.glow(e.s, pct);
+        return gl && (e.inPlace ? gl : { c: gl.c, wx: gl.wx + rec.dx, wy: gl.wy + rec.dy });
+      }
       b.glows = b.glows || new Map();
       if (b.glows.has(pct)) return b.glows.get(pct);
       const win = b.windows.filter((q, k) => hash(b.id + ":" + k) % 100 < pct);
@@ -1011,26 +1252,57 @@
     function blit(img, sx, sy, sw, sh, wx, wy, v) {
       const dx0 = Math.round(wx * v.S + v.ox), dy0 = Math.round(wy * v.S + v.oy);
       const dx1 = Math.round((wx + sw) * v.S + v.ox), dy1 = Math.round((wy + sh) * v.S + v.oy);
-      if (dx1 > dx0 && dy1 > dy0) g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      if (dx1 <= dx0 || dy1 <= dy0) return;
+      // a big town at device scale < 0.75 draws from half-size copies (one smoothed 2:1 draw each, made under the
+      // budget): the frame then copies nearly 1:1 instead of filtering four times the pixels
+      const m = v.mip ? mipOf(img) : null;
+      if (v.mip && !m) scene.stats.mipMiss++;
+      if (m) g.drawImage(m, sx / 2, sy / 2, sw / 2, sh / 2, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      else g.drawImage(img, sx, sy, sw, sh, dx0, dy0, dx1 - dx0, dy1 - dy0);
     }
+    let mips = new WeakMap(), mipFrame = -1, mipN = 0, mipMs = 0;
+    function mipOf(img) {
+      let m = mips.get(img);
+      if (m) return m;
+      // (copies have their own 3 ms a frame while the view moves, the frame's budget when it rests; a missing one
+      // draws the full sprite scaled)
+      if (mipFrame !== frameNo) { mipFrame = frameNo; mipN = 0; mipMs = 0; }
+      if (!img.width || (mipN > 0 && mipMs >= 3 && budget.left() <= 0)) return null;
+      mipN++;
+      const a = performance.now();
+      budget.run(() => {
+        m = CV.canvas(Math.max(1, Math.ceil(img.width / 2)), Math.max(1, Math.ceil(img.height / 2)));
+        const q = m.getContext("2d"); q.imageSmoothingEnabled = true;
+        q.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width / 2, img.height / 2);
+        flush(m);
+      });
+      mipMs += performance.now() - a;
+      mips.set(img, m);
+      return m;
+    }
+    scene.clearMips = () => { mips = new WeakMap(); };
 
     scene.draw = function (now) {
       const t0 = performance.now();
       frameNo++; scene.stats.frames = frameNo;
-      if (dirty || !statics.length) buildStatics();
+      if (BIG) { budget.begin(frameNo <= 1 || scene.eager || scene.unlimited); scene.stats.staleSprites = 0; scene.stats.mipMiss = 0; lampMs = 0; scene.spriteCap = scene.spriteCapSet || (isPhone() ? 8e6 : 16e6); }
+      if (dirty || !statics.length) BIG ? budget.run(buildStatics) : buildStatics();
       if (!lampGlow) { lampGlow = makeGlow(54, 27, "#ffd890", 0.5); porchGlow = makeGlow(22, 12, "#ffd890", 0.6); }
       const v = scene.view(), S = v.S;
+      const lod = scene.lodNow = lodOf(scene.cam.zoom);
+      if (lod !== "near") { drawLow(v, lod, now); scene.stats.draw = performance.now() - t0; return; }
       g.setTransform(1, 0, 0, 1, 0, 0);
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
       // ground: the smallest cached level that is still at least the device scale
-      const level = S > 0.5 ? 1 : S > 0.25 ? 0.5 : 0.25;
-      g.imageSmoothingEnabled = S < level;
-      let builds = 0; const mayBuild = () => builds++ < BUILDS_PER_FRAME || frameNo < 4 || scene.eager;
+      // (a big town keeps the half level up to 0.75: a zoom on its way scales it up rather than filtering 4x the px)
+      const level = BIG ? (S >= 0.75 ? 1 : S > 0.25 ? 0.5 : 0.25) : S > 0.5 ? 1 : S > 0.25 ? 0.5 : 0.25;
+      g.imageSmoothingEnabled = S < level || (BIG && S < 1 && S !== level);
+      let builds = 0; const mayBuild = BIG ? () => budget.may() : () => builds++ < BUILDS_PER_FRAME || frameNo < 4 || scene.eager;
       const nx = Math.ceil((B.x1 - B.x0) / CH), ny = Math.ceil((B.y1 - B.y0) / CH);
       const cx0 = Math.max(0, Math.floor((v.x0 - B.x0) / CH)), cx1 = Math.min(nx - 1, Math.floor((v.x1 - B.x0) / CH));
       const cy0 = Math.max(0, Math.floor((v.y0 - B.y0) / CH)), cy1 = Math.min(ny - 1, Math.floor((v.y1 - B.y0) / CH));
-      let nch = 0;
+      let nch = 0; staleN = 0;
       for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
         let ch = chunk(level, cx, cy, mayBuild), lv = level;
         if (!ch) for (const alt of [0.5, 1, 0.25]) { const m = levels.get(alt); const c2 = m && m.get(cx + "," + cy); if (c2) { ch = c2; lv = alt; break; } }
@@ -1043,6 +1315,7 @@
       }
       g.imageSmoothingEnabled = false;
       groundOverlays(v, now);
+      const tItems = performance.now(); scene.stats.groundMs = tItems - t0; scene.stats.nearStale = staleN;
       // items: visible statics merged with the sorted movers; x-ray what covers the target
       g.imageSmoothingEnabled = S < 1;
       const night = scene.nightAlpha(scene.minute);
@@ -1056,9 +1329,29 @@
       const vv = { S, ox: v.ox, oy: v.oy, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, lod: "near", level, night };
       for (const src of moverSources) if (src.items) src.items(vv, dyn);
       const merged = dyn.length ? ms.concat(dyn).sort((a, b) => a.depth - b.depth) : ms;
-      while (i < statics.length || j < merged.length) {
-        const s = i < statics.length ? statics[i] : null, m = j < merged.length ? merged[j] : null;
+      v.mip = BIG && S < 0.75;
+      // a big town draws its sprites unfiltered: the half copies land 1:1 at 0.5, and between the steps (a zoom on
+      // its way) the unfiltered draw costs a quarter of the filtered one in software
+      if (BIG) g.imageSmoothingEnabled = false;
+      // the depth band (view.md 3.3.5): only statics whose ground point can show on screen
+      let iEnd = statics.length;
+      if (BIG) {
+        const zk = proj.zk || 1, dlo = proj.depthOfWorldY(v.y0 - 40 * zk) - 2, dhi = proj.depthOfWorldY(v.y1 + 640 * zk) + 2;
+        i = lowerBound(statics, dlo); iEnd = lowerBound(statics, dhi + 1e-9);
+      }
+      const boxed = new Set();
+      while (i < iEnd || j < merged.length) {
+        const s = i < iEnd ? statics[i] : null, m = j < merged.length ? merged[j] : null;
         const it = m && (!s || m.depth < s.depth) ? (j++, m) : (i++, s);
+        if (it.rec && it.rec.big) { // a region building: its cached sprite, else a box at near scale while it builds
+          if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx + it.sw < v.x0 - pad || it.wy + it.sh < v.y0 - pad) continue;
+          const e = spriteOf(it.rec);
+          if (!e) {
+            if (!boxed.has(it.rec)) { boxed.add(it.rec); CV.boxBuilding(g, it.rec.B, S, -v.ox / S, -v.oy / S, { proj, windows: 0 }); n++; }
+            continue;
+          }
+          it.img = e.c;
+        }
         if (it.draw) { // a seam item: {depth, wx, wy, wx1, wy1, draw(g, S, ox, oy)}
           if (it.wx > v.x1 + pad || it.wy > v.y1 + pad || it.wx1 < v.x0 - pad || it.wy1 < v.y0 - pad) continue;
           it.draw(g, S, v.ox, v.oy); n++;
@@ -1069,7 +1362,26 @@
         if (it.extra) it.extra(g, v);
         n++;
       }
-      scene.stats.items = n; scene.stats.chunks = nch;
+      scene.stats.items = n; scene.stats.chunks = nch; scene.stats.boxes = boxed.size; scene.stats.itemsMs = performance.now() - tItems;
+      if (BIG && chunks) { chunks.begin(); chunks.trim(lowCap() - nearPx()); } // (returns at once when under the cap)
+      if (BIG) {
+        const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy];
+        const a = performance.now(); buildQueued(budget, 4, st); scene.stats.spriteMs = performance.now() - a;
+        // sprite prefetch (view.md 3.2): the camera rests, the queue is empty, frames are cheap (the last one and this one so far), zoom >= 0.3
+        // and sprites are under 75% of the cap: sprites for the view grown 75% each way, nearest first, within 4 ms
+        // (once a pass over a view queues nothing, that view is done until the camera moves)
+        // (every 4th frame, and what it leaves unbuilt leaves the queue: the frames between are not charged for it)
+        if (st && frameNo % 4 === 0 && !spriteQueue.size && pfView !== v.S + ":" + v.ox + ":" + v.oy && scene.cam.zoom >= 0.3 && spriteMP < 0.75 * scene.spriteCap
+          && (scene.stats.draw || 0) < 8 && performance.now() - t0 < 8 && budget.left() > 0) {
+          const gx = (v.x1 - v.x0) * 0.75, gy = (v.y1 - v.y0) * 0.75;
+          const st0 = scene.stats.staleSprites; // (staleSprites counts what is drawn)
+          for (const o of inRect(v.x0 - gx, v.y0 - gy, v.x1 + gx, v.y1 + gy)) if (o.big) spriteOf(o);
+          scene.stats.staleSprites = st0;
+          if (!spriteQueue.size) pfView = v.S + ":" + v.ox + ":" + v.oy;
+          else { const b = performance.now(); buildQueued(budget, 4, false); spriteQueue.clear(); scene.stats.spriteMs += performance.now() - b; } // (by estimate: no big one overruns)
+        }
+        if (st && !spriteQueue.size && !scene.stats.boxes) prefetch();
+      }
       smoke(v, now);
       // rain: an overcast wash, so a still frame reads as wet weather too
       const raining = scene.weather === "rain" || scene.weather === "storm";
@@ -1084,9 +1396,196 @@
       const wet = scene.weather === "rain" || scene.weather === "snow" || scene.weather === "storm";
       if (wet) weather(now, scene.season === "winter" || scene.weather === "snow");
       plane(v, now, night);
+      const tL = performance.now();
       labels(v, now);
+      scene.stats.labelsMs = performance.now() - tL;
+      if (BIG) scene.stats.buildMs = budget.spent;
       scene.stats.draw = performance.now() - t0;
     };
+
+    // --- low zoom (view.md 3.2): mid = ground chunks, movers' marks, upright chunks, tint, lights; far = combined
+    // two-step chunks, tint, lights, marks on top. Levels: near/mid the largest of [1, 0.5, 0.25] <= zoom x dpr, far
+    // [0.125, 0.0625] by zoom x min(dpr, 1). LOD switches at 0.5 and 0.18, holding 3% below each when coming down.
+    let lodCur = null;
+    function lodOf(z) {
+      if (!BIG) return "near";
+      const h = 0.03, nearAt = lodCur === "near" ? 0.5 * (1 - h) : 0.5, midAt = lodCur === "near" || lodCur === "mid" ? 0.18 * (1 - h) : 0.18;
+      lodCur = z >= nearAt ? "near" : z >= midAt ? "mid" : "far";
+      return lodCur;
+    }
+    scene.lod = () => lodCur || lodOf(scene.cam.zoom);
+    // (mid by zoom x min(dpr, 1.5): a dpr 2 backing store costs four times the raster, and finer chunks too)
+    const levelFor = (lod, zoom) => lod === "far" ? (zoom * Math.min(scene.dpr, 1) >= 0.125 ? 0.125 : 0.0625)
+      : lod === "mid" ? (zoom * Math.min(scene.dpr, 1.5) >= 1 ? 1 : zoom * Math.min(scene.dpr, 1.5) >= 0.5 ? 0.5 : 0.25)
+      : (zoom * scene.dpr >= 1 ? 1 : zoom * scene.dpr >= 0.5 ? 0.5 : 0.25);
+    scene.levelFor = levelFor;
+    const budget = CV.makeBudget ? CV.makeBudget(8) : null;
+    scene.budget = budget;
+    // world-px cells of 512 holding the buildings and trees whose boxes touch them (chunk and occlusion queries)
+    const CELL = 512;
+    let cellKey = -1, cells = null;
+    function cellIndex() {
+      if (cellKey === staticsVersion && cells) return cells;
+      cellKey = staticsVersion; cells = new Map();
+      const put = (x0, y0, x1, y1, o) => {
+        for (let gy = Math.floor(y0 / CELL); gy <= Math.floor(y1 / CELL); gy++) for (let gx = Math.floor(x0 / CELL); gx <= Math.floor(x1 / CELL); gx++) {
+          const k = gx + ":" + gy; let l = cells.get(k); if (!l) cells.set(k, l = []); l.push(o);
+        }
+      };
+      for (const r of buildings) put(r.wx0, r.wy0, r.wx1, r.wy1, r);
+      for (const it of statics) if (it.kind === "t") put(it.wx, it.wy, it.wx + it.sw, it.wy + it.sh, it);
+      return cells;
+    }
+    function inRect(x0, y0, x1, y1) {
+      const idx = cellIndex(), out = new Set();
+      for (let gy = Math.floor(y0 / CELL); gy <= Math.floor(y1 / CELL); gy++) for (let gx = Math.floor(x0 / CELL); gx <= Math.floor(x1 / CELL); gx++) {
+        const l = idx.get(gx + ":" + gy);
+        if (l) for (const o of l) out.add(o);
+      }
+      return [...out].filter(o => o.rec || o.big ? (o.wx0 < x1 && o.wx1 > x0 && o.wy0 < y1 && o.wy1 > y0) : (o.wx < x1 && o.wx + o.sw > x0 && o.wy < y1 && o.wy + o.sh > y0));
+    }
+    scene.buildingsIn = (x0, y0, x1, y1) => inRect(x0, y0, x1, y1).filter(o => o.big);
+    // Occupancy for the low-zoom lights (view.md 3.4: a home is lit if occ > 0, else 5%): folk's occ, in place
+    // order (the facade keeps the last one: absent means unchanged); null without one (the clock alone decides).
+    // occVer moves when occ changes, and an l chunk then compares the signature of its homes' occupancy.
+    let occRef = null, occKey = "", occVer = 0;
+    const occNow = () => {
+      const o = Array.isArray(scene.occ) ? scene.occ : scene.state && Array.isArray(scene.state.occ) ? scene.state.occ : null;
+      if (o !== occRef) { const k = o ? o.join(",") : ""; occRef = o; if (k !== occKey) { occKey = k; occVer++; } }
+      return o;
+    };
+    const occOf = (o, occ) => { if (!occ || o.decor) return null; const i = placeById.get(o.p.id); return i == null ? null : occ[i] | 0; };
+    const occSig = (list, occ) => {
+      if (!occ) return -1;
+      let h = 0; // (order-free: the bake's list is sorted by depth, a check's is not)
+      for (const o of list) if (o.big && !o.decor && o.p.kind === "home" && occOf(o, occ) > 0) h = (h + (placeById.get(o.p.id) * 7919 + 13) % 1000003) % 1000000007;
+      return h;
+    };
+    const lowPainter = {
+      origin: () => ({ x0: B.x0, y0: B.y0 - 1024 }),
+      job(layer, level, wx0, wy0, span) {
+        const c = CV.canvas(512, 512), q = c.getContext("2d"), steps = [], job = { c, steps, tag: null };
+        if (layer === "g" || layer === "c") for (let k = 0; k < 4; k++) steps.push(() => CV.lowGround(q, R, proj, level, wx0, wy0, 512, scene.season, k * 128, (k + 1) * 128));
+        if (layer === "u" || layer === "c" || layer === "l") {
+          const list = inRect(wx0, wy0, wx0 + span, wy0 + span).sort((a, b) => a.depth - b.depth);
+          // an upright or lights chunk with nothing in it is not drawn (a full-screen pass less in the country)
+          if (layer !== "c" && !list.some(o => o.big || layer === "u")) job.empty = true;
+          if (layer === "l") {
+            const minute = scene.minute, bucket = CV.lightBucket(minute), occ = occNow();
+            job.tag = { bucket, ver: occVer, sig: occSig(list, occ) };
+            const step = level >= 0.25 ? 1 : 2;
+            steps.push(() => { for (const o of list) if (o.big) CV.lowLights(q, o.B, level, wx0, wy0, CV.lightShare(o.B, minute, occOf(o, occ)), { proj, step }); });
+          } else {
+            const win = level >= 0.25 ? 1 : level >= 0.125 ? 2 : 0;
+            let boxedN = 0;
+            for (let a = 0; a < list.length; a += 8) steps.push(() => {
+              q.imageSmoothingEnabled = true;
+              for (const o of list.slice(a, a + 8)) {
+                if (!o.big) { // a tree: a blob
+                  const r = Math.max(1, 9 * level), cxw = o.wx + o.sw / 2, cyw = o.wy + o.sh - 10;
+                  CV.lowTree(q, (cxw - wx0) * level, (cyw - wy0) * level, r, scene.season);
+                  continue;
+                }
+                const e = level >= 0.25 ? sprites.get(recKey(o)) : null;
+                if (e) {
+                  const s = e.s, dx = e.inPlace ? 0 : o.dx, dy = e.inPlace ? 0 : o.dy;
+                  q.drawImage(e.c, (s.ox + dx - wx0) * level, (s.oy + dy - wy0) * level, e.c.width * level, e.c.height * level); e.used = frameNo;
+                } else { CV.boxBuilding(q, o.B, level, wx0, wy0, { proj, windows: win }); boxedN++; }
+              }
+              job.tag = boxedN;
+            });
+          }
+        }
+        if (!steps.length) steps.push(() => {});
+        return job;
+      },
+    };
+    const chunks = CV.makeChunks ? CV.makeChunks(scene, lowPainter) : null;
+    scene.chunks = chunks;
+    // a phone: the view's 6 MP near budget (coarse pointer, narrow), or scene.phone when the host says
+    const isPhone = () => scene.phone != null ? !!scene.phone : (scene.chunkBudget || 12e6) <= 6e6;
+    const lowCap = () => scene.chunkCap || (isPhone() ? 10e6 : 24e6);
+    scene.isPhone = isPhone;
+    // What the region view is doing (view.md 3.2, the smoke tests and the HUD): lod, level, caches, the budget.
+    scene.debug = () => {
+      const st = scene.stats;
+      return { big: BIG, lod: scene.lodNow || lodOf(scene.cam.zoom), level: scene.lodNow === "near" ? null : scene.levelNow || null,
+        zoom: scene.cam.zoom, phone: isPhone(), frames: frameNo, drawMs: st.draw || 0, buildMs: st.buildMs || 0, groundMs: st.groundMs || 0,
+        itemsMs: st.itemsMs || 0, labelsMs: st.labelsMs || 0, spriteMs: st.spriteMs || 0, lowMs: st.lowMs || 0,
+        chunks: chunks ? chunks.size() : 0, chunkMP: chunks ? chunks.mp / 1e6 : 0, chunkCapMP: lowCap() / 1e6, pending: chunks ? chunks.pending : 0,
+        chunksBuilt: chunks ? chunks.built : 0, nearMP: nearPx() / 1e6, cacheMP: ((chunks ? chunks.mp : 0) + nearPx()) / 1e6,
+        sprites: sprites.size, spriteMP: spriteMP / 1e6, spriteCapMP: scene.spriteCap / 1e6, queue: spriteQueue.size, spriteBuilds: st.spriteBuilds || 0,
+        staleSprites: st.staleSprites || 0, items: st.items || 0, boxes: st.boxes || 0, runs: st.runs || 0, splitRuns: st.splitRuns || 0,
+        nearStale: scene.lodNow === "near" ? (st.nearStale || 0) + (st.mipMiss || 0) : 0, mipMiss: st.mipMiss || 0, statics_builds: st.statics_builds || 0, staticsMs: st.staticsMs || 0, placeUpdates: st.placeUpdates || 0, buildings: R.buildings.length };
+    };
+    let lastLowView = null, lastNearView = null, pfView = null;
+    // idle prefetch: the far levels over the whole map, so a zoom out finds them baked
+    // (only into room the cache has, or the trim that makes room would evict what it bakes)
+    const prefetch = () => { if (chunks.mp + 512 * 512 > lowCap() - nearPx()) return; const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
+    function drawLow(v, lod, now) {
+      const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom), tLow = performance.now();
+      scene.levelNow = lv;
+      // the chunk budget (24 MP, 10 on phones) is shared with the near ground cache, which keeps a quarter of it
+      trimNear(lowCap() / 4);
+      chunks.cap = Math.max(lowCap() / 2, lowCap() - nearPx());
+      chunks.begin();
+      g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
+      g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
+      // (on a high-dpi backing store chunks scale up unfiltered: bilinear raster in software costs a frame there)
+      g.imageSmoothingEnabled = !(scene.dpr > 1.25 && S >= lv);
+      const night = scene.nightAlpha(scene.minute);
+      const vv = { S, ox: v.ox, oy: v.oy, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, lod, level: lv, night };
+      const [cx0, cy0, cx1, cy1] = chunks.range(lv, v);
+      let n = 0;
+      const layer = (name, check) => {
+        for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+          const e = chunks.want(name, lv, cx, cy, budget);
+          if (check && e.c) { const was = e.stale; check(e); if (e.stale && !was) chunks.pending++; } // (stale now: pending too)
+          if (chunks.draw(g, e, v)) n++;
+        }
+      };
+      if (far) layer("c");
+      else {
+        layer("g");
+        groundOverlays(v, now);
+        for (const src of moverSources) if (src.marks) src.marks(g, vv, lod);
+        // a u chunk goes stale every 15 frames when 4+ of its boxed buildings now have sprites (cheap check)
+        layer("u", frameNo % 15 === 0 ? e => { if (e.tag >= 4) { let k = 0; for (const o of inRect(e.wx0, e.wy0, e.wx0 + e.span, e.wy0 + e.span)) if (o.big && sprites.has(recKey(o))) k++; if (k >= 4) e.stale = true; } } : null);
+      }
+      if (night > 0) {
+        g.fillStyle = `rgba(14,20,58,${(0.58 * night).toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height);
+        const dusk = 0.1 * (1 - Math.abs(2 * night - 1));
+        if (dusk > 0.005) { g.fillStyle = `rgba(255,140,60,${dusk.toFixed(3)})`; g.fillRect(0, 0, cv.width, cv.height); }
+        const bucket = CV.lightBucket(scene.minute);
+        g.globalCompositeOperation = "lighter"; g.globalAlpha = Math.min(1, night * 1.1);
+        const occ = occNow();
+        layer("l", e => {
+          const t = e.tag;
+          if (!t || t.bucket !== bucket) { e.stale = true; return; }
+          if (t.ver === occVer) return;
+          // occ moved since this chunk was baked: re-bake only if its homes' occupancy did
+          const sig = occSig(inRect(e.wx0, e.wy0, e.wx0 + e.span, e.wy0 + e.span), occ);
+          if (sig !== t.sig) e.stale = true; else t.ver = occVer;
+        });
+        g.globalCompositeOperation = "source-over"; g.globalAlpha = 1;
+      }
+      if (far) { groundOverlays(v, now); for (const src of moverSources) if (src.marks) src.marks(g, vv, lod); }
+      chunks.refresh(budget);
+      // sprites for the view (a mid u chunk re-bakes with them): nearest first, within 4 ms
+      // (only while the camera rests: a zoom on its way has no use for them and a big one costs a frame)
+      const still = lastLowView && lastLowView[0] === v.S && lastLowView[1] === v.ox && lastLowView[2] === v.oy;
+      lastLowView = [v.S, v.ox, v.oy];
+      if (!far && still && budget.left() > 0) {
+        for (const o of inRect(v.x0, v.y0, v.x1, v.y1)) if (o.big) spriteOf(o);
+        buildQueued(budget, 4, true);
+      }
+      if (still && !chunks.pending) prefetch();
+      scene.stats.items = 0; scene.stats.chunks = n; scene.stats.boxes = 0;
+      scene.stats.buildMs = budget.spent;
+      const tL = performance.now();
+      labels(v, now);
+      scene.stats.labelsMs = performance.now() - tL; scene.stats.lowMs = tL - tLow;
+    }
 
     // The tiles a place's overlay tint covers: a house's lot (its footprint and garden), or for places without a
     // lot (blocks of flats, shops) the footprint plus a one-tile apron of open ground.
@@ -1095,7 +1594,7 @@
       for (let y = p.y - 1; y <= p.y + p.h; y++) for (let x = p.x - 1; x <= p.x + p.w; x++) {
         if (x < 0 || y < 0 || x >= W || y >= H) continue;
         const k = y * W + x;
-        if (placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && tiles[y][x] !== "#" && tiles[y][x] !== "~"))) out.push([x, y]);
+        if (placeIdx[k] === i || (lot ? lotOf[k] === i : (placeIdx[k] < 0 && !R.isStreet(x, y) && tiles[y][x] !== "~"))) out.push([x, y]);
       }
       if (lot) for (const [x, y] of lotTiles[i]) if (dist(p, x, y) > 1) out.push([x, y]);
       return out;
@@ -1197,8 +1696,9 @@
       // a see-through building's glows fade with it, where it is see-through
       const ghosted = rec => gh && gh.set.has(rec);
       const glow = (rec, img, wx, wy) => { if (ghosted(rec)) ghostGlow(img, wx, wy, v, gh.rect, base, 0.35); else blit(img, 0, 0, img.width, img.height, wx, wy, v); g.globalAlpha = base; };
+      const offView = rec => BIG && rec.big && (rec.wx0 > v.x1 || rec.wy0 > v.y1 || rec.wx1 < v.x0 || rec.wy1 < v.y0);
       for (const rec of buildings) {
-        if (!lit.has(rec.p.id)) continue;
+        if (!lit.has(rec.p.id) || offView(rec)) continue;
         const gl = glowOf(rec, lit.get(rec.p.id));
         if (!gl || gl.wx > v.x1 || gl.wy > v.y1 || gl.wx + gl.c.width < v.x0 || gl.wy + gl.c.height < v.y0) continue;
         glow(rec, gl.c, gl.wx, gl.wy);
@@ -1209,10 +1709,13 @@
           if (occ.lamps[k]) return;
           const p = proj.toWorld(lx, ly);
           if (p[0] < v.x0 - 64 || p[0] > v.x1 + 64 || p[1] < v.y0 - 64 || p[1] > v.y1 + 64) return;
-          const img = occ.lampImg[k] || lampGlow;
+          const o = BIG ? lampState(k, lx, ly) : null;
+          if (o && o.hidden) return;
+          const img = (o ? o.img : occ.lampImg[k]) || lampGlow;
           blit(img, 0, 0, img.width, img.height, p[0] - 48, p[1] - 25, v);
         });
         for (const rec of buildings) {
+          if (offView(rec)) continue;
           const b = rec.b, vis = occ.porch.get(rec) || [], imgs = occ.porchImg.get(rec) || [];
           [b.porch, ...(b.lights || [])].filter(Boolean).forEach((q, k) => { const img = imgs[k] || porchGlow; if (vis[k] !== false) glow(rec, img, q[0] - 22, q[1] - 12); });
         }
@@ -1222,15 +1725,16 @@
           const spr = art.headlights(m.lights), gx = m.cx - spr.ax, gy = m.cy - spr.ay, w = spr.c.width, h = spr.c.height;
           if (gx > v.x1 || gy > v.y1 || gx + w < v.x0 || gy + h < v.y0) continue;
           if (!hlScratch) hlScratch = CV.canvas(w, h);
-          const img = maskedGlow(spr.c, gx, gy, m.depth, null, hlScratch) || spr.c;
+          const img = (!BIG && maskedGlow(spr.c, gx, gy, m.depth, null, hlScratch)) || spr.c;
           blit(img, 0, 0, w, h, gx, gy, v);
         }
       }
       g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       // bulbs, neon and beacons sit on top at full strength
       const dot = (wx, wy, w, h, col) => { const x = Math.round(wx * S + v.ox), y = Math.round(wy * S + v.oy); g.fillStyle = col; g.fillRect(x - Math.round(w * S / 2), y, Math.max(1, Math.round(w * S)), Math.max(1, Math.round(h * S))); };
-      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k]) return; const p = proj.toWorld(lx, ly, 0); dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
+      lampPts.forEach(([lx, ly], k) => { if (occ.lamps[k] || (BIG && lampOcc.has(k) && lampOcc.get(k).hidden)) return; const p = proj.toWorld(lx, ly, 0); if (BIG && (p[0] < v.x0 - 16 || p[0] > v.x1 + 16 || p[1] < v.y0 || p[1] > v.y1 + 50)) return; dot(p[0] + 6, p[1] - 39, 4, 1, `rgba(255,244,200,${night})`); });
       for (const rec of buildings) {
+        if (offView(rec)) continue;
         const b = rec.b;
         if (b.neon) { g.fillStyle = `rgba(255,90,140,${0.35 * night})`; g.fillRect(Math.round(b.neon[0] * S + v.ox) - 3, Math.round(b.neon[1] * S + v.oy) - 3, Math.round(b.neon[2] * S) + 6, Math.round(b.neon[3] * S) + 6); }
         if (b.beacon && Math.floor(now / 700) % 2 === 0) dot(b.beacon[0], b.beacon[1], 3, 3, `rgba(255,60,60,${night})`);
@@ -1366,13 +1870,20 @@
       }
       // building names (zoomed in) or district names (zoomed out)
       if (z >= 0.5) {
-        for (const rec of buildings) {
+        // a big town: the named buildings whose label point is near the screen, largest first, at most 40 (view.md 3.3.9)
+        const list = !BIG ? buildings : buildings.filter(rec => !rec.decor && rec.p.name && rec.label[0] > v.x0 - 150 && rec.label[0] < v.x1 + 150
+          && rec.label[1] > v.y0 - 40 && rec.label[1] < v.y1 + 40).sort((a, b) => b.p.w * b.p.h - a.p.w * a.p.h || (a.p.id < b.p.id ? -1 : 1));
+        let shown = 0;
+        for (const rec of list) {
+          if (BIG && shown >= 40) break;
           if (rec.p.kind === "home" && (rec.p.style !== "apartments" || z < 1)) continue;
           if (plateOf.has(rec)) continue;
           const an = labelAnchor(rec); // re-anchored when a nearer building covers the roof
           if (!an) { plateOf.set(rec, null); continue; }
           const [x, y] = toScr(an[0], an[1]);
-          plateOf.set(rec, plate(rec.p.name, x, y, "#ffffff", "rgba(20,24,34,.78)", false, padOf(rec)));
+          const r = plate(rec.p.name, x, y, "#ffffff", "rgba(20,24,34,.78)", false, padOf(rec));
+          plateOf.set(rec, r);
+          if (r) shown++;
         }
         if (z >= 0.75) for (const p of parks) { const c = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2, 6); const [x, y] = toScr(c[0], c[1]); plate(p.name, x, y, "#eaffdf", "rgba(28,60,24,.8)"); }
       } else {
@@ -1519,7 +2030,10 @@
       for (const r of buildings) {
         if (!inHull(r.hull, wx, wy) && !inHull(r.ground, wx, wy)) continue;
         const sl = r.slices.find(q => wx >= q.wx && wx < q.wx + q.sw);
-        c.push({ hit: { kind: "place", id: r.p.id }, depth: sl && opaqueAt(r, wx, wy) ? sl.depth : r.depth - 1e6, mover: 0 });
+        const solid = !!(sl && opaqueAt(r, wx, wy));
+        // a decor building (view.md 4.1) has no sim role and is not clickable, but where it is solid it hides what is behind
+        if (r.decor && !solid) continue;
+        c.push({ hit: r.decor ? null : { kind: "place", id: r.p.id }, depth: solid ? sl.depth : r.depth - 1e6, mover: 0 });
       }
       for (const it of shelters) if (inBox(it.wx + 4, it.wy + 4, it.wx + it.sw - 2, it.wy + it.sh - 2)) c.push({ hit: { kind: "stop", id: it.ref }, depth: it.depth, mover: 0 });
       for (const src of moverSources) {
@@ -1527,6 +2041,8 @@
         if (h) c.push({ hit: h, depth: h.depth != null ? h.depth : 1e9, mover: 1 });
       }
       c.sort((a, b) => b.depth - a.depth || b.mover - a.mover);
+      const front = c.findIndex(q => !q.hit);
+      if (front >= 0) c.length = front; // (what a decor building hides is not picked)
       const ground = [];
       const [tx, ty] = proj.toTile(wx, wy);
       const x = Math.floor(tx), y = Math.floor(ty);
@@ -1551,28 +2067,76 @@
       const before = scene.looks;
       scene.looks = looks || {};
       let changed = false;
+      const changedIds = [];
       for (const p of places) {
         if (p.kind !== "home") continue;
         const a = before[p.id], b = scene.looks[p.id];
         const sa = a ? JSON.stringify([a.stage | 0, a.works, a.moving, a.listing, a.anyListed, (a.units || []).map(u => [u.vacant, u.listing])]) : "";
         const sb = b ? JSON.stringify([b.stage | 0, b.works, b.moving, b.listing, b.anyListed, (b.units || []).map(u => [u.vacant, u.listing])]) : "";
         if (sa !== sb) {
-          changed = true;
+          changed = true; changedIds.push(p.id);
           if (((a && a.stage) | 0) !== ((b && b.stage) | 0)) {
             const m = isHouseLike(p) ? 1 : 2; // a block's paving reaches two tiles out
             let x0 = p.x - m, y0 = p.y - m, x1 = p.x + p.w + m, y1 = p.y + p.h + m;
             for (const [x, y] of lotTiles[placeById.get(p.id)]) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x + 1); y1 = Math.max(y1, y + 1); }
             invalidateRect(x0, y0, x1, y1);
+            if (BIG) invalidateLow(x0, y0, x1, y1);
           }
         }
       }
-      if (changed) { dirty = true; scene.looksVersion = (scene.looksVersion | 0) + 1; }
+      if (changed) {
+        if (BIG && statics.length && !dirty) scene.updatePlaces(changedIds);
+        else dirty = true;
+        scene.looksVersion = (scene.looksVersion | 0) + 1;
+      }
       return changed;
     };
     scene.setSeason = s => {
       if (!s || s === scene.season || !CV.SEASON[s]) return;
+      if (BIG) { // marks stale, clears nothing (view.md 3.3.7): old chunks and sprites draw until the new ones are built
+        scene.season = s; chunks.staleAll();
+        for (const m of levels.values()) for (const ch of m.values()) ch.stale = true;
+        prewarmTiles();
+        for (const it of statics) if (it.remake) { const spr = it.remake(s); it.img = spr.c; it.sw = spr.c.width; it.sh = spr.c.height; }
+        return;
+      }
       scene.season = s; art.clearTiles(); art.clearItems(); bCache.clear(); levels.clear(); dirty = true;
     };
+    // Per-place update (view.md 3.3.3): a home's look changed. Its lot items are removed and re-inserted by depth,
+    // its sprite re-keys (the old one draws until the new one is built), and its rect is invalidated.
+    scene.updatePlace = id => scene.updatePlaces([id]);
+    scene.updatePlaces = ids => {
+      const idx = new Set(ids.map(id => placeById.get(id)).filter(i => i != null));
+      if (!idx.size) return;
+      if (!BIG || dirty || !statics.length) { dirty = true; return; }
+      const t0 = performance.now();
+      const add = [];
+      for (const i of idx) {
+        const p = places[i];
+        if (p.kind === "home") lotItems(add, p, i);
+        const B = R.buildingAt(p.x, p.y);
+        if (B && B.rec) B.rec.b.glows = null; // (low chunks: setLooks invalidates them when the stage, and so the ground, changes)
+      }
+      const keep = statics.filter(it => !(idx.has(it.ref) && LOT_KINDS.has(it.kind)));
+      const fresh = add.filter(it => LOT_KINDS.has(it.kind));
+      if (fresh.length > 64) statics = keep.concat(fresh).sort((a, b) => a.depth - b.depth || a.wx - b.wx);
+      else { statics = keep; for (const it of fresh) statics.splice(lowerBound(statics, it.depth + 1e-9), 0, it); }
+      scene.stats.placeUpdates = (scene.stats.placeUpdates | 0) + idx.size;
+      scene.stats.placeMs = performance.now() - t0;
+    };
+    function invalidateLow(x0, y0, x1, y1) {
+      if (!chunks) return;
+      const pts = [proj.toWorld(x0, y0), proj.toWorld(x1, y0), proj.toWorld(x1, y1), proj.toWorld(x0, y1)];
+      chunks.invalidate(Math.min(...pts.map(q => q[0])) - 70, Math.min(...pts.map(q => q[1])) - 700, Math.max(...pts.map(q => q[0])) + 70, Math.max(...pts.map(q => q[1])) + 40);
+    }
+    // every distinct ground tile of the season, drawn once (view.md 3.2's prewarm)
+    function prewarmTiles() {
+      const t0 = performance.now();
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) groundSprite(x, y);
+      scene.stats.prewarmMs = performance.now() - t0;
+    }
+    scene.prewarmTiles = prewarmTiles;
+    if (BIG) prewarmTiles();
     scene.setLights = l => {
       if (!l) return;
       if (l.ns === scene.lights.ns && l.ew === scene.lights.ew) return;
@@ -1583,13 +2147,16 @@
       proj = scene.proj = CV.makeProj(kind, W, H, rot || 0);
       art = scene.art = CV.makeArt(proj);
       bCache.clear(); levels.clear(); dirty = true;
+      // the region's sprites, mips, lamp masks and chunks were drawn in the old projection (their keys do not name
+      // it): drop them all, so nothing of the old view is drawn (view.md 3.2)
+      if (BIG) { sprites.clear(); spriteQueue.clear(); spriteMP = 0; mips = new WeakMap(); lampOcc.clear(); lampMasks = 0; if (chunks) chunks.clear(); lodCur = null; lastLowView = null; lastNearView = null; pfView = null; }
       B = proj.bounds(); B.y1 += 24;
     };
     scene.art = art;
     scene.bounds = () => B;
     scene.buildings = () => { if (dirty) buildStatics(); return buildings; };
     scene.buildingOf = id => scene.buildings().find(r => r.p.id === id) || null;
-    scene.isRoad = (x, y) => at(x, y) === "#";
+    scene.isRoad = (x, y) => R.isStreet(x, y);
     scene.driveOf = id => { const i = placeById.get(id); for (let k = 0; k < N; k++) if (driveOf[k] === i) return [k % W, Math.floor(k / W)]; return null; };
     scene.prewarm = () => { scene.eager = true; };
     // The V1a-V1b seam (view.md 4.5): a mover source {items(v, out), marks(g, v, lod), pick(wx, wy, r) -> hit | null}.
