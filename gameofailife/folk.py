@@ -173,9 +173,7 @@ class Folk:
         self._wake: dict[int, int] = {}
         self._spare: dict[int, int] = {}  # i -> minutes spare before a shift
         self._driven: dict[int, tuple] = {}  # pupil i -> (driver i, departure tick) of a school run
-        Person.clock = sim.clock
-        Person.town = town
-        Person.locate = self._locate
+        self._bind()
         if self.n <= 0:
             self.n = 0
             return
@@ -184,6 +182,13 @@ class Folk:
             populate = folk_gen.populate
         populate(self, sim, self.n)
         self._start(sim)
+
+    def _bind(self) -> None:
+        """Point folk_model's Person at this Simulation's clock, town and locator. They are class attributes, so
+        each entry point re-binds them: with two Simulations in one process the last one built must not win."""
+        Person.clock = self.sim.clock
+        Person.town = self.town
+        Person.locate = self._locate
 
     # --- lookups ---------------------------------------------------------------------------------------------
 
@@ -268,13 +273,21 @@ class Folk:
                     self._enter(p, place)
             if p._nt == 0:
                 p._nt = now
-            self.stay[p.i] = (now, max(p.next_tick, now + 1))
             if p.age < 5:
                 p.activity = "baby"
+            elif p.trip is None and p.activity == "sleep":
+                # wake at folk's own minute when that is earlier, so the first morning has time for breakfast
+                day = now // DAY
+                w = day * DAY + self._wake_minute(p, day)
+                if now < w < p.next_tick:
+                    p.next_tick = w
+            self.stay[p.i] = (now, max(p.next_tick, now + 1))
             self.schedule(p, p.next_tick if p.next_tick > now else self._wake_tick(p, now))
 
     def tick(self, sim) -> None:
         t0 = time.process_time()
+        self._bind()
+        self.n = len(self.people)  # anyone added to people (a birth, a newcomer) counts in folk_n
         now = sim.clock.tick
         if now % DAY == 0:
             self.today = {"boardings": 0, "train_trips": 0, "lines": {}}
@@ -478,6 +491,7 @@ class Folk:
                 _career().on_shift_end(sim, p)
             else:
                 self.counters["school_days"] += 1
+                _career().on_shift_end(sim, p)  # a pupil's school day counts as a shift (career: v2's +0.5)
             self.choose(sim, p, now, "evening" if m >= EVENING else "after_work")
             return
         if act == "sleep" and p.state == "busy":
@@ -932,7 +946,8 @@ class Folk:
             roll = rr.random()
             _people().log_roll(sim, p, what, prob, roll)
             if roll < prob:
-                p.money += money
+                if money:
+                    (self._payer(p) or p).money += money  # the household's purse, as the outing's cost was
                 if fun:
                     p.adjust("fun", fun)
 
@@ -1055,6 +1070,7 @@ class Folk:
 
     def crowd(self, sim) -> list[int]:
         """[i, x, y, k, ...] for folk outdoors and not aboard, sorted by i; k = mode | child << 3."""
+        self._bind()
         tick = sim.clock.tick
         out = []
         people = self.people
@@ -1073,6 +1089,7 @@ class Folk:
 
     def counts(self, sim) -> dict:
         """The crowd invariant's terms: crowd + inside + aboard + passengers == present (living, in town)."""
+        self._bind()
         tick = sim.clock.tick
         aboard = passengers = 0
         for i in self.out:
@@ -1155,6 +1172,7 @@ class Folk:
         return int(w // 1)
 
     def sample_hour(self, sim) -> None:
+        self._bind()
         for p in self.people:
             if p.alive and not p.gone:
                 r = self.rings.get(p.i)
@@ -1163,6 +1181,7 @@ class Folk:
                 r.append(self.worth(sim, p))
 
     def stats_json(self, sim) -> dict:
+        self._bind()
         n = len(self.people)
         worth, w24, mood, health, luck = [None] * n, [None] * n, [None] * n, [None] * n, [None] * n
         for p in self.people:
@@ -1179,6 +1198,7 @@ class Folk:
 
     def city_parts(self, sim) -> dict:
         """Everyone's share of the city block: counts, money and moods by district (stats sums them in)."""
+        self._bind()
         out = {"population": 0, "adults": 0, "children": 0, "employed": 0, "pupils": 0, "money": 0, "mood": 0,
                "health": 0, "outdoors": len(self.out) + len(self.strollers), "districts": {}}
         for p in self.people:
@@ -1226,6 +1246,7 @@ class Folk:
 
     def page_json(self, sim, fid) -> dict | None:
         """The light townsperson page (view.md 4.3) plus folk.md 8's keys, `choices` and `life`."""
+        self._bind()
         p = self.person(fid)
         if p is None:
             return None
@@ -1365,6 +1386,23 @@ def _cut_trip(f: Folk, p, now: int) -> None:
     f.out.pop(p.i, None)
     start = t.legs[0][1] if t.legs else now
     end = t.legs[-1][2] if t.legs else now
+    rides = [leg for leg in t.legs if leg[0] == RIDE]
+    if rides and now < rides[0][1]:
+        # cut before the first train leaves: the fare paid at departure comes back and the boardings never were
+        p.money += folk_transit.fare(p.age)
+        f.counters["boardings"] -= len(rides)
+        f.counters["train_trips"] -= 1
+        if start // DAY == now // DAY:  # counted in today's figures (a trip set off before midnight is not)
+            f.today["boardings"] -= len(rides)
+            f.today["train_trips"] -= 1
+            per = f.today["lines"]
+            for leg in rides:
+                line = f._line_of(leg[3])
+                left = per.get(line, 0) - 1
+                if left > 0:
+                    per[line] = left
+                else:
+                    per.pop(line, None)
     place = t.dest if now - start >= end - now else None
     if place is None:
         place = f.home_place(p) if t.dest != f.home_place(p) else t.dest
@@ -1436,6 +1474,7 @@ def add_person(sim, spec: dict):
     p._nt = sim.clock.tick
     p.activity = "baby" if p.age < 5 else "relax_home"
     f.people.append(p)
+    f.n = len(f.people)  # state.folk_n, stats.folk and the roster all have this length (PLAN 2.10)
     hh.member_ids.append(p.id)
     home = f.home_place(p)
     if home is not None:
