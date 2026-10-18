@@ -25,11 +25,108 @@
     ["sold", 0.01, 50, 300, null, "sells something online for ${a}"],
     ["gift", 0.005, 100, 500, null, "gets a ${a} gift from family"]];
 
-  // `p`'s money week (an adult's Sunday slot). Skeleton: nothing (v2).
-  function weekly(sim, p) { return null; }
+  // `p`'s take-home pay for a full week of shifts, else the pension at 65+ with no job, else nothing.
+  function _income(sim, p) {
+    const job = p.job;
+    if (job !== null && job.hourly_wage > 0) {
+      const hours = G.py.pyMod(job.end_hour - job.start_hour, 24) * job.workdays.length;
+      return job.hourly_wage * hours * (1 - G.sim.income_tax(job.hourly_wage));
+    }
+    if (G.housing.retired(p)) return G.sim.PENSION;
+    return 0.0;
+  }
+
+  // Named: 0 under $300, 1, 2 from $2,000; folk: 0 under $1,000, 1, 2 from $5,000 (life.md 5.8).
+  function _importance(sim, p, amount) {
+    if (sim.agents.has(p.id)) return amount >= 2000 ? 2 : amount >= 300 ? 1 : 0;
+    return amount >= 5000 ? 2 : amount >= 1000 ? 1 : 0;
+  }
+
+  // One roll on the sum of the eligible shocks' odds, then a plain draw by weight; returns the amount.
+  function _shock(sim, p, rr, table, valence, what) {
+    const rows = [];
+    let total = 0.0;
+    for (const row of table) {
+      const need = row[4];
+      if (need === "car" && !p.owns_car) continue;
+      if (need === "job" && !(p.job !== null && p.job.hourly_wage > 0)) continue;
+      rows.push(row);
+      total += row[1];
+    }
+    if (!rows.length || !G.life._hit(sim, p, what, total, valence, rr)) return 0;
+    let x = rr.random() * total;
+    let i = 0;
+    while (i < rows.length - 1 && x >= rows[i][1]) {
+      x -= rows[i][1];
+      i += 1;
+    }
+    const row = rows[i];
+    const amount = rr.int(row[2], row[3]);
+    p.money += amount * valence;
+    const tag = valence > 0 ? "windfall" : "expense";
+    const text = row[5].replace("${a}", `$${G.py.commas(amount)}`);
+    G.life._event(sim, p, `${p.name} ${text}.`, tag, _importance(sim, p, amount));
+    return amount;
+  }
+
+  // `p`'s money week (an adult's Sunday slot, life.md 5.8): see money.py.
+  function weekly(sim, p) {
+    const { career, dice, housing, people } = G;
+    const life = p.life ?? null;
+    if (life === null) return;
+    const benefit = career.benefit(sim, p);
+    if (benefit) p.money += benefit;
+    const pay = _income(sim, p) + benefit;
+    const t = people.traits(p);
+    const target = (LIFESTYLE_BASE + LIFESTYLE_THRIFT * (1 - t.thrift) + LIFESTYLE_ADVENTURE * (t.adventure - 0.5))
+      * pay;
+    if (life.pay === 0.0 && life.lifestyle === 0.0) life.lifestyle = target;
+    else if (target > life.lifestyle) life.lifestyle += LIFESTYLE_UP * (target - life.lifestyle);
+    else life.lifestyle -= LIFESTYLE_DOWN * (life.lifestyle - target);
+    life.pay = pay;
+    let spend = life.lifestyle;
+    const hh = people.household(sim, p);
+    const adults = people.members(sim, p).filter(m => m.is_adult);
+    let tight;
+    if (hh !== null && hh !== undefined && sim.agents.has(p.id)) {
+      const spare = housing.funds(sim, hh) - 10 * housing.weekly_outgo(sim, hh);
+      if (spare > 0) spend += WEALTH_SPEND * spare / Math.max(1, adults.length);
+      tight = hh.tight_until > sim.clock.tick;
+    } else {
+      const spare = p.money + p.savings - 10 * 2 * pay;
+      if (spare > 0) spend += WEALTH_SPEND * spare;
+      tight = life.tight_until > sim.clock.tick;
+    }
+    if (tight) spend *= 0.5;
+    p.money -= spend;
+    const rr = dice.stream(people.dice_seed(sim), dice.WEEK_MONEY, p.id, sim.clock.day);
+    _shock(sim, p, rr, BAD, -1, "shock_bad");
+    _shock(sim, p, rr, GOOD, +1, "shock_good");
+    p.money -= CHRONIC_COST * life.treated.length;
+    let richest = null;
+    for (const a of adults) {
+      if (richest === null || a.money + a.savings > richest.money + richest.savings) richest = a;
+    }
+    if (richest === p) {
+      for (const k of people.members(sim, p)) {
+        if (k.age < 18) {
+          for (const [under, cost] of CHILD_COST) {
+            if (k.age < under) { p.money -= cost; break; }
+          }
+        }
+      }
+    }
+    const worth = p.money + p.savings;
+    if (worth < 0) p.money -= DEBT_RATE * -worth;
+    if (p.money < 0 && 0 < p.savings) {
+      const take = Math.min(p.savings, -p.money);
+      p.savings -= take;
+      p.money += take;
+    }
+  }
 
   G.money = {
     SUNDAY, WINDOW, LIFESTYLE_BASE, LIFESTYLE_THRIFT, LIFESTYLE_ADVENTURE, LIFESTYLE_UP, LIFESTYLE_DOWN, WEALTH_SPEND,
-    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, weekly,
+    DEBT_RATE, CHRONIC_COST, CHILD_COST, BAD, GOOD, _income, _importance, _shock, weekly,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

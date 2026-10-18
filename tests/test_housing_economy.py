@@ -18,7 +18,10 @@ from gameofailife.clock import MINUTES_PER_DAY
 SLOW = os.environ.get("GOAL_SLOW") == "1"
 DAYS = int(os.environ.get("SOAK_DAYS", "360"))
 SEEDS = (1, 2, 3)
-FUNDS_FLOOR = -2500
+# The money floors with life on (L2, measured at SOAK_DAYS=120, seeds 1-3, with a 25% margin): lowest Monday funds
+# -$457, -$320, -$998, so -$1,250; max arrears 3 on every seed, so under 4 (3 x 1.25). v2's -$2,500 was for 360 days.
+FUNDS_FLOOR = -1250
+ARREARS_LIMIT = 4  # max_arrears stays under this
 MOVES = (10, 150)
 LATE_PURCHASE_DAY = 150  # the market keeps moving: some household still buys a home after this day ...
 LATE_PURCHASES_FROM, LATE_PURCHASES = 120, 3  # ... and at least this many after this one
@@ -146,7 +149,7 @@ class HousingEconomyTest(unittest.TestCase):
                 print("\n" + report(r, time.time() - start), flush=True)
                 totals["moves"] += r["moves"]
                 self.assertEqual(r["bad_forks"], [])
-                self.assertLess(r["max_arrears"], 4)
+                self.assertLess(r["max_arrears"], ARREARS_LIMIT)
                 self.assertGreaterEqual(r["min_monday_funds"], FUNDS_FLOOR)
                 limit = DAYS // 28 + 1
                 self.assertTrue(all(n <= limit for n in r["stuff"].values()), r["stuff"])

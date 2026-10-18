@@ -210,9 +210,7 @@
     if (!ok) throw new G.py.PyError("AssertionError", String(what));
   }
 
-  // Every home in HOME_SPECS order, unoccupied; `init(sim)` moves the cast in. In the region world the
-  // region's homes (`town.home_specs`) follow the 37: empty and unlisted, owned by the landlord (a let home) or
-  // the market, until the townsfolk move in and `list_vacancies` lists what is left.
+  // Every home in HOME_SPECS order, unoccupied; `init(sim)` moves the cast in.
   function build_homes(town) {
     const homes = new Map();
     for (const [hid, place_id, unit, tier, beds, base, rent, start] of HOME_SPECS) {
@@ -223,6 +221,8 @@
         { owner: START_OWNER[start], listing: START_LISTING[start] }));
     }
     // --- region ---
+    // In the region world the region's homes (town.home_specs) follow the 37: empty and unlisted, owned by the
+    // landlord (a let home) or the market, until the townsfolk move in and list_vacancies lists what is left.
     for (const [hid, place_id, unit, tier, beds, base, rent, start] of (town.home_specs || [])) {
       const place = town.places.get(place_id);
       check(place.kind === "home" && place.tier === tier && !homes.has(hid), [hid, place.kind, place.tier]);
@@ -234,15 +234,16 @@
     return homes;
   }
 
-  // One lot per residential place that has homes, in place order, at its starting condition (the region's
-  // lots from `town.lot_conditions`).
+  // One lot per residential place that has homes, in place order, at its starting condition.
   function build_lots(town, homes) {
     const start = Object.assign({}, LOT_CONDITION);
     for (const spec of HOME_SPECS) {
       const place_id = spec[1], condition = spec[8];
       if (condition !== null) start[place_id] = condition;
     }
-    Object.assign(start, town.lot_conditions || {}); // --- region ---
+    // --- region --- the region's lots start at town.lot_conditions
+    Object.assign(start, town.lot_conditions || {});
+    // --- end region ---
     const used = new Set(Array.from(homes.values(), h => h.place));
     const lots = new Map();
     for (const place of town.places.values()) {
@@ -400,9 +401,13 @@
   }
 
   // The household's living adults: the ones who pay and decide.
-  const adults = (sim, hh) => hh.member_ids.map(m => _person(sim, m)).filter(a => _here(a) && a.is_adult); // region: _person
+  // --- region --- _person: a townsperson too
+  const adults = (sim, hh) => hh.member_ids.map(m => _person(sim, m)).filter(a => _here(a) && a.is_adult);
+  // --- end region ---
 
-  const residents = (sim, hh) => count(hh.member_ids, m => _here(_person(sim, m))); // region: _person
+  // --- region --- _person: a townsperson too
+  const residents = (sim, hh) => count(hh.member_ids, m => _here(_person(sim, m)));
+  // --- end region ---
 
   // More than two residents per bedroom.
   const crowded = (sim, hh) => residents(sim, hh) > 2 * sim.homes.get(hh.home_id).bedrooms;
@@ -459,8 +464,10 @@
   // "Ari Ben-David" for one adult, "The Cohens" when the adults share a surname, else "Dana and Yossi".
   function household_name(sim, hh) {
     let people = adults(sim, hh);
-    if (!people.length) people = _members(sim, hh); // region: _person
+    // --- region --- _person: a townsperson too
+    if (!people.length) people = _members(sim, hh);
     if (!people.length) people = hh.member_ids.map(m => _person(sim, m)).filter(a => a !== null);
+    // --- end region ---
     if (!people.length) return hh.id;
     if (people.length === 1) return people[0].name;
     const surnames = new Set(people.map(a => _surname(a.name)));
@@ -476,7 +483,9 @@
   function household_summary(sim, hh) {
     const home = sim.homes.get(hh.home_id);
     return { id: hh.id, name: household_name(sim, hh),
+      // --- region --- _person: a townsperson too
       members: hh.member_ids.filter(m => _here(_person(sim, m))),
+      // --- end region ---
       home: home.id, home_name: home.name, place: home.place, tier_label: TIERS[home.tier].label,
       tenure: tenure(sim, hh), weekly_cost: weekly_cost(sim, hh) };
   }
@@ -522,9 +531,11 @@
     for (const a of adults(sim, hh)) {
       const job = a.job;
       if (job && job.hourly_wage > 0) {
+        // --- region --- a night shift (life.md 3.2) ends the next morning
         let span = job.end_hour - job.start_hour;
-        if (span <= 0) span += 24; // region: a night shift (life.md 3.2) ends the next morning
+        if (span <= 0) span += 24;
         const hours = span * job.workdays.length;
+        // --- end region ---
         total += job.hourly_wage * hours * (1 - income_tax(job.hourly_wage));
       } else if (retired(a)) {
         total += PENSION;
@@ -541,23 +552,25 @@
 
   // The weekly living estimate: LIVING_PER_PERSON a resident, LIVING_PER_RETIREE for a retiree.
   function living(sim, hh) {
+    // --- region --- _members: a townsperson too
     return sum(_members(sim, hh).map(a => (retired(a) ? LIVING_PER_RETIREE : LIVING_PER_PERSON)));
+    // --- end region ---
   }
 
+  // --- region --- a townsperson commutes by p.commute
   // The adults' weekly commuting costs by their usual way to work (a townsperson's by `p.commute`).
   function commute(sim, hh) {
     let total = 0;
     for (const a of adults(sim, hh)) {
-      // --- region ---
       if (a.profile === null || a.profile === undefined) { // a townsperson
         total += _folk_commute_cost(a);
         continue;
       }
-      // --- end region ---
       total += G.travel.weekly_commute_cost(sim, a);
     }
     return total;
   }
+  // --- end region ---
 
   // Moving into this vacant home means buying it (the market holds it), not renting it.
   const buys = home => home.owner === "market";
@@ -625,12 +638,14 @@
     return value(sim, home_id) >= 1.15 * value(sim, cur.id);
   }
 
+  // --- region --- the cast's market: the 37 only
   // Vacant homes buyers and renters can see now (not under offer), in town.homes order: the cast's market,
   // so only the 37 (PLAN 2.9; the townsfolk list theirs with folk_life.vacancies).
   function vacancies(sim, listing = null) {
-    return cast_homes(sim).filter(h => h.household === null && listed(sim, h) // region: the 37 only
+    return cast_homes(sim).filter(h => h.household === null && listed(sim, h)
       && (listing === null || listed(sim, h) === listing));
   }
+  // --- end region ---
 
   // The homes `house_hunt` offers: listed, vacant, fitting, an upgrade and affordable.
   function hunt_candidates(sim, hh) {
@@ -662,7 +677,9 @@
   function house_drought(sim, but = null) {
     const now = sim.clock.tick;
     if (now < LANDLORD_SELLS_DAYS * DAY) return false;
-    for (const h of cast_homes(sim)) { // region: the 37 only
+    // --- region --- the 37 only
+    for (const h of cast_homes(sim)) {
+      // --- end region ---
       if (h.tier === "flat" || h.id === but) continue;
       if (h.household === null && h.listing === "for_sale") return false;
       if (h.history.some(r => r.event === "bought" && !r.off_market && now - r.tick < LANDLORD_SELLS_DAYS * DAY)) {
@@ -848,7 +865,9 @@
   // Controller `query market`: the vacant homes listed for sale and to let, in town.homes order.
   function market_json(sim) {
     const out = { for_sale: [], for_rent: [] };
-    for (const h of cast_homes(sim)) { // region: the 37 only (the townsfolk's homes are not the cast's market)
+    // --- region --- the 37 only (the townsfolk's homes are not the cast's market)
+    for (const h of cast_homes(sim)) {
+      // --- end region ---
       const shown = listed(sim, h);
       if (h.household !== null || shown === null) continue;
       const row = { home: h.id, name: h.name, tier: h.tier, district: sim.town.places.get(h.place).district,
@@ -866,7 +885,9 @@
     if (h === undefined) return null;
     const lot = sim.lots.get(h.place);
     const st = stage_of(lot.condition);
-    const hh = h.household ? _household(sim, h.household) : null; // region: a townsfolk household too
+    // --- region --- a townsfolk household too
+    const hh = h.household ? _household(sim, h.household) : null;
+    // --- end region ---
     const history = h.history.slice(-20).map(row => ({ time: row.time ?? null, event: row.event ?? null,
       household: row.household ?? null, price: row.price ?? null }));
     return {
@@ -875,7 +896,9 @@
       hh: h.household, household_name: hh ? household_name(sim, hh) : null, owner: h.owner,
       listing: listed(sim, h), price: _price(sim, h), value: value(sim, h.id),
       emergency: _emergency_json(h), condition: _condition_json(lot), stage: st, stage_name: stage_name(st),
+      // --- region --- _members: a townsperson too
       residents: hh ? _members(sim, hh).map(a => a.name) : [],
+      // --- end region ---
       history,
     };
   }
@@ -891,7 +914,9 @@
     sim.event(text, agent, null, { tag, agents: agents || [], place });
   }
 
-  const _members = (sim, hh) => hh.member_ids.map(m => _person(sim, m)).filter(a => _here(a)); // region: _person
+  // --- region --- _person: a townsperson too
+  const _members = (sim, hh) => hh.member_ids.map(m => _person(sim, m)).filter(a => _here(a));
+  // --- end region ---
 
   // The household can still move into this home: vacant and listed as the household sees it.
   const available = (sim, hh, home) => home.household === null && listed(sim, home, hh) !== null;
@@ -1290,11 +1315,15 @@
   // silent. So is a home whose household moved in less than NEWS_SETTLE_DAYS ago: a poor stage it reaches then
   // is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
   // first evening never makes the news as falling apart.
+  // --- region --- homes: nightly passes each lot's homes
   function _stage_news(sim, lot, homes = null) {
+    // --- end region ---
     const st = stage_of(lot.condition);
+    // --- region --- the homes nightly passed; a townsfolk home is never news
     if (homes === null) homes = lot_homes(sim, lot.place);
     let home = homes.length === 1 && owner_occupied(homes[0]) ? homes[0] : null;
-    if (home !== null && !sim.households.has(home.household)) home = null; // region: a townsfolk home is never news
+    if (home !== null && !sim.households.has(home.household)) home = null;
+    // --- end region ---
     lot.worst = Math.max(lot.worst, st);
     if (st <= 1) {
       if (st === 0) {
@@ -1333,8 +1362,10 @@
     if (tier === "flat") { // a block wears at the flat rate whether or not its flats are let
       rate = TIERS.flat.decay * season;
     } else if (lived_in.length) {
-      const hh = _household(sim, lived_in[0].household); // region: a townsfolk household too
+      // --- region --- a townsfolk household too
+      const hh = _household(sim, lived_in[0].household);
       rate = TIERS[tier].decay * season * (1 + CROWD_DECAY * Math.max(0, (hh ? residents(sim, hh) : 0) - 2));
+      // --- end region ---
       if (lived_in[0].emergency) rate += EMERGENCY_DECAY;
     } else {
       rate = VACANT_DECAY;
@@ -1348,11 +1379,13 @@
     if (floor !== null && homes.every(h => h.owner === "landlord") && lot.condition < floor) {
       lot.condition = LANDLORD_RESTORE;
       lot.works_until = sim.clock.tick + LANDLORD_WORKS_MINUTES;
-      if (lived_in.some(h => sim.households.has(h.household))) { // region: news for the cast only
+      // --- region --- news for the cast only; _stage_news gets the lot's homes
+      if (lived_in.some(h => sim.households.has(h.household))) {
         _event(sim, `${LANDLORD} repaints ${sim.town.places.get(lot.place).name}.`, "repaint", lot.place);
       }
     }
     _stage_news(sim, lot, homes);
+    // --- end region ---
   }
 
   // Midnight: every building wears; residents of neglected homes lose health and may catch a chill; every
@@ -1360,16 +1393,20 @@
   function nightly(sim) {
     const { luck_odds } = G.forks;
     const winter = sim.clock.season === "winter";
-    const by_place = new Map(); // region: lot_homes for every lot in one pass (612 homes in the region)
+    // --- region --- lot_homes for every lot in one pass (612 homes in the region)
+    const by_place = new Map();
     for (const home of sim.homes.values()) {
       if (!by_place.has(home.place)) by_place.set(home.place, []);
       by_place.get(home.place).push(home);
     }
     for (const lot of sim.lots.values()) _decay(sim, lot, by_place.get(lot.place), winter);
+    // --- end region ---
     for (const home of sim.homes.values()) {
       if (!home.household) continue;
+      // --- region --- the townsfolk roll their own homes' damp and emergencies (F1)
       const hh = sim.households.get(home.household);
-      if (hh === undefined) continue; // region: the townsfolk roll their own homes' damp and emergencies (F1)
+      if (hh === undefined) continue;
+      // --- end region ---
       const st = stage_of(condition_of(sim, home.id));
       if (DAMP_HEALTH[st] !== undefined) {
         for (const a of _members(sim, hh)) {
@@ -1634,7 +1671,9 @@
     _members, available, too_late, move_household, renovate, give_notice, landlord_notices, _landlord_sells,
     buy_let_home, forced_move, weekly_charges, _stage_news, _just_moved_in, _change_condition, nightly, tick,
     fix_emergency, on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale, afford_score,
+    // --- region ---
     V2_HOME_IDS, is_v2_home, cast_homes, _person, _household, _here, list_vacancies, _folk_commute_cost, _fare,
+    // --- end region ---
   };
 
   // --- life: households ---
@@ -1652,7 +1691,7 @@
   // home is not vacant.
   function new_household(sim, members, home_id, how) {
     if (!members.length) return null;
-    if (!sim.agents.has(members[0].id)) return sim.folk.new_household(sim, members, home_id, how);
+    if (!sim.agents.has(members[0].id)) return sim.folk.new_household(members.map(m => m.id), home_id, how);
     const home = sim.homes.get(home_id);
     if (home === undefined || home.household !== null) return null;
     const base = G.py.lastName(members[0].name).toLowerCase();

@@ -530,17 +530,25 @@ class TestOldAgeOdds(Case):
     """Finding 54: the comment's odds match the code."""
 
     def test_monthly_odds_at_74_and_80(self):
-        for age, monthly in ((74, 0.0075), (80, 0.036)):
+        # v3 (L2): life's daily mortality (life.md 5.5) replaces v2's old-age roll at midnight. With no chronic
+        # condition and good health the daily odds are DEATH_YEAR[age] x PACE["death"] / 360 at Luck 50: about
+        # 0.24% a month at 74 and 0.41% at 80.
+        from gameofailife import dice, life, life_tables, people
+
+        for age, monthly in ((74, 0.0024), (80, 0.0041)):
             sim = Simulation(seed=1)
-            sim.agents["david"].age = age
+            david = sim.agents["david"]
+            david.age, david.health = age, 90.0
+            david.life.chronic, david.life.treated, david.life.conditions = [], [], []
             odds = {}
 
-            def record(agent, what, p, roll, base=None):
-                odds[agent.id, what] = p  # the unrounded daily chance
+            def record(sim_, p, what, prob, roll):
+                odds[p.id, what] = prob  # the unrounded daily chance
 
-            with mock.patch.object(sim, "_log_roll", record):
-                sim._new_day()
-            self.assertAlmostEqual(1 - (1 - odds["david", "old_age"]) ** 30, monthly, delta=0.001)
+            with mock.patch.object(people, "log_roll", record):
+                life._health(sim, david, dice.stream(1, dice.DAY_HEALTH, "david", 0), 0)
+            self.assertEqual(odds["david", "death"], life_tables.DEATH_YEAR[age] * life.PACE["death"] / 360)
+            self.assertAlmostEqual(1 - (1 - odds["david", "death"]) ** 30, monthly, delta=0.0002)
 
 
 if __name__ == "__main__":
