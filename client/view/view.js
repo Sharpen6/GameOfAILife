@@ -623,7 +623,7 @@
         const s = (scene && scene.stats) || {};
         const c = crowd ? crowd.stats() : { crowd: 0, crowdDrawn: 0 }, tr = trains ? trains.stats() : { trainCars: 0 }, pg = pings ? pings.stats() : { pings: 0 };
         return Object.assign({ lod: lodOf(), level: null, chunks: s.chunks || 0, cacheMP: s.cacheMP || 0, spriteMP: 0, items: s.items || 0, runs: 0, splitRuns: 0,
-          statics_builds: 0, drawMs: s.draw || 0, buildMs: 0, queue: 0 }, d, { lod: d.lod || lodOf(), crowd: c.crowd, crowdDrawn: c.crowdDrawn, crowdInView: c.crowdInView,
+          statics_builds: 0, drawMs: s.draw || 0, buildMs: 0, queue: 0 }, d, { lod: d.lod || lodOf(), crowd: c.crowd, crowdDrawn: c.crowdDrawn, crowdInView: c.crowdInView, crowdSprites: c.crowdSprites,
           trainCars: tr.trainCars, trains: tr.trains, pings: pg.pings });
       },
       crowd() { return crowd; },

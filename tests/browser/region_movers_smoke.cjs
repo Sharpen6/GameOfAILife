@@ -1,0 +1,490 @@
+#!/usr/bin/env node
+// Headless smoke test for the v3 view's movers on the region (view.md 8, checks 8-13; V1b):
+//
+//   node tests/browser/region_movers_smoke.cjs
+//
+// It serves client/ on 127.0.0.1 with an in-memory page that loads the view's scripts, client/dev/region_data.js
+// and the stub host client/dev/region_stub.js (frames every 50 ms, a tick every 417 ms / speed), and checks in
+// headless Chromium:
+//  8. crowd: at zoom 0.5 debug().crowdDrawn equals the crowd whose shown foot point is in the view; at speed 1 a
+//     walker's shown position changes on >= 90% of the frames between two ticks; 8 people on one tile give 8
+//     pick targets; >= 150 people drawn at the default view (1/4 at 85, 48) at 08:00; at far zoom people are
+//     dots (no sprites) when the scene has levels of detail
+//  9. trains: every car centre within 0.3 tiles of its track (speed 16); a train stands still while it stays at
+//     a station; it snaps on a track change and when i drops; its cars sit at i, i-1, i-2, i-3 (car k at s - k)
+// 10. bridges and crossings: a named car, a folk car and a walker each ease over a b tile and an x tile with no
+//     jump between frames
+// 11. pings: one talk event shows one bubble for 3 s; 30 events in a frame show 20; none at far zoom; talks rows
+//     (indoor folk rows too) draw over their buildings
+// 12. navigation: focus({district}) lands within 2 tiles of its centre; focus({station}) on the station;
+//     districts() and stations() list every district and station; a folk pick returns {kind: "agent",
+//     id: "f...", folk: true}; a train pick returns {kind: "train", id, line, riders}
+// 13. no Math.random in client/view/*.js
+// Timings (frame gaps) are reported with the load, never gated here (PLAN 6). Set VIEW_SHOTS=<folder> to save
+// screenshots (default view at 08:00, a station with a train, far view).
+//
+// Playwright is looked for as a local module, then in the global node_modules. Without it, or without a
+// browser it can launch, the test prints SKIP and exits 0.
+"use strict";
+
+const http = require("http");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+const REPO = path.resolve(__dirname, "..", "..");
+const CLIENT = path.join(REPO, "client");
+const SHOTS = process.env.VIEW_SHOTS || "";
+const VIEW_SCRIPTS = ["proj", "art", "buildings", "towers", "rail_art", "actors", "region", "lod", "lowart", "scene", "movers", "crowd", "trains", "pings", "camera", "minimap", "view"];
+
+function findPlaywright() {
+  const tries = ["playwright"];
+  try {
+    const root = require("child_process").execSync("npm root -g", { stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }).toString().trim();
+    if (root) tries.push(path.join(root, "playwright"));
+  } catch (e) { /* no npm */ }
+  tries.push("/opt/node22/lib/node_modules/playwright", "/usr/lib/node_modules/playwright", "/usr/local/lib/node_modules/playwright");
+  for (const t of tries) { try { return require(t); } catch (e) { /* next */ } }
+  return null;
+}
+
+const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>region movers</title>
+<link rel="stylesheet" href="/view/view.css">
+<style>html, body { margin: 0; height: 100%; background: #11151d; overflow: hidden; } #w { position: fixed; inset: 0; } #c { width: 100%; height: 100%; }</style>
+</head><body><div id="w"><canvas id="c"></canvas></div>
+${VIEW_SCRIPTS.map(n => `<script src="/view/${n}.js"></script>`).join("\n")}
+<script src="/dev/region_data.js"></script>
+<script src="/dev/region_stub.js"></script>
+<script>
+"use strict";
+(function () {
+  const q = new URLSearchParams(location.search);
+  const stub = RegionStub(window.REGION, { named: [] });
+  const calls = window.__calls = { pick: [] };
+  const view = CityView.create(document.getElementById("c"), { onPick(h) { calls.pick.push(h); } },
+    { persist: false, dynamicResolution: false, minimap: q.get("minimap") !== "0" });
+  view.setTown(stub.town);
+  let speed = +(q.get("speed") || 1), tick = (+(q.get("day") || 1)) * 1440 + (+(q.get("minute") || 480)), acc = 0;
+  let drive = q.get("drive") !== "0";
+  const push = t => { const f = stub.frame(t); window.__last = f; view.setState(f.state, speed, f.events); };
+  push(tick);
+  view.setCamera({ x: +(q.get("x") || 85), y: +(q.get("y") || 48), zoom: +(q.get("zoom") || 0.25) });
+  view.start();
+  // like the server: a frame whenever at least one game minute has passed
+  setInterval(() => { if (!drive) return; acc += 50 * speed; let moved = false; while (acc >= 417) { tick++; acc -= 417; moved = true; } if (moved) push(tick); }, 50);
+  window.__view = view; window.__stub = stub;
+  window.__tick = () => tick;
+  window.__setTick = t => { tick = t; push(t); };
+  window.__speed = s => { speed = s; };
+  window.__drive = on => { drive = !!on; };
+  window.__push = (st, evs) => view.setState(st, speed, evs || []);
+  // the state the stub sends for a tick, with the crowd and trains of the caller's choosing
+  window.__frameAt = t => stub.state(t);
+  // frames: n animation frames, each running fn(now) after the view drew
+  window.__frames = (n, fn) => new Promise(res => { const out = []; const step = now => { out.push(fn(now)); if (out.length < n) requestAnimationFrame(step); else res(out); }; requestAnimationFrame(step); });
+})();
+</script></body></html>`;
+
+function serve() {
+  const server = http.createServer((req, res) => {
+    let rel;
+    try { rel = decodeURIComponent(new URL(req.url, "http://localhost").pathname); } catch (e) { rel = "/"; }
+    if (rel === "/__movers.html") { res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); res.end(PAGE); return; }
+    const file = path.join(CLIENT, path.normalize(rel).replace(/^[/\\]+/, ""));
+    if (!file.startsWith(CLIENT)) { res.writeHead(403); res.end(); return; }
+    fs.readFile(file, (err, data) => {
+      if (err) { res.writeHead(404); res.end("not found"); return; }
+      const type = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" }[path.extname(file)] || "application/octet-stream";
+      res.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" });
+      res.end(data);
+    });
+  });
+  return new Promise(resolve => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+let failures = 0, passes = 0;
+const notes = [];
+function check(ok, what, detail) {
+  if (ok) { passes += 1; return true; }
+  failures += 1;
+  console.log(`  FAIL ${what}${detail !== undefined ? `: ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : ""}`);
+  return false;
+}
+const note = s => { notes.push(s); console.log(`  ${s}`); };
+
+let BASE = "";
+async function open(browser, query, o) {
+  o = o || {};
+  const ctx = await browser.newContext({ viewport: o.size || { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+  const page = await ctx.newPage();
+  const log = { errors: [] };
+  page.on("console", m => { if (m.type() === "error") log.errors.push(m.text()); });
+  page.on("pageerror", e => log.errors.push(String((e && e.message) || e)));
+  await page.goto(`${BASE}/__movers.html?${query || ""}`);
+  await page.waitForFunction(() => window.__view && __view.scene() && __view.scene().stats.frames > 2, null, { timeout: 30000 });
+  return { ctx, page, log };
+}
+async function shot(page, name) {
+  if (!SHOTS) return;
+  fs.mkdirSync(SHOTS, { recursive: true });
+  await page.screenshot({ path: path.join(SHOTS, `${name}.png`) });
+}
+const noErrors = (log, what) => check(log.errors.length === 0, `${what}: no console errors`, log.errors.slice(0, 5));
+
+// --- 8. crowd ----------------------------------------------------------------------------------------------
+async function runCrowd(browser) {
+  console.log("crowd");
+  // the default view at 08:00: >= 150 drawn
+  let { ctx, page, log } = await open(browser, "zoom=0.25&x=85&y=48&minute=480&drive=0");
+  await page.waitForTimeout(600);
+  let d = await page.evaluate(() => __view.debug());
+  check(d.crowdDrawn >= 150, "crowd: >= 150 people drawn at the default view at 08:00", d.crowdDrawn);
+  note(`default view 08:00: crowd ${d.crowd}, drawn ${d.crowdDrawn} (lod ${d.lod})`);
+  await shot(page, "default_0800");
+  // at zoom 0.5 crowdDrawn equals the crowd in view (computed here from the shown positions)
+  await page.evaluate(() => __view.setCamera({ x: 126, y: 64, zoom: 0.5 }));
+  await page.waitForTimeout(700);
+  const r = await page.evaluate(() => __frames(3, () => {
+    const K = __view.crowd(), sc = __view.scene(), v = sc.view(), st = __last.state;
+    let inView = 0;
+    for (let k = 0; k < st.crowd.length; k += 4) {
+      const p = K.pos(st.crowd[k]);
+      if (!p) continue;
+      const w = sc.proj.toWorld(p[0], p[1]);
+      if (w[0] >= v.x0 && w[0] <= v.x1 && w[1] >= v.y0 && w[1] <= v.y1) inView++;
+    }
+    return { inView, drawn: __view.debug().crowdDrawn, lod: __view.lod() };
+  }));
+  const last = r[r.length - 1];
+  check(last.inView > 0 && last.drawn === last.inView, "crowd: at 0.5 crowdDrawn equals the crowd in view", last);
+  // 8 people on one tile: 8 pick targets
+  await page.evaluate(() => __view.setCamera({ x: 126, y: 64, zoom: 2 }));
+  const picks = await page.evaluate(async () => {
+    const st = __frameAt(__tick());
+    st.crowd = [];
+    for (let i = 0; i < 8; i++) st.crowd.push(500 + i, 127, 62, 7);
+    st.tick += 1;
+    __push(st);
+    await new Promise(r => setTimeout(r, 900));
+    __push(Object.assign({}, st, { tick: st.tick + 1 }));
+    await new Promise(r => setTimeout(r, 900));
+    const out = [];
+    for (let i = 0; i < 8; i++) { const c = __view.screenOf({ agent: "f" + (500 + i) }); const h = c && __view.pick(c[0], c[1]); out.push({ c, h }); }
+    return out;
+  });
+  const ids = new Set(picks.map(p => p.h && p.h.id));
+  check(ids.size === 8 && picks.every((p, i) => p.h && p.h.id === "f" + (500 + i) && p.h.folk === true && p.h.kind === "agent"),
+    "crowd: 8 people on one tile give 8 pick targets", picks.map(p => p.h));
+  check(JSON.stringify(picks[0].h) === JSON.stringify({ kind: "agent", id: "f500", folk: true }), "navigation: a folk pick returns {kind: agent, id: f..., folk: true}", picks[0].h);
+  // a click on a person reaches onPick with that hit
+  await page.mouse.click(picks[3].c[0], picks[3].c[1]);
+  const clicked = await page.evaluate(() => __calls.pick[__calls.pick.length - 1]);
+  check(clicked && clicked.id === "f503" && clicked.folk === true, "crowd: a click on a townsperson picks them", clicked);
+  // far: dots, no sprites (only when the scene has levels of detail)
+  await page.evaluate(() => { __setTick(__tick() + 2); __view.setCamera({ x: 128, y: 96, zoom: 0.1 }); });
+  await page.waitForTimeout(500);
+  const far = await page.evaluate(() => ({ d: __view.debug(), lod: __view.lod(), sceneLod: typeof __view.scene().lod }));
+  if (far.d.lod === "far" && far.sceneLod !== "undefined") check(far.d.crowdDrawn > 0 && far.d.crowdSprites === 0, "crowd: at far zoom people are dots", far.d);
+  else note(`far zoom: the scene has no levels of detail yet (lod ${far.lod}, scene.lod ${far.sceneLod}); dots at far not checked`);
+  await shot(page, "far");
+  noErrors(log, "crowd");
+  await ctx.close();
+
+  // speed 1: a walker moves on >= 90% of the frames between two ticks
+  ({ ctx, page, log } = await open(browser, "zoom=1&x=126&y=64&minute=480&speed=1"));
+  await page.waitForTimeout(1500);
+  const mv = await page.evaluate(async () => {
+    const K = __view.crowd(), st0 = __last.state, walkers = [];
+    for (let k = 0; k < st0.crowd.length; k += 4) if ((st0.crowd[k + 3] & 7) === 0) walkers.push(st0.crowd[k]);
+    const samples = await __frames(150, now => ({ tick: __tick(), pos: walkers.slice(0, 60).map(i => K.pos(i)) }));
+    // for each walker: the frames inside a tick (not the first frame of a tick) where it is moving between ticks
+    let moved = 0, total = 0;
+    for (let w = 0; w < Math.min(60, walkers.length); w++) {
+      for (let f = 2; f < samples.length; f++) {
+        const a = samples[f - 1], b = samples[f];
+        if (a.tick !== b.tick || !a.pos[w] || !b.pos[w]) continue;
+        // only walkers on a move: their position at the tick's start differs from the tile they head for
+        const first = samples.findIndex(s => s.tick === b.tick), next = samples.findIndex(s => s.tick === b.tick + 1);
+        if (first < 0 || next < 0 || !samples[first].pos[w] || !samples[next].pos[w]) continue;
+        const d0 = Math.hypot(samples[next].pos[w][0] - samples[first].pos[w][0], samples[next].pos[w][1] - samples[first].pos[w][1]);
+        if (d0 < 0.5) continue;
+        total++;
+        if (Math.hypot(b.pos[w][0] - a.pos[w][0], b.pos[w][1] - a.pos[w][1]) > 1e-4) moved++;
+      }
+    }
+    return { moved, total, ticks: samples[samples.length - 1].tick - samples[0].tick, tickMs: __view.crowd().M.tickMs };
+  });
+  check(mv.total > 100 && mv.moved / mv.total >= 0.9, "crowd: at speed 1 a walker moves on >= 90% of the frames between two ticks", mv);
+  note(`speed 1: walkers moved on ${mv.moved} of ${mv.total} frames (${(100 * mv.moved / Math.max(1, mv.total)).toFixed(1)}%), ${mv.ticks} ticks, tickMs ${mv.tickMs.toFixed(0)}`);
+  noErrors(log, "crowd speed 1");
+  await ctx.close();
+}
+
+// --- 9. trains -----------------------------------------------------------------------------------------------
+async function runTrains(browser) {
+  console.log("trains");
+  let { ctx, page, log } = await open(browser, "zoom=0.5&x=127&y=67&minute=480&speed=16");
+  await page.waitForTimeout(800);
+  // every car centre within 0.3 tiles of its track, over 120 frames at speed 16
+  const dev = await page.evaluate(() => __frames(120, () => {
+    const T = __view.trains(), town = __view.scene().town;
+    let worst = 0, n = 0;
+    for (const r of T.rows()) {
+      const l = town.rail.lines.find(q => q.id === r.line), pts = l.tracks[r.track].map(c => [c[0] + 0.5, c[1] + 0.5]);
+      for (const c of T.carsOf(r.id)) {
+        let best = Infinity;
+        for (let k = 1; k < pts.length; k++) {
+          const [ax, ay] = pts[k - 1], [bx, by] = pts[k], vx = bx - ax, vy = by - ay, L = vx * vx + vy * vy;
+          const t = L ? Math.max(0, Math.min(1, ((c.x - ax) * vx + (c.y - ay) * vy) / L)) : 0;
+          best = Math.min(best, Math.hypot(c.x - (ax + vx * t), c.y - (ay + vy * t)));
+        }
+        worst = Math.max(worst, best); n++;
+      }
+    }
+    return { worst, n };
+  }));
+  const worst = Math.max(...dev.map(d => d.worst)), cars = dev[0].n;
+  check(cars === 40 && worst <= 0.3, "trains: every car centre within 0.3 tiles of its track (10 trains x 4 cars, 120 frames)", { worst, cars });
+  await ctx.close();
+
+  ({ ctx, page, log } = await open(browser, "zoom=1&x=127&y=67&minute=480&drive=0"));
+  // a station stand: R line at central (out i 91): the tick it arrives, then the dwell tick with the same i
+  const still = await page.evaluate(async () => {
+    const cyc = __stub.railCycle("R");
+    // the first dwell minute in the cycle: an entry with doors open whose previous entry has the same i
+    let m = cyc.findIndex((c, k) => k > 0 && c[3] && cyc[k - 1][1] === c[1] && cyc[k - 1][0] === c[0] && cyc[k - 1][3]);
+    const base = 1440 + 600 - ((1440 + 600) % 60); // a tick with (tick + 0 * every) % 60 === 0: train R1 at cycle[m]
+    const t0 = base + m - 1;
+    __setTick(t0);
+    await new Promise(r => setTimeout(r, 700));
+    __setTick(t0 + 1);
+    const row = __view.trains().rows().find(r => r.id === "R1");
+    const ss = await __frames(20, () => __view.trains().sOf("R1"));
+    return { at: row.at_station, i: row.i, min: Math.min(...ss), max: Math.max(...ss) };
+  });
+  check(still.at && Math.abs(still.max - still.min) < 1e-9 && Math.abs(still.min - still.i) < 1e-9, "trains: a train stands still while it stays at a station", still);
+  // cars at i, i-1, i-2, i-3 once settled
+  const settled = await page.evaluate(async () => {
+    await new Promise(r => setTimeout(r, 700));
+    const T = __view.trains(), row = T.rows().find(r => r.id === "R1"), l = __view.scene().town.rail.lines[0];
+    const pl = CityView.railPolyline(l.tracks[row.track]);
+    return T.carsOf("R1").map((c, k) => { const p = CityView.railPointAt(pl, row.i - k); return Math.hypot(c.x - p.x, c.y - p.y); });
+  });
+  check(settled.length === 4 && settled.every(d => d < 1e-6), "trains: car k sits at s - k (cars at i, i-1, i-2, i-3)", settled);
+  // snaps: a track change, and i dropping
+  const snaps = await page.evaluate(async () => {
+    const st = __frameAt(__tick() + 1), T = __view.trains();
+    const r1 = st.trains.find(r => r.id === "R1");
+    const other = r1.track === "out" ? "in" : "out";
+    const a = Object.assign({}, r1, { track: other, i: 50 });
+    __push(Object.assign({}, st, { trains: [a] }));
+    const s1 = T.sOf("R1");
+    await new Promise(r => setTimeout(r, 100));
+    const b = Object.assign({}, a, { i: 30 });
+    __push(Object.assign({}, st, { tick: st.tick + 1, trains: [b] }));
+    const s2 = T.sOf("R1");
+    await new Promise(r => setTimeout(r, 100));
+    const c = Object.assign({}, b, { i: 45 }); // |di| > 12: snap
+    __push(Object.assign({}, st, { tick: st.tick + 2, trains: [c] }));
+    const s3 = T.sOf("R1");
+    const dd = Object.assign({}, c, { i: 50 }); // a normal move: eases
+    __push(Object.assign({}, st, { tick: st.tick + 3, trains: [dd] }));
+    const s4 = T.sOf("R1");
+    return { s1, s2, s3, s4 };
+  });
+  check(snaps.s1 === 50 && snaps.s2 === 30 && snaps.s3 === 45 && snaps.s4 >= 45 && snaps.s4 < 46, "trains: snap on a track change, an i drop and |di| > 12; ease otherwise", snaps);
+  // a train pick
+  await page.evaluate(() => __setTick(__tick() + 5));
+  await page.waitForTimeout(900);
+  const tp = await page.evaluate(() => {
+    for (const r of __view.trains().rows()) {
+      const c = __view.trains().carsOf(r.id)[1], css = __view.cssOfTile(c.x, c.y, 10);
+      if (css[0] < 10 || css[1] < 10 || css[0] > 1270 || css[1] > 790) continue;
+      const hits = __view.scene().pickAll(css[0], css[1]).upright, h = hits.find(x => x.kind === "train");
+      if (h) return { h, id: r.id, riders: r.riders };
+    }
+    return null;
+  });
+  check(tp && tp.h.id === tp.id && tp.h.line && tp.h.riders === tp.riders && Object.keys(tp.h).join() === "kind,id,line,riders", "navigation: a train pick returns {kind: train, id, line, riders}", tp);
+  // a station with a train, for the handoff
+  await page.evaluate(() => { __setTick(1440 + 600 + 12); __view.setCamera({ x: 124, y: 70, zoom: 1.5 }); });
+  await page.waitForTimeout(800);
+  await shot(page, "station_train");
+  noErrors(log, "trains");
+  await ctx.close();
+}
+
+// --- 10. bridges and crossings --------------------------------------------------------------------------------
+async function runBridges(browser) {
+  console.log("bridges");
+  const { ctx, page, log } = await open(browser, "zoom=1&x=81&y=40&minute=480&drive=0");
+  const res = await page.evaluate(async () => {
+    const R = __view.scene().town, tile = (x, y) => R.tiles[y][x];
+    const out = {};
+    // the road bridge on x = 81 (b at y 46-49) and the level crossing on x = 81 (x at y 32-33)
+    const cases = { bridge: [81, 44, 81, 51, "b"], crossing: [81, 30, 81, 35, "x"] };
+    for (const [name, [x0, y0, x1, y1, code]] of Object.entries(cases)) {
+      const st = __frameAt(__tick());
+      const named = { id: "tester", name: "Test Driver", x: x0, y: y0, inside: null, state: "travelling", activity: "commute", vehicle: "car",
+        mood: 60, luck: 50, controller: null, alive: true, age: 40, home: null, car: true, riding: null };
+      const base = Object.assign({}, st, { agents: [named], crowd: [700, x0, y0, 2, 701, x0, y0, 0], trains: [] });
+      __push(Object.assign({}, base, { tick: st.tick + 1 }));
+      await new Promise(r => setTimeout(r, 500));
+      __push(Object.assign({}, base, { tick: st.tick + 2, agents: [Object.assign({}, named, { x: x1, y: y1 })], crowd: [700, x1, y1, 2, 701, x1, y1, 0] }));
+      const sc = __view.scene();
+      const frames = await __frames(40, () => {
+        const r = __view.scene().moverById("tester"), f = r && r.foot ? sc.proj.toTile(r.foot[0], r.foot[1]) : null;
+        return { named: f, car: __view.crowd().pos(700), walker: __view.crowd().pos(701) };
+      });
+      const res = {};
+      for (const who of ["named", "car", "walker"]) {
+        const ps = frames.map(f => f[who]).filter(Boolean);
+        let maxStep = 0, over = false, back = false;
+        for (let k = 1; k < ps.length; k++) {
+          maxStep = Math.max(maxStep, Math.hypot(ps[k][0] - ps[k - 1][0], ps[k][1] - ps[k - 1][1]));
+          if (ps[k][1] < ps[k - 1][1] - 1e-6) back = true;
+        }
+        for (const p of ps) if (tile(Math.floor(p[0]), Math.floor(p[1])) === code) over = true;
+        res[who] = { n: ps.length, maxStep: +maxStep.toFixed(3), over, back, first: ps[0], last: ps[ps.length - 1] };
+      }
+      out[name] = res;
+      __push(Object.assign({}, base, { tick: st.tick + 3, agents: [], crowd: [] }));
+      await new Promise(r => setTimeout(r, 400));
+    }
+    return out;
+  });
+  for (const [name, r] of Object.entries(res)) for (const who of ["named", "car", "walker"]) {
+    const q = r[who];
+    check(q.n >= 20 && q.over && !q.back && q.maxStep < 0.75, `bridges: a ${who === "named" ? "named car" : who === "car" ? "folk car" : "walker"} eases over the ${name} (${name === "bridge" ? "b" : "x"} tile) without a jump`, q);
+  }
+  noErrors(log, "bridges");
+  await ctx.close();
+}
+
+// --- 11. pings ------------------------------------------------------------------------------------------------
+async function runPings(browser) {
+  console.log("pings");
+  const { ctx, page, log } = await open(browser, "zoom=0.5&x=40&y=25&minute=480&drive=0");
+  await page.waitForTimeout(500);
+  const one = await page.evaluate(async () => {
+    const P = __view.pings(); P.clear();
+    __view.events([{ seq: 900001, tick: __tick(), kind: "social", tag: "talk", importance: 0, major: false, text: "x", agent: "dana", agents: ["dana", "f12"], place: "cafe", at: [14, 24] }]);
+    const t0 = performance.now(), out = [];
+    for (const ms of [300, 2500, 3500]) { await new Promise(r => setTimeout(r, Math.max(0, t0 + ms - performance.now()))); await __frames(2, () => 0); out.push(__view.debug().pings); }
+    return { counts: out, shown: P.shown() };
+  });
+  check(one.counts[0] === 1 && one.counts[1] === 1 && one.counts[2] === 0, "pings: one talk event shows one bubble for 3 s", one);
+  const many = await page.evaluate(async () => {
+    const P = __view.pings(); P.clear();
+    const town = __view.scene().town, v = __view.scene().view(), proj = __view.scene().proj;
+    // 30 places in view
+    const ps = town.places.filter(p => p.kind !== "park").filter(p => { const w = proj.toWorld(p.x + p.w / 2, p.y + p.h / 2); return w[0] > v.x0 + 40 && w[0] < v.x1 - 40 && w[1] > v.y0 + 80 && w[1] < v.y1 - 20; }).slice(0, 30);
+    const evs = ps.map((p, k) => ({ seq: 910000 + k, tick: __tick(), kind: "social", tag: ["talk", "new_friend", "row", "flirt", "partner"][k % 5], importance: 0, agent: "f" + k, agents: ["f" + k, "f" + (k + 100)], place: p.id, at: p.entry }));
+    __view.events(evs);
+    await __frames(3, () => 0);
+    const near = __view.debug().pings;
+    __view.setCamera({ x: 40, y: 25, zoom: 0.1 });
+    await __frames(3, () => 0);
+    const far = __view.debug().pings;
+    __view.setCamera({ x: 40, y: 25, zoom: 0.5 });
+    return { places: ps.length, near, far };
+  });
+  check(many.places === 30 && many.near === 20, "pings: 30 events in a frame show 20", many);
+  check(many.far === 0, "pings: none at far zoom", many);
+  // talks rows: an indoor folk-only row draws over its building; an outdoor row between the two people
+  const talks = await page.evaluate(async () => {
+    const P = __view.pings(); P.clear();
+    const town = __view.scene().town, st = __frameAt(__tick());
+    const pi = town.places.findIndex(p => p.id === "cafe");
+    st.crowd = [40, 14, 25, 7, 41, 15, 25, 7];
+    st.talks = [[pi, "f300", "f301", 1, st.tick], [-1, "f40", "f41", 0, st.tick], [pi, "f300", "f301", 1, st.tick]];
+    st.tick += 1;
+    __push(st);
+    await __frames(3, () => 0);
+    return { n: __view.debug().pings, shown: P.shown() };
+  });
+  check(talks.n === 2 && talks.shown.some(s => s.place === "cafe" && s.a === "f300") && talks.shown.some(s => !s.place && s.a === "f40"),
+    "pings: talks rows (an indoor folk row over its building, an outdoor one between two people), each once", talks);
+  await page.evaluate(() => { __view.pings().clear(); __drive(true); });
+  await page.waitForTimeout(2500);
+  const live = await page.evaluate(() => __view.debug().pings);
+  note(`pings from the stub's talks and events at Millbrook 0.5: ${live} on screen`);
+  noErrors(log, "pings");
+  await ctx.close();
+}
+
+// --- 12. navigation -----------------------------------------------------------------------------------------
+async function runNavigation(browser) {
+  console.log("navigation");
+  const { ctx, page, log } = await open(browser, "zoom=0.25&x=85&y=48&minute=480");
+  const nav = await page.evaluate(async () => {
+    const ds = __view.districts(), ss = __view.stations(), town = __view.scene().town, out = { districts: ds.length, stations: ss.length, off: [] };
+    out.allDistricts = town.districts.every(d => ds.some(q => q.id === d.id));
+    out.allStations = town.rail.lines.every(l => l.stations.every(s => ss.some(q => q.id === s.id && q.line === l.id)));
+    for (const d of ds.slice(0, 4)) {
+      __view.focus({ district: d.id });
+      await new Promise(r => setTimeout(r, 1100));
+      const c = __view.camera();
+      out.off.push(+Math.hypot(c.x - d.center[0], c.y - d.center[1]).toFixed(2));
+    }
+    const s = ss.find(q => q.id === "central_station");
+    __view.focus({ station: s.id });
+    await new Promise(r => setTimeout(r, 1100));
+    const c = __view.camera();
+    out.station = +Math.hypot(c.x - s.x, c.y - s.y).toFixed(2);
+    // a long fly: frame gaps (reported)
+    __view.setCamera({ x: 20, y: 20, zoom: 1 });
+    const gaps = []; let prev = 0;
+    __view.focus({ station: "willow_hills_station" });
+    await __frames(60, now => { if (prev) gaps.push(now - prev); prev = now; });
+    gaps.sort((a, b) => a - b);
+    out.flyMax = +gaps[gaps.length - 1].toFixed(1); out.flyMedian = +gaps[gaps.length >> 1].toFixed(1);
+    __view.focus({ line: "S" });
+    await new Promise(r => setTimeout(r, 1100));
+    out.line = __view.camera();
+    return out;
+  });
+  check(nav.allDistricts && nav.allStations && nav.stations >= 10, "navigation: districts() and stations() list every district and station", nav);
+  check(nav.off.length === 4 && nav.off.every(d => d <= 2), "navigation: focus({district}) lands within 2 tiles of its centre", nav.off);
+  check(nav.station <= 1, "navigation: focus({station}) lands on the station", nav.station);
+  check(nav.line && nav.line.zoom < 0.5, "navigation: focus({line}) shows the whole line", nav.line);
+  note(`long fly frame gaps: median ${nav.flyMedian} ms, max ${nav.flyMax} ms (report only; load ${os.loadavg()[0].toFixed(1)})`);
+  // layers persist in goal.view when persistence is on (here off): the setter and reader agree
+  const layers = await page.evaluate(() => { __view.setLayers({ pings: false, transit: true }); const a = __view.layers(); __view.setLayers({ pings: true, transit: false }); return a; });
+  check(layers.pings === false && layers.transit === true && layers.labels === true, "navigation: setLayers and layers()", layers);
+  noErrors(log, "navigation");
+  await ctx.close();
+}
+
+// --- 13. no Math.random -----------------------------------------------------------------------------------------
+function runNoRandom() {
+  console.log("no Math.random");
+  const dir = path.join(CLIENT, "view"), bad = [];
+  for (const f of fs.readdirSync(dir)) if (f.endsWith(".js") && /Math\.random/.test(fs.readFileSync(path.join(dir, f), "utf8"))) bad.push(f);
+  check(bad.length === 0, "no Math.random in client/view/*.js", bad);
+}
+
+async function main() {
+  runNoRandom();
+  const pw = findPlaywright();
+  if (!pw) { console.log("SKIP: playwright not found"); return; }
+  let browser;
+  try { browser = await pw.chromium.launch(); } catch (e) { console.log(`SKIP: no browser (${String(e.message || e).split("\n")[0]})`); return; }
+  const server = await serve();
+  BASE = `http://127.0.0.1:${server.address().port}`;
+  const L = os.loadavg()[0];
+  console.log(`load ${L.toFixed(2)}`);
+  try {
+    const only = (process.env.ONLY || "").split(",").filter(Boolean);
+    for (const [name, fn] of [["crowd", runCrowd], ["trains", runTrains], ["bridges", runBridges], ["pings", runPings], ["navigation", runNavigation]]) {
+      if (only.length && !only.includes(name)) continue;
+      try { await fn(browser); } catch (e) { check(false, `${name}: ran to the end`, String((e && e.stack) || e).split("\n").slice(0, 3).join(" | ")); }
+    }
+  } finally {
+    await browser.close();
+    server.close();
+  }
+  console.log(`${passes} passed, ${failures} failed (load ${L.toFixed(2)} at start, ${os.loadavg()[0].toFixed(2)} at end)`);
+  process.exitCode = failures ? 1 : 0;
+}
+main().catch(e => { console.error(e); process.exitCode = 1; });

@@ -13,7 +13,6 @@
   const LINE_COLORS = { R: "#c8323c", S: "#2f74c8" };
   CV.LINE_COLORS = CV.LINE_COLORS || LINE_COLORS;
   const SNAP = 12, CAR_W = 0.42;
-  const DIR = { e: 0, s: 1, w: 2, n: 3 };
 
   // A polyline with cumulative lengths, and the point at arc length s on it.
   function polyline(corners) {
@@ -65,7 +64,7 @@
         if (!fresh) continue;
         const s = sOf(t, now), di = r.i - t.s1;
         if (r.track !== t.track || r.i < t.s1 || Math.abs(di) > SNAP) { t.track = r.track; t.s0 = t.s1 = r.i; t.t0 = now; t.dur = 1; continue; }
-        t.s0 = s; t.s1 = r.i; t.t0 = now; t.dur = Math.max(30, (M && M.tickMs) || 417);
+        t.s0 = s; t.s1 = r.i; t.t0 = now; t.dur = Math.max(30, (M && M.tickMs) || 417) * 1.1;
       }
       for (const id of [...trains.keys()]) if (!seen.has(id)) trains.delete(id);
       version++;

@@ -7,7 +7,8 @@
 // a leaver fades over 300 ms. Walkers keep to a kerb (side and place along it by hash2(i, 7)), vehicles to
 // their lane; standing people sharing a tile stand in a ring. Near: sprites (folk sheets, cars; cap 800, the
 // rest as marks) merged by depth with everything upright; mid: 2 x 3 px walkers and 4 x 3 px vehicles;
-// far: 1 px dots (vehicles 2 px). pick(wx, wy, r) -> {kind: "agent", id: "f417", folk: true}.
+// far: 1 px dots (vehicles 2 px). pick(wx, wy, r) -> {kind: "agent", id: "f417", folk: true}. stats().crowdDrawn
+// counts the people drawn whose foot point is in the view (those just outside it are drawn too, uncounted).
 // Classic script on window.CityView; no random numbers (view.md 7).
 "use strict";
 (function () {
@@ -27,7 +28,9 @@
   };
   const hash2 = (a, b) => (typeof CV.hash2 === "function" ? CV.hash2(a, b) >>> 0 : mix(a, b));
   CV.CAR_COLORS = CV.CAR_COLORS || CAR_COLORS;
-  CV.folkColor = i => SHEET_COLORS[hash2(i, 5) % 24];
+  // the shirt colour of person i's sheet (art's CV.folkShirt when it has one): marks, dots and pings
+  const shirtOf = i => (typeof CV.folkShirt === "function" ? CV.folkShirt(hash2(i, 5) % 24) : SHEET_COLORS[hash2(i, 5) % 24]);
+  CV.folkColor = shirtOf;
 
   CV.makeCrowd = function (scene, M) {
     const R = CV.regionOf(scene);
@@ -101,7 +104,9 @@
       if (!fresh) return;
       const u = lastTick === null ? 1 : share(now);
       lastTick = st.tick;
-      dur = Math.max(30, (M && M.tickMs) || 417);
+      // a little longer than the tick, so a move never ends before the next one starts (no standing frames
+      // between ticks when the tick comes late); the next move starts from wherever it was shown
+      dur = Math.max(30, (M && M.tickMs) || 417) * 1.1;
       // shown positions now (with their offsets) become the start of the next move
       for (const i of list) if (seen[i] === 1) {
         const p = at(i, u);
@@ -235,10 +240,9 @@
         for (const j of cand) {
           const i = list[j], m = kind[i] & 7, w = proj.toWorld(fx[j], fy[j]), alpha = fa[j];
           const depth = proj.depth(fx[j], fy[j]) + (VEH[m] ? 0.02 : 0.01);
-          if (w[0] >= v.x0 && w[0] <= v.x1 && w[1] >= v.y0 && w[1] <= v.y1 && seen[i] === 1) inView++;
-          drawn++;
+          if (w[0] >= v.x0 && w[0] <= v.x1 && w[1] >= v.y0 && w[1] <= v.y1) { drawn++; if (seen[i] === 1) inView++; }
           if (!asSprite.has(j)) { // a mark among the sprites
-            const col = VEH[m] ? CAR_COLORS[hash2(i, 3) % 10] : SHEET_COLORS[hash2(i, 5) % 24];
+            const col = VEH[m] ? CAR_COLORS[hash2(i, 3) % 10] : shirtOf(i);
             outItems.push({ depth, wx: w[0] - 2, wy: w[1] - 3, wx1: w[0] + 2, wy1: w[1], draw(g, S2, ox, oy) {
               g.globalAlpha = alpha; g.fillStyle = col; g.fillRect(Math.round(w[0] * S2 + ox) - 1, Math.round(w[1] * S2 + oy) - 3, VEH[m] ? 4 : 2, 3); g.globalAlpha = 1;
             } });
@@ -286,11 +290,10 @@
         for (let j = 0; j < list.length; j++) {
           const i = list[j], m = kind[i] & 7, w = proj.toWorld(fx[j], fy[j]);
           if (!visible(v, w[0], w[1], 4)) continue;
-          if (seen[i] === 1 && w[0] >= v.x0 && w[0] <= v.x1 && w[1] >= v.y0 && w[1] <= v.y1) inView++;
-          drawn++;
+          if (w[0] >= v.x0 && w[0] <= v.x1 && w[1] >= v.y0 && w[1] <= v.y1) { drawn++; if (seen[i] === 1) inView++; }
           const dx = Math.round(w[0] * S + v.ox), dy = Math.round(w[1] * S + v.oy), veh = VEH[m];
           g.globalAlpha = fa[j];
-          g.fillStyle = veh ? CAR_COLORS[hash2(i, 3) % 10] : SHEET_COLORS[hash2(i, 5) % 24];
+          g.fillStyle = veh ? CAR_COLORS[hash2(i, 3) % 10] : shirtOf(i);
           if (lod === "mid") g.fillRect(dx - (veh ? 2 : 1) * k, dy - 3 * k, (veh ? 4 : 2) * k, 3 * k);
           else g.fillRect(dx, dy, (veh ? 2 : 1) * k, (veh ? 2 : 1) * k);
         }
