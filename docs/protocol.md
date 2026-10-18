@@ -1303,7 +1303,55 @@ L1 writes this section (`talks`, the social event tags, texts and invites to tow
 
 ### Life, work and money
 
-L2 writes this section (the `life` block, `you.life`, `stats.city.life`, illness, births, deaths, jobs and money).
+Every person, named or townsperson, has the same life: a birthday, illnesses, a job on the one job board, a
+weekly money settlement, children and a death. Nothing here sends odds or rolls (see
+[Hidden information](#hidden-information)).
+
+**Years and birthdays.** A year is 360 game days. Each person ages by one on their own birthday (`life.birthday`,
+a day of the year from 0 to 359), not all on one day. A named child starts school (the `student` job) at 5 and
+leaves it at 18 (`came_of_age`), when they look for work.
+
+**Illness.** Each person rolls once a day, in a minute of their own: a cold, the flu, a stomach bug, back pain or
+a broken bone (more colds and flu in winter), a heart attack or a stroke (by age), and from 30 a chronic condition
+(hypertension, diabetes, arthritis, heart disease). While ill, health is held at 85 or below; each chronic
+condition lowers the most a person heals to by 5, and so does age past 55 (0.8 a year). Some go to the doctor
+($40), which shortens the illness by 30%. A cold or the flu can spread at home. A broken bone, a heart attack or
+a stroke, or health under 25, sends the person to hospital (the `ward` activity, $60 a day, `in_hospital`),
+by ambulance for a named character; they cannot work or take forks until discharged (`discharged`). An
+illness's `off_work` keeps the person off work or school.
+
+**Births.** A couple may conceive (`expecting`); 90 days later the baby is born at 08:00 (`birth`). A named
+couple's baby is a new named character with its own id (its first name, or first name and surname when taken) in
+the parents' household: it appears in the state frame and on pages, and has no forks until 5 (`stage` `baby` or
+`child`). A townsperson's baby is a townsperson. Day 4 of every new city sees Shira Peretz's baby.
+
+**Deaths.** Each day's odds follow the person's age and their untreated and treated conditions, more with health
+under 40 or a heart condition in hospital (`death`, with a cause). A death frees the person's job, widows their
+partner (grief for 30 days) and saddens their friends and family.
+
+**Work.** The named and the townsfolk share one job board. A worker's standing (`reputation`, 0 to 100, the
+character's `work.standing`) moves after every shift, more for the diligent, and drifts toward 50; a pupil's
+moves +0.5 a day at school as in v2. Every 90 days a worker with 30 days in the job has a review: at 50 or
+more a 4-7% raise may follow (`raise`); under 25 a warning (`warning`); at 40 or more the warnings clear; under 20
+with two warnings they are fired (`job_lost`). Anyone may be laid off (`job_lost`). A job seeker 18 to 64 has a
+daily chance of a job (`job_new`), better with higher standing, at no more than 1.25 times their last wage: a
+named character takes the best paid, a townsperson the nearest. A laid-off or fired person gets $200 a week for
+13 weeks while under 65.
+
+**Money.** Each adult's week is settled on Sunday between 09:00 and 19:00, at a minute of their own: the benefit;
+lifestyle spending, which rises quickly with pay and falls slowly (halved while the household tightens its
+belt); a share of wealth spent; an unexpected `expense` and an unexpected `windfall` (importance 1 from $300 and
+2 from $2,000 for a named character; from $1,000 and $5,000 for a townsperson); $15 for each treated chronic
+condition; the children's costs, paid by the household's richest adult; and 0.4% interest on debt. Savings cover
+a negative purse.
+
+| Where | Field | Meaning |
+|-------|-------|---------|
+| State | `ill`, `stage` | See [State](#state). |
+| Agent page | `life` | `{"stage", "birthday", "partner", "children", "friends", "rivals", "conditions", "chronic", "pregnant", "work", "money", "talks"}`. `partner`: `null` or `{"id", "name", "kind", "married", "days"}` (`kind` `partner` or `dating`); `children`: `[{"id", "name", "age"}]`; `friends`: a count; `rivals`: `[{"id", "name"}]`; `conditions`: `[{"id", "label", "days_left", "off_work"}]`; `chronic`: condition ids; `pregnant`: `null` or `{"with", "name", "days_left"}`; `work`: `{"standing", "warnings", "days_in_job", "jobless_days", "benefit"}` (`days_in_job` `null` without a job, `jobless_days` `null` unless looking for work); `money`: `{"lifestyle", "debt", "loans": [{"id", "with", "name", "dir", "amount"}]}` (`dir` `lent` or `borrowed`); `talks`: see [Social](#social). |
+| Fork | `you.life` | `{"partner", "children", "conditions", "standing", "jobless_days", "debt"}`: `partner` `null` or `{"id", "name", "kind", "married"}`, `children` a count, `conditions` labels such as `"the flu"`, `debt` whole dollars owed beyond savings. |
+| Stats | `city.life` | `{"ill_now", "in_hospital", "couples", "births", "deaths", "jobless", "in_debt", "talks_today", "friendships_today"}`, all integers, over the named and the townsfolk; `births` and `deaths` since the start (`city.births` and `city.deaths` are the same counts). |
+| Event | `tag` | Life's tags: `expecting`, `birth`, `ill`, `recovered`, `doctor`, `chronic`, `hospital`, `discharged`, `death`, `came_of_age`, `raise`, `warning`, `job_new`, `job_lost`, `expense` and `windfall`. A townsperson's events reach the log only at importance 1 or more. |
 
 ## View data
 
