@@ -1629,11 +1629,12 @@ Raises and promotions belong to the holder: a job left behind is advertised at i
 (`coworker` relationships at 15 to 25). A laid-off or fired person gets $200 a week for 13 weeks while under 65.
 
 **Money.** Each adult's week is settled on Sunday between 09:00 and 19:00, at a minute of their own: the benefit;
-lifestyle spending, which rises quickly with pay and falls slowly (halved while the household tightens its
-belt); a share of wealth spent; an unexpected `expense` and an unexpected `windfall` (importance 1 from $300 and
-2 from $2,000 for a named character; from $1,000 and $5,000 for a townsperson); $15 for each treated chronic
-condition; the children's costs, paid by the household's richest adult; and 0.4% interest on debt. Savings cover
-a negative purse.
+lifestyle spending, which rises quickly with pay and falls slowly (none while the household is in the red after
+the last Sunday's bills, halved while it tightens its belt); a share of wealth spent; an unexpected `expense`
+(a broken appliance only in a home the household owns: a let home's are the landlord's) and an unexpected
+`windfall` (importance 1 from $300 and 2 from $2,000 for a named character; from $1,000 and $5,000 for a
+townsperson); $15 for each treated chronic condition; the children's costs, paid by the household's richest
+adult; and 0.4% interest on debt. Savings cover a negative purse.
 
 | Where | Field | Meaning |
 |-------|-------|---------|
