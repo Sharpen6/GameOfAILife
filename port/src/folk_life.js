@@ -214,7 +214,8 @@
           if (rr.random() < luck_odds(H.DAMP_CHILL[st] * k, -1, p.luck)) {
             p.health = Math.max(0.0, p.health + H.CHILL.health);
             p.adjust("fun", H.CHILL.fun);
-            sim.event(`${p.name} catches a chill in the damp house.`, p, null, { tag: "damp_chill", place: home.place });
+            sim.event(`${p.name} catches a chill in the damp house.`, p, null,
+              { tag: "damp_chill", place: home.place });
           }
         }
       }
