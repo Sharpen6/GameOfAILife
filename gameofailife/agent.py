@@ -19,13 +19,21 @@ class RelationKind(str, Enum):
     FRIEND = "friend"
     COWORKER = "coworker"
     ACQUAINTANCE = "acquaintance"
+    DATING = "dating"
+    EX = "ex"
+    RIVAL = "rival"
 
 
-@dataclass
+@dataclass(slots=True)
 class Relationship:
     kind: RelationKind
     affinity: float  # -100 .. 100
     trust: float = 50.0
+    romance: float = 0.0  # 0 .. 100, this side's
+    since: int = 0  # tick the relationship (or the current kind of it, for dating and partners) began
+    seen: int = 0  # tick the two last talked
+    married: bool = False
+    talks: int = 0  # talks so far
 
     def bump(self, amount: float) -> None:
         self.affinity = max(-100.0, min(100.0, self.affinity + amount))
@@ -42,9 +50,16 @@ class Job:
     start_hour: int
     end_hour: int
     workdays: tuple[int, ...]
+    slot: int = -1  # its slot on career.JobBoard (not in the JSON)
 
     def on_shift(self, weekday: int, hour: float) -> bool:
-        return weekday in self.workdays and self.start_hour <= hour < self.end_hour
+        """On a workday inside the hours; a night shift (end <= start) runs from start to midnight and from midnight
+        to end."""
+        if weekday not in self.workdays:
+            return False
+        if self.end_hour <= self.start_hour:
+            return self.start_hour <= hour or hour < self.end_hour
+        return self.start_hour <= hour < self.end_hour
 
     def to_json(self) -> dict:
         return {"title": self.title, "place": self.place_id, "hourly_wage": self.hourly_wage,
@@ -156,6 +171,7 @@ class Agent:
     trip: dict | None = None  # {"mode": "bus", "line", "board", "alight", "phase", "since"} while on a bus trip
     riding: str | None = None  # bus id while on board
     died: dict | None = None  # {"tick", "time", "how"}
+    life: object = None  # life.LifeState, set by life.init (not in the v2 JSON)
 
     def relate(self, other_id: str, kind: RelationKind, affinity: float) -> None:
         self.relationships[other_id] = Relationship(kind, affinity)
