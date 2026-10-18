@@ -82,6 +82,59 @@ class BoardTest(unittest.TestCase):
         self.assertIsNone(b.holder[s_far])
         self.assertIsNone(b.holder[s_gone])
 
+    def test_a_network_lead_skips_a_slot_a_townsperson_cannot_reach(self):
+        sim = life_sim()
+        b = career.board(sim)
+        friend = next(a for a in sim.agents.values() if career.worker(a))
+        lead = b.add(Job("clerk", friend.job.place_id, 5.0, 9, 17, (0, 1, 2, 3, 4)), None)
+        p = folk_person(sim)
+        p.relationships = {friend.id: Relationship(RelationKind.FRIEND, 45)}
+        fake = mock.Mock()
+        fake.isolated = False
+        for minutes, want in ((None, None), (25, lead)):
+            fake.commute_minutes = lambda person, place, m=minutes: m
+            with mock.patch.object(sim, "folk", fake):
+                self.assertEqual(career.network_slot(sim, p, [lead], None), want)
+
+    def test_a_freed_slot_goes_back_to_its_own_title_and_pay(self):
+        sim = life_sim()
+        b = career.board(sim)
+        a, c = [w for w in sorted(sim.agents.values(), key=lambda w: w.id) if career.worker(w)
+                and not w.job.title.startswith(("senior ", "head "))][:2]
+        slot, title, wage = a.job.slot, a.job.title, a.job.hourly_wage
+        rr = dice.stream(1, 0)
+        career.promote(sim, a)
+        career.promote(sim, a)
+        career.lose_job(sim, a, rr, "laid_off")
+        self.assertEqual(a.life.last_wage, round(round(wage * 1.2, 2) * 1.2, 2))  # theirs, not the slot's
+        self.assertEqual((b.jobs[slot].title, b.jobs[slot].hourly_wage), (title, wage))
+        b.reopen.clear()
+        career.lose_job(sim, c, rr, "laid_off")
+        b.reopen.clear()
+        self.assertTrue(career.hire(sim, c, rr, slot))
+        self.assertEqual((c.job.title, c.job.hourly_wage, c.job.slot), (title, wage, slot))
+        self.assertIs(b.jobs[slot], c.job)
+
+    @unittest.skipUnless(NODE, "node is not installed")
+    def test_a_freed_slot_goes_back_to_its_own_title_and_pay_in_js(self):
+        got = node_eval("""
+const sim = new G.sim.Simulation(1);
+const b = G.career.board(sim);
+const [a, c] = [...sim.agents.values()].filter(w => G.career.worker(w) && !/^(senior|head) /.test(w.job.title))
+  .sort((x, y) => (x.id < y.id ? -1 : 1)).slice(0, 2);
+const slot = a.job.slot, title = a.job.title, wage = a.job.hourly_wage;
+const rr = G.dice.stream(1, 0);
+G.career.promote(sim, a); G.career.promote(sim, a);
+G.career.lose_job(sim, a, rr, "laid_off");
+b.reopen.clear();
+G.career.lose_job(sim, c, rr, "laid_off");
+b.reopen.clear();
+G.career.hire(sim, c, rr, slot);
+console.log(JSON.stringify([a.life.last_wage, c.job.title === title, c.job.hourly_wage === wage, b.jobs[slot] === c.job]));
+""")
+        self.assertTrue(all(got[1:]))
+        self.assertGreater(got[0], 1.4 * 1.0)  # the promoted holder's own last wage stays raised
+
 
 class StandingTest(unittest.TestCase):
     def test_on_shift_end_on_a_folk_worker(self):

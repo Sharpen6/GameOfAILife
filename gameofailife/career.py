@@ -9,6 +9,8 @@ fields (`reputation`, `job`, `luck`, `life`, traits via `people.traits`).
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 LAYOFF_YEAR = 0.03  # a worker's yearly odds of being laid off, before PACE["career"]
 REOPEN_DAYS = (7, 30)  # an emptied slot is advertised again after this many days
 HIRE_BASE = 0.035  # a seeker's daily odds of a job ...
@@ -34,12 +36,14 @@ NEW_COWORKERS = 4
 class JobBoard:
     """Every job slot: `jobs[slot]` (an agent.Job, whose `slot` is set), `holder[slot]` (a person id or None) and
     `reopen[slot]` (the game day an emptied slot is advertised again). `named` counts the named v2 slots (0..k-1),
-    the named tier's own in isolated mode."""
+    the named tier's own in isolated mode. `base[slot]` is the slot's own (title, hourly_wage): raises and
+    promotions belong to the holder, so a freed slot is advertised at its base again."""
 
     def __init__(self) -> None:
         self.jobs: list = []
         self.holder: list[str | None] = []
         self.reopen: dict[int, int] = {}
+        self.base: list[tuple[str, float]] = []
         self.named = 0
 
     def add(self, job, holder: str | None) -> int:
@@ -47,6 +51,7 @@ class JobBoard:
         job.slot = slot
         self.jobs.append(job)
         self.holder.append(holder)
+        self.base.append((job.title, job.hourly_wage))
         return slot
 
     def vacant(self, sim, p) -> list[int]:
@@ -80,6 +85,10 @@ class JobBoard:
             self.reopen.pop(slot, None)
         else:
             self.reopen[slot] = reopen_day
+        title, wage = self.base[slot]
+        job = self.jobs[slot]
+        if job.title != title or job.hourly_wage != wage:  # a fresh Job: the old holder keeps theirs
+            self.jobs[slot] = replace(job, title=title, hourly_wage=wage)
 
 
 def board(sim) -> JobBoard:
@@ -286,7 +295,8 @@ def _pick(sim, p, slots, cap, floor: float = 0.0):
 
 
 def network_slot(sim, p, slots, cap):
-    """The first of `slots` (at most `cap`) at a place where a friend of `p`'s at affinity 40+ works, else None."""
+    """The first of `slots` (at most `cap`) at a place where a friend of `p`'s at affinity 40+ works, else None. A
+    townsperson skips a slot `sim.folk.commute_minutes` gives None for, as `_pick` does."""
     from . import life
 
     b = board(sim)
@@ -298,9 +308,12 @@ def network_slot(sim, p, slots, cap):
                 places.add(o.job.place_id)
     if not places:
         return None
+    named = p.id in sim.agents
     for slot in slots:
         job = b.jobs[slot]
         if job.place_id in places and (cap is None or job.hourly_wage <= cap):
+            if not named and sim.folk.commute_minutes(p, job.place_id) is None:  # folk: as in _pick
+                continue
             return slot
     return None
 

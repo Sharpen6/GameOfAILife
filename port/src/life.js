@@ -220,8 +220,7 @@
 
   // The start (life.md 5.9): see life.py.
   function seed_story(sim) {
-    const fn = G.social ? G.social.seed_story : undefined;
-    if (fn) fn(sim);
+    G.social.seed_story(sim);
     for (const p of G.people.everyone(sim)) {
       const rr = _stream(sim, "STORY", p.id, "life");
       if (p.age >= 30) {

@@ -26,11 +26,14 @@
 
   // Every job slot: jobs[slot] (an agent.Job, whose `slot` is set), holder[slot] (a person id or null) and
   // reopen[slot] (the game day an emptied slot is advertised again). `named` counts the named v2 slots (0..k-1).
+  // base[slot] is the slot's own [title, hourly_wage]: raises and promotions belong to the holder, so a freed slot
+  // is advertised at its base again.
   class JobBoard {
     constructor() {
       this.jobs = [];
       this.holder = [];
       this.reopen = new Map();
+      this.base = [];
       this.named = 0;
     }
 
@@ -39,6 +42,7 @@
       job.slot = slot;
       this.jobs.push(job);
       this.holder.push(holder);
+      this.base.push([job.title, job.hourly_wage]);
       return slot;
     }
 
@@ -69,6 +73,11 @@
       this.holder[slot] = null;
       if (reopen_day === null) this.reopen.delete(slot);
       else this.reopen.set(slot, reopen_day);
+      const [title, wage] = this.base[slot];
+      const job = this.jobs[slot];
+      if (job.title !== title || job.hourly_wage !== wage) { // a fresh Job: the old holder keeps theirs
+        this.jobs[slot] = new G.agent.Job(title, job.place_id, wage, job.start_hour, job.end_hour, job.workdays, job.slot);
+      }
     }
   }
 
@@ -256,7 +265,8 @@
     return best;
   }
 
-  // The first of `slots` (at most `cap`) at a place where a friend of p's at affinity 40+ works, else null.
+  // The first of `slots` (at most `cap`) at a place where a friend of p's at affinity 40+ works, else null. A
+  // townsperson skips a slot `sim.folk.commute_minutes` gives null for, as `_pick` does.
   function network_slot(sim, p, slots, cap) {
     const b = board(sim);
     const places = new Set();
@@ -267,9 +277,13 @@
       }
     }
     if (places.size === 0) return null;
+    const named = sim.agents.has(p.id);
     for (const slot of slots) {
       const job = b.jobs[slot];
-      if (places.has(job.place_id) && (cap === null || job.hourly_wage <= cap)) return slot;
+      if (places.has(job.place_id) && (cap === null || job.hourly_wage <= cap)) {
+        if (!named && sim.folk.commute_minutes(p, job.place_id) == null) continue; // folk: as in _pick
+        return slot;
+      }
     }
     return null;
   }

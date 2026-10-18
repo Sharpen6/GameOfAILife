@@ -274,9 +274,7 @@ def seed_story(sim) -> None:
     and Ari Ben-David's bill on day 2 at 10:00."""
     from . import people, social
 
-    fn = getattr(social, "seed_story", None)
-    if fn is not None:
-        fn(sim)
+    social.seed_story(sim)
     for p in people.everyone(sim):
         rr = _stream(sim, "STORY", p.id, "life")
         if p.age >= 30:
