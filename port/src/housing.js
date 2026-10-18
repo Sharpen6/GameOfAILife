@@ -34,6 +34,8 @@
   const LANDLORD_RESTORE = 85; // ... back up to this
   const VACANT_DECAY = 0.7; // per day, any tier, nobody living there
   const MARKET_FLOOR = 20; // a home held for sale never drops below "neglected"
+  const NEWS_SETTLE_DAYS = 1; // a home's poor stage is not news until its household has lived there this long
+  const LANDLORD_SELLS_DAYS = 14; // with no other house for sale this long, the landlord sells a let house left empty
   const WINTER_DECAY = 1.25;
   const CROWD_DECAY = 0.10; // +10% decay per resident beyond two
   const EMERGENCY_DECAY = 4.0; // extra decay per day while an emergency is unfixed
@@ -44,6 +46,9 @@
   const RENO_FACTOR = 2.0; // per-point price multiplier when condition < 50 (a full renovation)
   const RESERVE_WEEKS = 6;
   const MOVE_GAP_DAYS = 28;
+  const DOWNSIZE_SHARE = 0.8; // an owner downsizes to a home worth at most this share of today's ...
+  const DOWNSIZE_CONDITION = 50; // ... in at least this condition
+  const SPARE_BEDROOMS = 2; // an owner household with this many more bedrooms than residents has outgrown its home
   const CAR_SALE = 2500;
   const EMERGENCY_DAYS = 3;
   const LIVING_PER_PERSON = 75; // weekly living estimate (affordability, hardship)
@@ -65,6 +70,7 @@
   const DAY = 24 * 60; // minutes
   const MOVE_VAN_MINUTES = 180; // the moving van stays at the curb this long after a move
   const LANDLORD_WORKS_MINUTES = 8 * 60; // builders on site while the landlord repaints
+  const RENOVATE_WORKS_MINUTES = 4 * 60; // builders on site doing up a home bought run-down
   const UNDER_OFFER_DAYS = 3; // a listing another buyer snapped up is off the market this long
   const OFFER_HOLD_MINUTES = 6 * 60; // a listing is held for a household's offer until the answer lands, at most this long
   const SETTLE_DAMAGE = 10; // condition lost when an emergency is never properly fixed, or left behind in a move
@@ -166,6 +172,7 @@
       this.pending_emergency = null; // hidden {kind, due}: never serialised
       this.emergency = null; // live {kind, since}: public
       this.history = []; // {tick, time, event, household, price}
+      this.arrived = null; // the household as it moved in, {residents, retired}; null: the starting cast
     }
   }
 
@@ -458,11 +465,15 @@
   // least 90% of today's; or a home worth at least 15% more.
   //
   // Owners look only at homes for sale unless they are crowded: selling up to rent a pricier place gives away
-  // the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4).
+  // the home and the sale fee for a higher weekly outgo, never a step up (housing.md 11, point 4). Unless crowded,
+  // a household doesn't take more bedrooms once every adult is retired, nor for a while after it has downsized
+  // (its "bigger_home" cooldown).
   function is_upgrade(sim, hh, home_id) {
     const cur = sim.homes.get(hh.home_id), nw = sim.homes.get(home_id);
     if (TIERS[nw.tier].rank < TIERS[cur.tier].rank) return false;
     if (crowded(sim, hh) && nw.bedrooms > cur.bedrooms) return true;
+    if (nw.bedrooms > cur.bedrooms && (getd(hh.cooldowns, "bigger_home", 0) > sim.clock.tick
+      || adults(sim, hh).every(a => retired(a)))) return false;
     const owner = cur.owner === hh.id;
     if (owner && !buys(nw)) return false;
     if (!owner && buys(nw)) return value(sim, home_id) >= 0.9 * value(sim, cur.id);
@@ -478,6 +489,49 @@
   // The homes `house_hunt` offers: listed, vacant, fitting, an upgrade and affordable.
   function hunt_candidates(sim, hh) {
     return vacancies(sim).filter(h => fits(sim, hh, h) && is_upgrade(sim, hh, h.id) && affordable(sim, hh, h.id));
+  }
+
+  // What `Home.arrived` records when a household moves in: its residents, and whether every adult is retired.
+  function _arrival(sim, hh) {
+    return { residents: residents(sim, hh), retired: adults(sim, hh).every(a => retired(a)) };
+  }
+
+  // An owner household that has outgrown its home since it moved in: every adult has retired since, or it has
+  // shrunk since and has at least SPARE_BEDROOMS more bedrooms than residents. The starting cast has lived in its
+  // homes for years, so for it being retired, or that many bedrooms to spare, is enough. A home that was already
+  // more than the household needed when it moved in (three in five bedrooms, a retired couple) is not outgrown:
+  // they chose it. `house_hunt` offers an outgrown home's household a smaller one when nothing better is on the
+  // market.
+  function outgrown(sim, hh) {
+    const home = sim.homes.get(hh.home_id);
+    const people = adults(sim, hh);
+    if (home.owner !== hh.id || !people.length) return false;
+    const now = _arrival(sim, hh);
+    const spare = now.residents <= home.bedrooms - SPARE_BEDROOMS;
+    const was = home.arrived;
+    if (was === null) return now.retired || spare;
+    return (now.retired && !was.retired) || (spare && now.residents < was.residents);
+  }
+
+  // The smaller homes an owner could sell up and buy: for sale, vacant, fitting, in at least DOWNSIZE_CONDITION,
+  // worth at most DOWNSIZE_SHARE of the home they own now, and affordable (hunt_candidates' rules).
+  function downsize_candidates(sim, hh) {
+    const worth = value(sim, hh.home_id);
+    return vacancies(sim, "for_sale").filter(h => fits(sim, hh, h) && condition_of(sim, h.id) >= DOWNSIZE_CONDITION
+      && value(sim, h.id) <= DOWNSIZE_SHARE * worth && affordable(sim, hh, h.id));
+  }
+
+  // No house or big house other than `but` has been for sale for LANDLORD_SELLS_DAYS: none is for sale now
+  // (under offer included) and none was bought in that time (a home is for sale until it is bought).
+  function house_drought(sim, but = null) {
+    const now = sim.clock.tick;
+    if (now < LANDLORD_SELLS_DAYS * DAY) return false;
+    for (const h of sim.homes.values()) {
+      if (h.tier === "flat" || h.id === but) continue;
+      if (h.household === null && h.listing === "for_sale") return false;
+      if (h.history.some(r => r.event === "bought" && now - r.tick < LANDLORD_SELLS_DAYS * DAY)) return false;
+    }
+    return true;
   }
 
   // The cheapest fitting home to let, with rent under `below` when given (ties: better condition, then id).
@@ -690,7 +744,8 @@
   // rental out of housing trouble).
   //
   // The old home is freed and listed (an owned one for sale at its value, with the sale credited to the
-  // household's savings; a rented one back to let). The van and the price are paid from the household pot.
+  // household's savings; a rented one back to let, unless it is a house and no other house has been for sale
+  // for LANDLORD_SELLS_DAYS: then the landlord sells it). The van and the price are paid from the household pot.
   // Members free to drop what they are doing set off for the new home; the rest go there the next time they
   // head home. `plan_decider=false` leaves the decider alone, for a fork option whose own steps go there.
   function move_household(sim, hh, home_id, how, factor = 1.0, decider = null, forced = null, plan_decider = true,
@@ -712,15 +767,21 @@
     const owned = old.owner === hh.id;
     const buy = how === "buy";
     const proceeds = owned ? sale_proceeds(sim, old.id) : 0;
-    // Leave the old home: an owned one goes on the market, a rented one back to the landlord.
+    const sells = old.owner === "landlord" && old.tier !== "flat" && house_drought(sim, nw.id);
+    // Leave the old home: an owned one goes on the market, a rented one back to the landlord (who sells a
+    // house when there has been none for sale for a while).
     if (owned) {
       pay_household(sim, hh, -proceeds);
+      old.owner = "market";
+      old.listing = "for_sale";
+    } else if (sells) {
       old.owner = "market";
       old.listing = "for_sale";
     } else {
       old.listing = "for_rent";
     }
     old.household = null;
+    old.arrived = null;
     release(old);
     old.pending_emergency = null;
     if (old.emergency) { // the problem stays with the house, as lost condition
@@ -740,10 +801,13 @@
     }
     nw.listing = null;
     nw.household = hh.id;
+    nw.arrived = _arrival(sim, hh);
     release(nw);
     hh.home_id = nw.id;
     hh.moved_tick = now;
     hh.trouble_seen = 0;
+    delete hh.cooldowns.upkeep; // the upkeep and repair cooldowns were the old home's
+    delete hh.cooldowns.repair;
     hh.hardship_rent = null;
     hh.tax_deferred = false;
     sim.lots.get(nw.place).moving_until = now + MOVE_VAN_MINUTES;
@@ -779,11 +843,24 @@
           "home_rented", nw.place, agent, ids);
       }
     }
+    if (sells) {
+      _event(sim, `${LANDLORD} puts ${old.name} up for sale ($${commas(value(sim, old.id))}).`, "home_listed",
+        old.place);
+    }
     for (const a of people) {
       if (a !== agent) a.remember(stamp, `Moved to ${nw.name}.`);
       if ((a !== decider || plan_decider) && sim._interruptible(a)) sim.start_plan(a, [["move_house", nw.place]]);
     }
     return true;
+  }
+
+  // Builders do the household's home up to condition 100 for `cost`, paid from the household pot: the
+  // renovation a run-down home is bought with, done the day it is bought.
+  function renovate(sim, hh, cost) {
+    const lot = sim.lots.get(sim.homes.get(hh.home_id).place);
+    pay_household(sim, hh, cost);
+    lot.works_until = Math.max(lot.works_until, sim.clock.tick + RENOVATE_WORKS_MINUTES);
+    _change_condition(sim, lot, 100 - lot.condition);
   }
 
   // The floor under a household deep in the red (PLAN 5.5): a cheaper rental (owners: any rental, after a
@@ -943,7 +1020,9 @@
   // home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
   // poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
   // when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
-  // silent.
+  // silent. So is a home whose household moved in less than NEWS_SETTLE_DAYS ago: a poor stage it reaches then
+  // is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
+  // first evening never makes the news as falling apart.
   function _stage_news(sim, lot) {
     const st = stage_of(lot.condition);
     const homes = lot_homes(sim, lot.place);
@@ -959,6 +1038,7 @@
       }
       lot.reported = st;
     } else if (st > lot.reported) {
+      if (home && _just_moved_in(sim, sim.households.get(home.household))) return; // not news yet
       if (home && STAGE_NEWS[st]) {
         const [tag, text] = STAGE_NEWS[st];
         _event(sim, _home(text, home.name), tag, lot.place, null,
@@ -967,6 +1047,9 @@
       lot.reported = st;
     }
   }
+
+  // The household moved into its home less than NEWS_SETTLE_DAYS ago.
+  const _just_moved_in = (sim, hh) => hh.moved_tick !== null && sim.clock.tick - hh.moved_tick < NEWS_SETTLE_DAYS * DAY;
 
   function _change_condition(sim, lot, delta) {
     lot.condition = Math.max(0.0, Math.min(100.0, lot.condition + delta));
@@ -1083,6 +1166,7 @@
     if (home.household !== hh.id) return;
     const now = sim.clock.tick, stamp = sim.clock.stamp();
     home.household = null;
+    home.arrived = null;
     home.pending_emergency = null;
     home.emergency = null;
     release(home);
@@ -1109,8 +1193,10 @@
     opt.outcomes = [];
   }
 
-  // The housing extras of a chosen option, at decision time (PLAN 3.11): move, hold, repair, works,
-  // fix_emergency, hh_cooldown, belt_tighten, sell_car, sell_stuff, ask_help and odd_jobs.
+  // The housing extras of a chosen option, at decision time (PLAN 3.11): move (with what comes only if the move
+  // goes through: settle, household cooldowns {key: minutes}, and renovate, the price of doing up the home
+  // bought), hold, repair, works, fix_emergency, hh_cooldown, belt_tighten, sell_car, sell_stuff, ask_help and
+  // odd_jobs.
   function apply_extra(sim, agent, fork, opt) {
     const extra = (opt && opt.extra) || {};
     if (!Object.keys(extra).length) return;
@@ -1120,7 +1206,10 @@
     if ("move" in extra) {
       const how = getd(extra, "how", "buy");
       const down = how === "rent" && fork !== null && fork.kind === "housing_trouble";
-      if (!move_household(sim, hh, extra.move, how, 1.0, agent, null, false, !down)) {
+      if (move_household(sim, hh, extra.move, how, 1.0, agent, null, false, !down)) {
+        for (const [key, minutes] of Object.entries(extra.settle || {})) hh.cooldowns[key] = now + minutes;
+        if (extra.renovate) renovate(sim, hh, extra.renovate);
+      } else {
         _call_off(agent, opt); // nothing to move into
       }
     }
@@ -1161,9 +1250,9 @@
     if (extra.odd_jobs) hh.cooldowns.odd_jobs = now + ODD_JOBS_DAYS * DAY;
   }
 
-  // An effect's companion value (a deal's "factor", a gift's "amount") comes before its main key ("buy",
-  // "gift_from") in the effects dict; the main key takes it from here. Kept on the agent, between keys only.
-  const COMPANIONS = ["factor", "amount"];
+  // An effect's companion value (a deal's "factor" and "renovate", a gift's "amount") comes before its main key
+  // ("buy", "gift_from") in the effects dict; the main key takes it from here. Kept on the agent, between keys only.
+  const COMPANIONS = ["factor", "amount", "renovate"];
 
   function _take(agent, key, dflt) {
     const held = agent.effect_args || {};
@@ -1187,7 +1276,8 @@
       pay_household(sim, hh, -val);
     } else if (key === "buy") {
       const home = sim.homes.get(val);
-      move_household(sim, hh, val, buys(home) ? "buy" : "rent", _take(agent, "factor", 1.0), agent);
+      const factor = _take(agent, "factor", 1.0), cost = _take(agent, "renovate", 0);
+      if (move_household(sim, hh, val, buys(home) ? "buy" : "rent", factor, agent) && cost) renovate(sim, hh, cost);
     } else if (key === "withdraw") {
       hold(sim, sim.homes.get(val), null, UNDER_OFFER_DAYS * DAY);
     } else if (key === "release") {
@@ -1251,21 +1341,22 @@
 
   G.housing = {
     TIERS, STAGES, STAGE_COMFORT, LANDLORD, LANDLORD_FLOOR, LANDLORD_RESTORE, VACANT_DECAY, MARKET_FLOOR,
-    WINTER_DECAY, CROWD_DECAY, EMERGENCY_DECAY, PROPERTY_TAX, SALE_FEE, MOVING_COST, CALLOUT, RENO_FACTOR,
-    RESERVE_WEEKS, MOVE_GAP_DAYS, CAR_SALE, EMERGENCY_DAYS, LIVING_PER_PERSON, LIVING_PER_RETIREE, ARREARS_PROGRESS,
-    HARDSHIP_REPAY, FORCED_CROWDING, STUFF_DAYS, GRACE_DAYS, GRACE_HOLD_DAYS, ODD_JOBS_DAYS, ODD_JOBS_PAY,
-    STUFF_PRICE, EMERGENCY_KINDS, EMERGENCY_TEXT, DAY, MOVE_VAN_MINUTES, LANDLORD_WORKS_MINUTES, UNDER_OFFER_DAYS,
-    OFFER_HOLD_MINUTES, SETTLE_DAMAGE, EMERGENCY_STAGE_P, WINTER_EMERGENCY, DAMP_HEALTH, DAMP_CHILL, CHILL,
-    STAGE_REPUTATION, KEPT_BIG_HOUSE_PRIDE, STAGE_NEWS, EMERGENCY_NEWS, EMERGENCY_NAME, ORDINALS, HOME_SPECS,
+    NEWS_SETTLE_DAYS, LANDLORD_SELLS_DAYS, WINTER_DECAY, CROWD_DECAY, EMERGENCY_DECAY, PROPERTY_TAX, SALE_FEE,
+    MOVING_COST, CALLOUT, RENO_FACTOR, RESERVE_WEEKS, MOVE_GAP_DAYS, DOWNSIZE_SHARE, DOWNSIZE_CONDITION,
+    SPARE_BEDROOMS, CAR_SALE, EMERGENCY_DAYS, LIVING_PER_PERSON, LIVING_PER_RETIREE, ARREARS_PROGRESS, HARDSHIP_REPAY,
+    FORCED_CROWDING, STUFF_DAYS, GRACE_DAYS, GRACE_HOLD_DAYS, ODD_JOBS_DAYS, ODD_JOBS_PAY, STUFF_PRICE,
+    EMERGENCY_KINDS, EMERGENCY_TEXT, DAY, MOVE_VAN_MINUTES, LANDLORD_WORKS_MINUTES, RENOVATE_WORKS_MINUTES,
+    UNDER_OFFER_DAYS, OFFER_HOLD_MINUTES, SETTLE_DAMAGE, EMERGENCY_STAGE_P, WINTER_EMERGENCY, DAMP_HEALTH, DAMP_CHILL,
+    CHILL, STAGE_REPUTATION, KEPT_BIG_HOUSE_PRIDE, STAGE_NEWS, EMERGENCY_NEWS, EMERGENCY_NAME, ORDINALS, HOME_SPECS,
     LOT_CONDITION, START_OWNER, START_LISTING, ACTIVITIES_EXTRA, Home, Lot, build_homes, build_lots, init, _int,
     round50, stamp_of, stage_of, stage_name, condition_of, value, sale_proceeds, property_tax, listed, hold, release,
     adults, residents, crowded, funds, tenure, weekly_cost, comfort, worth_parts, net_worth, household_name,
     household_summary, pay_household, round10, retired, weekly_income, bills, living, commute, buys, housing_cost,
-    weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates, cheapest_rental,
-    owner_occupied, lot_homes, hardship_rent, _one, _hh_lower, _hh_possessive, district_name, town_homes_json,
-    town_housing_json, lots_json, homes_json, possessions_json, fork_you, agent_page_fields, market_json, home_page,
-    _members, available, too_late, move_household, forced_move, weekly_charges, _stage_news, _change_condition,
-    nightly, tick, fix_emergency, on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale,
-    afford_score,
+    weekly_outgo, fits, reno_cost, net_cost, affordable, is_upgrade, vacancies, hunt_candidates, _arrival, outgrown,
+    downsize_candidates, house_drought, cheapest_rental, owner_occupied, lot_homes, hardship_rent, _one, _hh_lower,
+    _hh_possessive, district_name, town_homes_json, town_housing_json, lots_json, homes_json, possessions_json,
+    fork_you, agent_page_fields, market_json, home_page, _members, available, too_late, move_household, renovate,
+    forced_move, weekly_charges, _stage_news, _just_moved_in, _change_condition, nightly, tick, fix_emergency,
+    on_death, apply_extra, COMPANIONS, apply_effect, activity_gain_scale, afford_score,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));
