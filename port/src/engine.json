@@ -1,5 +1,5 @@
 {
-  "engine": ["py.js", "rng.js", "clock.js", "agent.js", "town.js", "transit.js", "travel.js", "chronicle.js",
+  "engine": ["py.js", "rng.js", "clock.js", "agent.js", "town.js", "region.js", "transit.js", "travel.js", "chronicle.js",
              "stats.js", "housing.js", "forks.js", "housing_forks.js", "cast.js", "sim.js"],
   "host": ["host.js"],
   "guard": ["guard.js"],

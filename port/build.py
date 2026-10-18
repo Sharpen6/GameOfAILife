@@ -26,6 +26,7 @@ from pathlib import Path
 PORT = Path(__file__).resolve().parent
 ROOT = PORT.parent
 SRC = PORT / "src"
+REGION = ROOT / "gameofailife" / "data" / "region.json"  # inlined as GameOfAILife.REGION_DATA (region.md 9)
 INDEX = ROOT / "client" / "index.html"
 OUT = PORT / "dist" / "millbrook.html"
 
@@ -102,6 +103,16 @@ def _style(text: str, name: str) -> str:
     return f'<style data-href="{name}">\n' + re.sub(r"</(style)", r"<\\/\1", text, flags=re.IGNORECASE) + "\n</style>"
 
 
+def region_data_script(path: Path = REGION) -> str:
+    """The region data as a plain inline script (no data-src: it is data, not one of the page's sources), run
+    before the port's scripts so region.js finds `GameOfAILife.REGION_DATA`."""
+    data = json.dumps(json.loads(path.read_text(encoding="utf-8")), separators=(",", ":"), ensure_ascii=False)
+    if "<!--" in data or "</" in data:
+        raise BuildError(f"{path} contains '<!--' or '</', which would change how a browser reads an inline script")
+    return ("<script>\n(globalThis.GameOfAILife || (globalThis.GameOfAILife = {})).REGION_DATA = " + data
+            + ";\n</script>")
+
+
 def port_scripts() -> list[str]:
     """The port's own scripts, in load order: guard.js, the engine, LocalHost and page.js."""
     spec = json.loads((SRC / "engine.json").read_text(encoding="utf-8"))
@@ -119,7 +130,8 @@ def build(index: Path = INDEX, out: Path = OUT, client_dir: Path | None = None) 
     found = _Assets(text).assets
     if not any(kind == "script" for kind, *_ in found):
         raise BuildError(f"{index} lists no <script src>: there is no client to inline")
-    port = "\n".join(_script((SRC / name).read_text(encoding="utf-8"), f"port/{name}") for name in port_scripts())
+    port = "\n".join([region_data_script()] + [_script((SRC / name).read_text(encoding="utf-8"), f"port/{name}")
+                                                for name in port_scripts()])
     first_script = min(start for kind, _, start, _ in found if kind == "script")
     pieces, at = [], 0
     for kind, url, start, end in sorted(found, key=lambda t: t[2]):
