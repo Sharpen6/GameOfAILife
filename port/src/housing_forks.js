@@ -26,7 +26,8 @@
   const DOWNSIZE_RETIRED = 0.35; // ... and how much more inviting it is once every adult is retired
   const DOWNSIZE_DRIFT = 0.05; // ... and this much more for every 30 days beyond DOWNSIZE_AFTER_DAYS in the home ...
   const DOWNSIZE_DRIFT_MAX = 0.4; // ... up to this: the spare rooms weigh more as the months go by
-  const DOWNSIZE_SETTLE = 120 * DAY; // after downsizing, a household doesn't look at the market again for this long
+  const DOWNSIZE_SETTLE = 120 * DAY; // after downsizing, a household doesn't look at the market again for this long ...
+  const DOWNSIZE_NO_BIGGER = 360 * DAY; // ... nor at a home with more bedrooms for this long, unless it gets crowded
   const DOWNSIZE_STAY = 60 * DAY; // a household that decides to stay put isn't asked about downsizing for this long
   const HELP_MARGIN = 300; // asking a friend for the deficit plus this ...
   const HELP_RICH = 3; // ... of a friend with at least this many times that put by
@@ -108,8 +109,10 @@
   // --- house_hunt (major) -----------------------------------------------------------
 
   // A better home the household can afford is on the market: buy (or rent) the best, haggle for it, take the
-  // cheaper one (or keep looking), or stay put. With nothing better on the market, an owner household that has
-  // outgrown its home gets the downsizing variant instead, when a smaller home will do (`_downsize_hunt`).
+  // cheaper one (or keep looking), or stay put. A run-down home is bought with its renovation, done the day it is
+  // bought (the affordability gate already counts it), so it is never derelict in use. With nothing better on the
+  // market, an owner household that has outgrown its home gets the downsizing variant instead, when a smaller home
+  // will do (`_downsize_hunt`).
   function house_hunt_fork(sim, agent) {
     const housing = H();
     const hh = sim.households.get(agent.household_id);
@@ -130,9 +133,10 @@
     const crowded = housing.crowded(sim, hh);
     const funds = housing.funds(sim, hh);
     const outgo = housing.weekly_outgo(sim, hh);
-    const cond = {}, worth = {};
+    const cond = {}, worth = {}, reno = {};
     for (const h of cands) cond[h.id] = housing.condition_of(sim, h.id);
     for (const h of cands) worth[h.id] = housing.value(sim, h.id);
+    for (const h of cands) reno[h.id] = housing.buys(h) ? housing.reno_cost(sim, h.id) : 0;
     const a = maxBy(cands, h => [TIERS[h.tier].rank, worth[h.id], cond[h.id], h.id]);
     const rest = cands.filter(h => h !== a);
     const b = rest.length ? minBy(rest, h => [housing.net_cost(sim, hh, h.id), cond[h.id], h.id]) : null;
@@ -144,7 +148,10 @@
     function label(h, cheaper) {
       const the = cheaper ? "the cheaper " : "";
       const tier = TIERS[h.tier].label;
-      if (housing.buys(h)) return `Buy ${the}${h.name} (${tier}${_stage_note(sim, h.id)}) for $${commas(worth[h.id])}`;
+      if (housing.buys(h)) {
+        const done_up = reno[h.id] ? ` and do it up ($${commas(reno[h.id])})` : "";
+        return `Buy ${the}${h.name} (${tier}${_stage_note(sim, h.id)}) for $${commas(worth[h.id])}${done_up}`;
+      }
       return `Move into ${the}${h.name} (${tier}${_stage_note(sim, h.id)}) for $${h.rent}/week`;
     }
 
@@ -157,18 +164,22 @@
       } else {
         tags = { family: 0.6, adventure: 0.4, thrift: rises(h) ? -0.6 : -0.2 };
       }
-      return new Option(label(h, cheaper), [["move_house", h.place]], { cost: Math.max(0, housing.net_cost(sim, hh, h.id)),
-        base: (cheaper ? 0.30 : 0.35) + bonus(h), tags, gains: { fun: cheaper ? 15 : 20 },
-        outcomes: _move_outcomes(sim, hh, agent, h.id, cheaper, rises(h) && !cheaper),
-        extra: { move: h.id, how }, household_pays: true, charge: false });
+      const extra = reno[h.id] ? { move: h.id, how, renovate: reno[h.id] } : { move: h.id, how };
+      return new Option(label(h, cheaper), [["move_house", h.place]],
+        { cost: Math.max(0, housing.net_cost(sim, hh, h.id)) + reno[h.id],
+          base: (cheaper ? 0.30 : 0.35) + bonus(h), tags, gains: { fun: cheaper ? 15 : 20 },
+          outcomes: _move_outcomes(sim, hh, agent, h.id, cheaper, rises(h) && !cheaper),
+          extra, household_pays: true, charge: false });
     }
 
     const best = move(a, false);
+    const deal = reno[a.id] ? { renovate: reno[a.id] } : {}; // the deal's renovation, a companion of "buy"
     let offer, haggle_label, cost, says;
     if (housing.buys(a)) {
       offer = housing._int(worth[a.id] * 0.9);
-      haggle_label = `Offer $${commas(offer)} for ${a.name} and see what the seller says`;
-      cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id];
+      const done_up = reno[a.id] ? ` (and $${commas(reno[a.id])} to do it up)` : "";
+      haggle_label = `Offer $${commas(offer)} for ${a.name}${done_up} and see what the seller says`;
+      cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id] + reno[a.id];
       says = ["The seller accepts the offer", "The seller meets them halfway", "Another buyer snaps it up first",
         "The seller turns the offer down"];
     } else {
@@ -182,8 +193,8 @@
     // answer is never about a home somebody else took meanwhile; a refusal hands it back to the market.
     const haggle = new Option(haggle_label, [["viewing", a.place]], { cost: Math.max(0, _whole(cost)), base: 0.30 + bonus(a),
       tags: { thrift: 0.5, adventure: 0.4, diligence: -0.1 }, gains: { fun: 10 },
-      outcomes: [new Outcome("offer_accepted", says[0], 0.40, +1, { factor: 0.9, buy: a.id }, "deal"),
-        new Outcome("meet_halfway", says[1], 0.35, +1, { factor: 0.95, buy: a.id }, "deal"),
+      outcomes: [new Outcome("offer_accepted", says[0], 0.40, +1, { factor: 0.9, ...deal, buy: a.id }, "deal"),
+        new Outcome("meet_halfway", says[1], 0.35, +1, { factor: 0.95, ...deal, buy: a.id }, "deal"),
         new Outcome("outbid", says[2], 0.25, -1, { withdraw: a.id, fun: -10 }, "deal"),
         new Outcome("refused", says[3], 1.0, 0, { fun: -4, release: a.id }, "deal")],
       extra: { hold: a.id }, household_pays: true, charge: false });
@@ -213,10 +224,11 @@
   // house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and lived there at least
   // DOWNSIZE_AFTER_DAYS, when nothing better is on the market: sell up and buy the smaller home `housing_trouble`
   // would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not asked again for
-  // DOWNSIZE_STAY). Either move settles the household for DOWNSIZE_SETTLE. A move that isn't available (no
-  // smaller home for sale, or no rental the household can carry) gives its slot to "decide another time"; with
-  // neither there is no fork. Selling up is the thrifty choice; it gets easier to make once everyone is retired
-  // and with every month (DOWNSIZE_DRIFT) the household has lived there, so it comes now and then, not for all.
+  // DOWNSIZE_STAY). Either move, once it goes through, settles the household for DOWNSIZE_SETTLE and keeps it out
+  // of bigger homes for DOWNSIZE_NO_BIGGER. A move that isn't available (no smaller home for sale, or no rental
+  // the household can carry) gives its slot to "decide another time"; with neither there is no fork. Selling up
+  // is the thrifty choice; it gets easier to make once everyone is retired and with every month (DOWNSIZE_DRIFT)
+  // the household has lived there, so it comes now and then, not for all.
   function _downsize_hunt(sim, agent, hh) {
     const housing = H();
     const now = sim.clock.tick;
@@ -236,7 +248,9 @@
       tags: { family: 0.2, diligence: -0.2 }, gains: { fun: 5 },
       outcomes: people.length > 1 ? [new Outcome("talk", "A long talk about the future", 0.4, +1, { fun: 4 })] : [],
       extra: { hh_cooldown: 7 * DAY } });
-    for (const opt of moves) if (opt) opt.extra.hh_cooldown = DOWNSIZE_SETTLE;
+    for (const opt of moves) {
+      if (opt) opt.extra.settle = { house_hunt: DOWNSIZE_SETTLE, bigger_home: DOWNSIZE_NO_BIGGER };
+    }
     const look = _keep_looking("Keep looking for the right smaller place", 0.1, 14 * DAY);
     const stay = new Option(`Stay in ${cur.name}: it's home`, [["relax_home", "home"]], { base: 0.15,
       tags: { family: 0.3, thrift: -0.3, adventure: -0.4 }, gains: { fun: 10 },
@@ -245,7 +259,8 @@
       extra: { hh_cooldown: DOWNSIZE_STAY } });
     const n = housing.residents(sim, hh);
     const whom = n === 1 ? "just you" : `the ${n} of you`;
-    const why = retired ? "now that you are retired" : `with ${cur.bedrooms} bedrooms for ${whom}`;
+    const retiring = retired && (cur.arrived === null || !cur.arrived.retired); // else they have shrunk
+    const why = retiring ? "now that you are retired" : `with ${cur.bedrooms} bedrooms for ${whom}`;
     const question = `Your household has $${commas(_whole(housing.funds(sim, hh)))} put by. You own ${cur.name}, `
       + `worth about $${commas(housing.value(sim, cur.id))}: more home than you need ${why}. Nothing better is on the `
       + "market, but a smaller place is. Do you downsize?";
@@ -536,7 +551,7 @@
   G.housing_forks = {
     MAJOR_KINDS, NO_CANDIDATE_RETRY, HUNT_COOLDOWN, UPKEEP_COOLDOWN, REPAIR_COOLDOWN, TROUBLE_COOLDOWN, RENT_CUT,
     DOWNSIZE_AFTER_DAYS, DOWNSIZE_BASE, DOWNSIZE_RETIRED, DOWNSIZE_DRIFT, DOWNSIZE_DRIFT_MAX, DOWNSIZE_SETTLE,
-    DOWNSIZE_STAY, HELP_MARGIN, HELP_RICH,
+    DOWNSIZE_NO_BIGGER, DOWNSIZE_STAY, HELP_MARGIN, HELP_RICH,
     REPAIR_FRIEND, HELP_FRIEND, HANDYMAN, PIZZA, BUILDERS_WORKS, EMERGENCY_WORKS, UPKEEP_BELOW, FRESH_DAYS,
     FRESH_BELOW, TRADE, WAIT, TROUBLE, LOOKS, GOSSIP, _hh_window, _ready, _first, _stage_note, _has_kids, _friend,
     _partner, _move_outcomes, house_hunt_fork, _keep_looking, _downsize_hunt, _whole, upkeep_fork, repair_fork,

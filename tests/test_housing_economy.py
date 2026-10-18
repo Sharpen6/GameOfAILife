@@ -21,6 +21,12 @@ SEEDS = (1, 2, 3)
 FUNDS_FLOOR = -2500
 MOVES = (10, 150)
 LATE_PURCHASE_DAY = 150  # the market keeps moving: some household still buys a home after this day
+# ... and from FLATS_ONLY_FROM to LATE_PURCHASE_DAY there is never a stretch longer than FLATS_ONLY_MAX_DAYS with only
+# flats on the market. The houses that come up are the ones households outgrow, sell on downsizing or leave on a
+# death; a closed town has only so many, so the limit is measured to LATE_PURCHASE_DAY, not for the whole run (the
+# report shows the whole run).
+FLATS_ONLY_FROM = 60
+FLATS_ONLY_MAX_DAYS = 30
 
 
 def soak(seed: int, days: int) -> dict:
@@ -31,7 +37,7 @@ def soak(seed: int, days: int) -> dict:
     out = {"seed": seed, "days": days, "forks": collections.Counter(), "bad_forks": [], "moves": 0, "purchases": 0,
            "first_purchase_day": None, "last_purchase_day": None, "forced": 0, "hardship": 0, "emergencies": 0,
            "stuff": collections.Counter(), "max_arrears": 0, "min_monday_funds": None, "house_days": 0,
-           "shabby_days": 0, "in_the_red": 0}
+           "shabby_days": 0, "in_the_red": 0, "flats_only": []}
     director = sim.director
 
     def watch(agent, fork):
@@ -58,6 +64,7 @@ def soak(seed: int, days: int) -> dict:
         return moved
 
     housing.move_household = counted  # the engine and the forks reach it through the module
+    open_run = None  # the last hour of the stretch still running
     try:
         end = sim.clock.tick + days * MINUTES_PER_DAY
         while sim.clock.tick < end:
@@ -76,6 +83,17 @@ def soak(seed: int, days: int) -> dict:
             m = sim.clock.minute_of_day
             if m % 60 == 0:
                 out["max_arrears"] = max([out["max_arrears"]] + [hh.arrears for hh in sim.households.values()])
+                day = sim.clock.tick / MINUTES_PER_DAY
+                if day > FLATS_ONLY_FROM:  # stretches with nothing but flats on the market, [first day, last day]
+                    if all(h.tier == "flat" for h in housing.vacancies(sim)):
+                        runs = out["flats_only"]
+                        if runs and runs[-1][1] == open_run:
+                            runs[-1][1] = day
+                        else:
+                            runs.append([day, day])
+                        open_run = day
+                    else:
+                        open_run = None
             if m == 0:
                 if sim.clock.weekday == 0:
                     lowest = min(housing.funds(sim, hh) for hh in sim.households.values()
@@ -92,14 +110,23 @@ def soak(seed: int, days: int) -> dict:
     return out
 
 
+def flats_only_days(r: dict, until: float | None = None) -> float:
+    """The longest stretch with only flats on the market, in days, counting up to day `until` when given."""
+    return max([min(b, until or b) - a for a, b in r["flats_only"] if until is None or a < until], default=0.0)
+
+
 def report(r: dict, seconds: float) -> str:
     share = r["shabby_days"] / r["house_days"] if r["house_days"] else 0.0
+    last = r["flats_only"][-1] if r["flats_only"] else None
     return (f"seed {r['seed']}, {r['days']} days ({seconds:.0f}s): moves {r['moves']}, purchases {r['purchases']} "
             f"(first on day {r['first_purchase_day']}, last on day {r['last_purchase_day']}), forced moves "
             f"{r['forced']}, hardship episodes {r['hardship']}, emergencies {r['emergencies']}, owner-occupied "
             f"house-days at stage 2+ {share:.1%}, in the red {r['in_the_red']}, max arrears {r['max_arrears']}, "
             f"lowest Monday funds ${r['min_monday_funds']:,.0f}, belongings sales {sum(r['stuff'].values())}, "
-            f"housing forks {dict((k, v) for k, v in r['forks'].items() if k in ('house_hunt', 'upkeep', 'repair', 'housing_trouble'))}")
+            f"housing forks {dict((k, v) for k, v in r['forks'].items() if k in ('house_hunt', 'upkeep', 'repair', 'housing_trouble'))}, "
+            f"longest flats-only market after day {FLATS_ONLY_FROM} {flats_only_days(r, LATE_PURCHASE_DAY):.1f} days "
+            f"to day {LATE_PURCHASE_DAY}, {flats_only_days(r):.1f} in all"
+            + (f" (the last from day {last[0]:.1f} to day {last[1]:.1f})" if last else ""))
 
 
 @unittest.skipUnless(SLOW, "the long housing soak runs with GOAL_SLOW=1 (SOAK_DAYS sets its length)")
@@ -121,6 +148,8 @@ class HousingEconomyTest(unittest.TestCase):
                 self.assertLess(r["first_purchase_day"], 30)
                 if DAYS > LATE_PURCHASE_DAY + 30:  # homes keep changing hands: the market never freezes for good
                     self.assertGreater(r["last_purchase_day"], LATE_PURCHASE_DAY)
+                if DAYS >= LATE_PURCHASE_DAY:  # nor is it only flats for long
+                    self.assertLessEqual(flats_only_days(r, LATE_PURCHASE_DAY), FLATS_ONLY_MAX_DAYS, r["flats_only"])
                 self.assertGreaterEqual(r["moves"], MOVES[0] * DAYS // 360)  # the gate's 10 a year, pro rata
                 self.assertLessEqual(r["moves"], MOVES[1])
 

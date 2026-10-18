@@ -34,7 +34,8 @@ DOWNSIZE_BASE = 0.1  # house_hunt's downsizing variant: the base of selling up a
 DOWNSIZE_RETIRED = 0.35  # ... and how much more inviting it is once every adult is retired
 DOWNSIZE_DRIFT = 0.05  # ... and this much more for every 30 days beyond DOWNSIZE_AFTER_DAYS in the home ...
 DOWNSIZE_DRIFT_MAX = 0.4  # ... up to this: the spare rooms weigh more as the months go by
-DOWNSIZE_SETTLE = 120 * DAY  # after downsizing, a household doesn't look at the market again for this long
+DOWNSIZE_SETTLE = 120 * DAY  # after downsizing, a household doesn't look at the market again for this long ...
+DOWNSIZE_NO_BIGGER = 360 * DAY  # ... nor at a home with more bedrooms for this long, unless it gets crowded
 DOWNSIZE_STAY = 60 * DAY  # a household that decides to stay put isn't asked about downsizing again for this long
 HELP_MARGIN = 300  # asking a friend for the deficit plus this ...
 HELP_RICH = 3  # ... of a friend with at least this many times that put by
@@ -124,8 +125,10 @@ def _move_outcomes(sim: Simulation, hh: Household, agent: Agent, home_id: str, b
 
 def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     """A better home the household can afford is on the market: buy (or rent) the best, haggle for it, take the
-    cheaper one (or keep looking), or stay put. With nothing better on the market, an owner household that has
-    outgrown its home gets the downsizing variant instead, when a smaller home will do (`_downsize_hunt`)."""
+    cheaper one (or keep looking), or stay put. A run-down home is bought with its renovation, done the day it is
+    bought (the affordability gate already counts it), so it is never derelict in use. With nothing better on the
+    market, an owner household that has outgrown its home gets the downsizing variant instead, when a smaller home
+    will do (`_downsize_hunt`)."""
     hh = sim.households[agent.household_id]
     now = sim.clock.tick
     if (not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or hh.arrears
@@ -147,6 +150,7 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     outgo = housing.weekly_outgo(sim, hh)
     cond = {h.id: housing.condition_of(sim, h.id) for h in cands}
     worth = {h.id: housing.value(sim, h.id) for h in cands}
+    reno = {h.id: housing.reno_cost(sim, h.id) if housing.buys(h) else 0 for h in cands}
     a = max(cands, key=lambda h: (TIERS[h.tier]["rank"], worth[h.id], cond[h.id], h.id))
     rest = [h for h in cands if h is not a]
     b = min(rest, key=lambda h: (housing.net_cost(sim, hh, h.id), cond[h.id], h.id)) if rest else None
@@ -161,7 +165,8 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
         the = "the cheaper " if cheaper else ""
         tier = TIERS[h.tier]["label"]
         if housing.buys(h):
-            return f"Buy {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${worth[h.id]:,}"
+            done_up = f" and do it up (${reno[h.id]:,})" if reno[h.id] else ""
+            return f"Buy {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${worth[h.id]:,}{done_up}"
         return f"Move into {the}{h.name} ({tier}{_stage_note(sim, h.id)}) for ${h.rent}/week"
 
     def move(h, cheaper: bool) -> Option:
@@ -172,16 +177,20 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
                 tags["diligence"] = 0.3
         else:
             tags = {"family": 0.6, "adventure": 0.4, "thrift": -0.6 if rises(h) else -0.2}
-        return Option(label(h, cheaper), [("move_house", h.place)], cost=max(0, housing.net_cost(sim, hh, h.id)),
+        extra = {"move": h.id, "how": how, "renovate": reno[h.id]} if reno[h.id] else {"move": h.id, "how": how}
+        return Option(label(h, cheaper), [("move_house", h.place)],
+                      cost=max(0, housing.net_cost(sim, hh, h.id)) + reno[h.id],
                       base=(0.30 if cheaper else 0.35) + bonus(h), tags=tags, gains={"fun": 15 if cheaper else 20},
                       outcomes=_move_outcomes(sim, hh, agent, h.id, cheaper, rises(h) and not cheaper),
-                      extra={"move": h.id, "how": how}, household_pays=True, charge=False)
+                      extra=extra, household_pays=True, charge=False)
 
     best = move(a, False)
+    deal = {"renovate": reno[a.id]} if reno[a.id] else {}  # the deal's renovation, a companion of "buy"
     if housing.buys(a):
         offer = housing._int(worth[a.id] * 0.9)
-        haggle_label = f"Offer ${offer:,} for {a.name} and see what the seller says"
-        cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id]
+        done_up = f" (and ${reno[a.id]:,} to do it up)" if reno[a.id] else ""
+        haggle_label = f"Offer ${offer:,} for {a.name}{done_up} and see what the seller says"
+        cost = housing.net_cost(sim, hh, a.id) - 0.1 * worth[a.id] + reno[a.id]
         says = ("The seller accepts the offer", "The seller meets them halfway", "Another buyer snaps it up first",
                 "The seller turns the offer down")
     else:
@@ -194,8 +203,10 @@ def house_hunt_fork(sim: Simulation, agent: Agent) -> Fork | None:
     # answer is never about a home somebody else took meanwhile; a refusal hands it back to the market.
     haggle = Option(haggle_label, [("viewing", a.place)], cost=max(0, _whole(cost)), base=0.30 + bonus(a),
                     tags={"thrift": 0.5, "adventure": 0.4, "diligence": -0.1}, gains={"fun": 10},
-                    outcomes=[Outcome("offer_accepted", says[0], 0.40, +1, {"factor": 0.9, "buy": a.id}, group="deal"),
-                              Outcome("meet_halfway", says[1], 0.35, +1, {"factor": 0.95, "buy": a.id}, group="deal"),
+                    outcomes=[Outcome("offer_accepted", says[0], 0.40, +1, {"factor": 0.9, **deal, "buy": a.id},
+                                      group="deal"),
+                              Outcome("meet_halfway", says[1], 0.35, +1, {"factor": 0.95, **deal, "buy": a.id},
+                                      group="deal"),
                               Outcome("outbid", says[2], 0.25, -1, {"withdraw": a.id, "fun": -10}, group="deal"),
                               Outcome("refused", says[3], 1.0, 0, {"fun": -4, "release": a.id}, group="deal")],
                     extra={"hold": a.id}, household_pays=True, charge=False)
@@ -227,10 +238,11 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
     """house_hunt for an owner household that has outgrown its home (`housing.outgrown`) and lived there at least
     DOWNSIZE_AFTER_DAYS, when nothing better is on the market: sell up and buy the smaller home `housing_trouble`
     would offer, sell up and rent the cheapest fitting home to let, keep looking, or stay (not asked again for
-    DOWNSIZE_STAY). Either move settles the household for DOWNSIZE_SETTLE. A move that isn't available (no
-    smaller home for sale, or no rental the household can carry) gives its slot to "decide another time"; with
-    neither there is no fork. Selling up is the thrifty choice; it gets easier to make once everyone is retired
-    and with every month (DOWNSIZE_DRIFT) the household has lived there, so it comes now and then, not for all."""
+    DOWNSIZE_STAY). Either move, once it goes through, settles the household for DOWNSIZE_SETTLE and keeps it out
+    of bigger homes for DOWNSIZE_NO_BIGGER. A move that isn't available (no smaller home for sale, or no rental
+    the household can carry) gives its slot to "decide another time"; with neither there is no fork. Selling up
+    is the thrifty choice; it gets easier to make once everyone is retired and with every month (DOWNSIZE_DRIFT)
+    the household has lived there, so it comes now and then, not for all."""
     now = sim.clock.tick
     cur = sim.homes[hh.home_id]
     people = housing.adults(sim, hh)
@@ -252,7 +264,7 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
                    else [], extra={"hh_cooldown": 7 * DAY})
     for opt in moves:
         if opt:
-            opt.extra["hh_cooldown"] = DOWNSIZE_SETTLE
+            opt.extra["settle"] = {"house_hunt": DOWNSIZE_SETTLE, "bigger_home": DOWNSIZE_NO_BIGGER}
     look = _keep_looking("Keep looking for the right smaller place", 0.1, 14 * DAY)
     stay = Option(f"Stay in {cur.name}: it's home", [("relax_home", "home")], base=0.15,
                   tags={"family": 0.3, "thrift": -0.3, "adventure": -0.4}, gains={"fun": 10},
@@ -261,7 +273,8 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household) -> Fork | None:
                   extra={"hh_cooldown": DOWNSIZE_STAY})
     n = housing.residents(sim, hh)
     whom = "just you" if n == 1 else f"the {n} of you"
-    why = "now that you are retired" if retired else f"with {cur.bedrooms} bedrooms for {whom}"
+    retiring = retired and (cur.arrived is None or not cur.arrived["retired"])  # else they have shrunk
+    why = "now that you are retired" if retiring else f"with {cur.bedrooms} bedrooms for {whom}"
     question = (f"Your household has ${_whole(housing.funds(sim, hh)):,} put by. You own {cur.name}, worth about "
                 f"${housing.value(sim, cur.id):,}: more home than you need {why}. Nothing better is on the market, "
                 f"but a smaller place is. Do you downsize?")

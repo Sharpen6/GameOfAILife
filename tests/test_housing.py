@@ -142,6 +142,14 @@ def lonely(sim, agent_id: str) -> None:
     agent.relationships = {k: v for k, v in agent.relationships.items() if k in members}
 
 
+def gone(sim, agent_id: str) -> None:
+    """A character dies, as far as the household is concerned (sim._die without the rest)."""
+    agent = sim.agents[agent_id]
+    agent.alive = False
+    hh = sim.households[agent.household_id]
+    hh.member_ids = [m for m in hh.member_ids if m != agent_id]
+
+
 def hide(sim, *home_ids: str, days: int = 30) -> None:
     """Take listings off the market for a while (as if under offer)."""
     for hid in home_ids:
@@ -213,6 +221,20 @@ class AffordabilityTest(unittest.TestCase):
         sim.homes["cedar_court_2a"].owner = "rosen"  # a crowded owner may still rent somewhere bigger
         self.assertTrue(housing.is_upgrade(sim, hh["rosen"], "elm_court_2b"))
 
+    def test_no_more_bedrooms_for_retirees_or_after_downsizing(self):
+        sim, hh = self.sim, self.sim.households
+        set_funds(sim, "segal", 60000)  # retired, in a two-bedroom house
+        for home_id in ("river_28", "main_55", "park_66"):
+            self.assertTrue(housing.affordable(sim, hh["segal"], home_id))
+            self.assertFalse(housing.is_upgrade(sim, hh["segal"], home_id), home_id)
+        peretz = hh["peretz"]
+        set_funds(sim, "peretz", 60000)
+        self.assertIn("river_28", [h.id for h in housing.hunt_candidates(sim, peretz)])  # three bedrooms for two
+        peretz.cooldowns["bigger_home"] = sim.clock.tick + DAY  # just downsized
+        self.assertEqual([h.id for h in housing.hunt_candidates(sim, peretz)], ["river_12", "main_39"])  # two
+        sim.clock.tick += DAY
+        self.assertIn("river_28", [h.id for h in housing.hunt_candidates(sim, peretz)])
+
     def test_owners_never_sell_up_to_rent(self):
         """The first evening: the Cohens and the Mizrahis buy, and 20 and 13 Main Street go back to let. Both
         are worth 15% more than the Levis' and the Elbazes' own homes, but an owner who isn't crowded looks
@@ -276,6 +298,61 @@ class MoveTest(unittest.TestCase):
         self.assertEqual([p[0] for p in sim.plans], ["yossi"])  # not the decider, not the busy child
         self.assertEqual([r["event"] for r in old.history], ["left"])
         self.assertTrue(any("Moved to 28 River Road." in m for m in sim.agents["yossi"].memory))
+
+    def test_the_home_records_the_household_as_it_moved_in(self):
+        sim, cohen = self.sim, self.sim.households["cohen"]
+        self.assertIsNone(sim.homes["main_20"].arrived)  # the starting cast
+        self.assertTrue(housing.move_household(sim, cohen, "river_28", "buy"))
+        self.assertEqual(sim.homes["river_28"].arrived, {"residents": 3, "retired": False})
+        self.assertIsNone(sim.homes["main_20"].arrived)
+        self.assertTrue(housing.move_household(sim, sim.households["friedman"], "river_12", "buy"))
+        self.assertEqual(sim.homes["river_12"].arrived, {"residents": 2, "retired": True})
+        self.assertIsNone(sim.homes["park_78"].arrived)  # the record goes with the household
+
+    def test_a_landlord_sells_a_let_house_when_no_house_is_for_sale(self):
+        """The four houses for sale bar one go on day 20; two weeks later the Cohens buy the last one, and the
+        landlord puts the house they rented on the market instead of letting it again. Once that one is bought, the
+        next let house left empty is let again, until two more weeks pass without a house for sale."""
+        sim = self.sim
+        sim.clock.tick = at(20, 18, 30)
+        for hh_id, home_id in (("weiss", "river_12"), ("shapiro", "main_55"), ("peretz", "park_66"),
+                               ("amar", "park_104")):
+            set_funds(sim, hh_id, 60000)
+            self.assertTrue(housing.move_household(sim, sim.households[hh_id], home_id, "buy"))
+        self.assertEqual([h.id for h in housing.vacancies(sim, "for_sale") if h.tier != "flat"], ["river_28"])
+        sim.clock.tick += housing.LANDLORD_SELLS_DAYS * DAY - 1
+        self.assertFalse(housing.house_drought(sim, "river_28"))  # a house was bought less than 14 days ago
+        sim.clock.tick += 1
+        self.assertFalse(housing.house_drought(sim))  # 28 River Road is for sale
+        self.assertTrue(housing.house_drought(sim, "river_28"))  # and nothing else
+        self.assertTrue(housing.move_household(sim, sim.households["cohen"], "river_28", "buy"))
+        main_20 = sim.homes["main_20"]
+        self.assertEqual((main_20.owner, main_20.listing, main_20.household), ("market", "for_sale", None))
+        self.assertEqual(sim.texts("home_listed", place="main_20"),
+                         [f"Millbrook Homes puts 20 Main Street up for sale (${housing.value(sim, 'main_20'):,})."])
+        self.assertIn("main_20", [h.id for h in housing.vacancies(sim, "for_sale")])
+        self.assertFalse(housing.house_drought(sim))
+        set_funds(sim, "gold", 60000)
+        self.assertTrue(housing.move_household(sim, sim.households["gold"], "main_20", "buy"))
+        self.assertTrue(housing.move_household(sim, sim.households["golan"], "main_39", "rent"))
+        main_47 = sim.homes["main_47"]
+        self.assertEqual((main_47.owner, main_47.listing), ("landlord", "for_rent"))  # 20 Main Street just sold
+        self.assertEqual(len(sim.texts("home_listed")), 1)
+        sim.clock.tick += housing.LANDLORD_SELLS_DAYS * DAY
+        self.assertTrue(housing.house_drought(sim))
+
+    def test_no_landlord_sale_in_the_first_two_weeks_or_for_a_flat(self):
+        sim = self.sim
+        for h in housing.vacancies(sim, "for_sale"):  # every home for sale let instead: no house on the market
+            h.owner, h.listing = "landlord", "for_rent"
+        sim.clock.tick = housing.LANDLORD_SELLS_DAYS * DAY - 1
+        self.assertFalse(housing.house_drought(sim))
+        sim.clock.tick += 1
+        self.assertTrue(housing.house_drought(sim))
+        barak = sim.households["barak"]  # renting a flat
+        self.assertTrue(housing.move_household(sim, barak, "main_39", "rent"))
+        self.assertEqual(sim.homes["elm_court_2a"].listing, "for_rent")  # flats are always let
+        self.assertEqual(sim.texts("home_listed"), [])
 
     def test_renting_sets_the_rent(self):
         sim, barak = self.sim, self.sim.households["barak"]
@@ -350,18 +427,19 @@ class MoveTest(unittest.TestCase):
 
     def test_an_offer_holds_the_listing_until_the_answer(self):
         sim, dana = self.sim, self.sim.agents["dana"]
-        cohen, segal = sim.households["cohen"], sim.households["segal"]
-        self.assertIn("river_28", [h.id for h in housing.hunt_candidates(sim, segal)])  # the Segals want it too
+        cohen, peretz = sim.households["cohen"], sim.households["peretz"]
+        set_funds(sim, "peretz", 60000)
+        self.assertIn("river_28", [h.id for h in housing.hunt_candidates(sim, peretz)])  # the Peretzes want it too
         price = housing._int(housing.value(sim, "river_28") * 0.9)
         opt = self.offer("dana")
         home = sim.homes["river_28"]
         self.assertEqual((home.held_for, home.under_offer_until), ("cohen", sim.clock.tick + housing.OFFER_HOLD_MINUTES))
         self.assertEqual((opt.steps, opt.outcomes), ([("viewing", "river_28")], ["the seller's answer"]))
         self.assertNotIn("river_28", [h.id for h in housing.vacancies(sim)])
-        self.assertNotIn("river_28", [h.id for h in housing.hunt_candidates(sim, segal)])
+        self.assertNotIn("river_28", [h.id for h in housing.hunt_candidates(sim, peretz)])
         self.assertIsNone(housing.homes_json(sim)["river_28"]["listing"])  # under offer
-        self.assertFalse(housing.move_household(sim, segal, "river_28", "buy"))
-        self.assertEqual(sim.texts("too_late"), ["The Segals were too late: 28 River Road is under offer."])
+        self.assertFalse(housing.move_household(sim, peretz, "river_28", "buy"))
+        self.assertEqual(sim.texts("too_late"), ["The Peretzes were too late: 28 River Road is under offer."])
         sim.clock.tick += 60  # the viewing is over and the seller says yes
         for key, value in {"factor": 0.9, "buy": "river_28"}.items():
             self.assertTrue(housing.apply_effect(sim, dana, key, value))
@@ -938,23 +1016,25 @@ class ForkTest(unittest.TestCase):
     def test_house_hunt_for_the_cohens(self):
         sim = FakeSim(tick=at(0, 18, 30))
         fork = self.check(housing_forks.house_hunt_fork(sim, sim.agents["dana"]), "house_hunt", True)
+        reno = housing.reno_cost(sim, "river_28")  # 28 River Road is bought with its renovation
+        self.assertEqual(reno, 880)
         self.assertEqual(labels(fork), [
-            "Buy 28 River Road (house, neglected) for $14,550",
-            "Offer $13,095 for 28 River Road and see what the seller says",
+            "Buy 28 River Road (house, neglected) for $14,550 and do it up ($880)",
+            "Offer $13,095 for 28 River Road (and $880 to do it up) and see what the seller says",
             "Keep looking for the right place",
             "Stay in 20 Main Street and keep the money"])
         buy, haggle, look, stay = fork.options
         self.assertEqual(fork.question, "Your household has $21,500 put by. You live in 20 Main Street (rented, "
                                         "$420/week). There are homes on the market you could afford. Do you move?")
-        self.assertEqual(buy.extra, {"move": "river_28", "how": "buy"})
-        self.assertEqual(buy.cost, 14550 + 150)
-        self.assertEqual(haggle.cost, 14550 + 150 - 1455)
+        self.assertEqual(buy.extra, {"move": "river_28", "how": "buy", "renovate": reno})
+        self.assertEqual(buy.cost, 14550 + 150 + reno)
+        self.assertEqual(haggle.cost, 14550 + 150 - 1455 + reno)
         for opt in (buy, haggle):
             self.assertTrue(opt.household_pays)
             self.assertFalse(opt.charge)
         self.assertEqual([o.group for o in haggle.outcomes], ["deal"] * 4)
-        self.assertEqual(haggle.outcomes[0].effects, {"factor": 0.9, "buy": "river_28"})
-        self.assertEqual(list(haggle.outcomes[1].effects), ["factor", "buy"])  # the companion comes first
+        self.assertEqual(haggle.outcomes[0].effects, {"factor": 0.9, "renovate": reno, "buy": "river_28"})
+        self.assertEqual(list(haggle.outcomes[1].effects), ["factor", "renovate", "buy"])  # the companions first
         self.assertEqual(haggle.extra, {"hold": "river_28"})  # nobody else takes it during the viewing ...
         self.assertEqual(haggle.outcomes[3].effects, {"fun": -4, "release": "river_28"})  # ... until a refusal
         self.assertEqual(look.extra, {"hh_cooldown": 3 * DAY})
@@ -987,10 +1067,13 @@ class ForkTest(unittest.TestCase):
         sim = FakeSim(tick=at(0, 18, 30))
         sim.agents["dana"].savings += 5000
         fork = self.check(housing_forks.house_hunt_fork(sim, sim.agents["dana"]), "house_hunt", True)
-        self.assertEqual(labels(fork)[0], "Buy 55 Main Street (house) for $18,100")
+        self.assertEqual(labels(fork)[0], "Buy 55 Main Street (house) for $18,100")  # 68: no renovation
+        self.assertEqual(fork.options[0].extra, {"move": "main_55", "how": "buy"})
         self.assertEqual(labels(fork)[1], "Offer $16,290 for 55 Main Street and see what the seller says")
-        self.assertEqual(labels(fork)[2], "Buy the cheaper 28 River Road (house, neglected) for $14,550")
-        self.assertEqual(fork.options[2].extra, {"move": "river_28", "how": "buy"})
+        self.assertEqual(fork.options[1].outcomes[0].effects, {"factor": 0.9, "buy": "main_55"})
+        self.assertEqual(labels(fork)[2], "Buy the cheaper 28 River Road (house, neglected) for $14,550 and do it up "
+                                          "($880)")
+        self.assertEqual(fork.options[2].extra, {"move": "river_28", "how": "buy", "renovate": 880})
 
     def test_house_hunt_rentals(self):
         sim = FakeSim(tick=at(0, 18, 30))
@@ -1036,9 +1119,36 @@ class ForkTest(unittest.TestCase):
         self.assertFalse(housing.outgrown(sim, hh["elbaz"]))  # two in three bedrooms
         self.assertFalse(housing.outgrown(sim, hh["halabi"]))  # four in five
         self.assertFalse(housing.outgrown(sim, hh["tal"]))  # retired, but renting
+        self.assertIsNone(sim.homes["park_78"].arrived)  # the starting cast has lived there for years
         set_funds(sim, "bendavid", 60000)
         self.assertTrue(housing.move_household(sim, hh["bendavid"], "main_55", "buy"))
-        self.assertTrue(housing.outgrown(sim, hh["bendavid"]))  # one in four bedrooms
+        self.assertEqual(sim.homes["main_55"].arrived, {"residents": 1, "retired": False})
+        self.assertFalse(housing.outgrown(sim, hh["bendavid"]))  # one in four bedrooms, but Ari chose it
+        ari = sim.agents["ari"]
+        ari.job, ari.age = None, 65  # retired since moving in
+        self.assertTrue(housing.outgrown(sim, hh["bendavid"]))
+
+    def test_a_household_that_shrinks_outgrows_its_home(self):
+        sim = FakeSim(tick=at(0, 18, 30))
+        cohen = sim.households["cohen"]
+        set_funds(sim, "cohen", 60000)
+        self.assertTrue(housing.move_household(sim, cohen, "park_66", "buy"))
+        self.assertEqual(sim.homes["park_66"].arrived, {"residents": 3, "retired": False})
+        self.assertFalse(housing.outgrown(sim, cohen))  # three in five bedrooms: what they chose
+        gone(sim, "noa")
+        self.assertTrue(housing.outgrown(sim, cohen))  # two in five, fewer than moved in
+        sim = FakeSim(tick=at(0, 18, 30))
+        mizrahi = sim.households["mizrahi"]
+        set_funds(sim, "mizrahi", 60000)
+        self.assertTrue(housing.move_household(sim, mizrahi, "main_55", "buy"))
+        gone(sim, "maya")
+        self.assertFalse(housing.outgrown(sim, mizrahi))  # three in four: smaller, but one bedroom to spare
+        gone(sim, "lior")
+        self.assertTrue(housing.outgrown(sim, mizrahi))  # two in four
+        self.assertTrue(housing.move_household(sim, mizrahi, "river_12", "buy"))
+        self.assertIsNone(sim.homes["main_55"].arrived)  # the record goes with the household
+        self.assertEqual(sim.homes["river_12"].arrived, {"residents": 2, "retired": False})
+        self.assertFalse(housing.outgrown(sim, mizrahi))  # the new home is the size they chose
 
     def test_downsize_candidates(self):
         sim = FakeSim(tick=at(95, 18, 30))
@@ -1071,9 +1181,9 @@ class ForkTest(unittest.TestCase):
                                         "$31,900: more home than you need now that you are retired. Nothing better "
                                         "is on the market, but a smaller place is. Do you downsize?")
         buy, rent, look, stay = fork.options
-        settle = housing_forks.DOWNSIZE_SETTLE
-        self.assertEqual(buy.extra, {"move": "river_12", "how": "buy", "hh_cooldown": settle})
-        self.assertEqual(rent.extra, {"move": "elm_court_1a", "how": "rent", "hh_cooldown": settle})
+        settle = {"house_hunt": housing_forks.DOWNSIZE_SETTLE, "bigger_home": housing_forks.DOWNSIZE_NO_BIGGER}
+        self.assertEqual(buy.extra, {"move": "river_12", "how": "buy", "settle": settle})  # once the move goes through
+        self.assertEqual(rent.extra, {"move": "elm_court_1a", "how": "rent", "settle": settle})
         self.assertEqual((buy.cost, rent.cost), (0, 0))  # the sale pays for it
         self.assertTrue(all(o.household_pays and not o.charge for o in (buy, rent)))
         self.assertEqual([o.id for o in buy.outcomes], ["fresh_start", "homesick"])  # no children to upset
@@ -1091,21 +1201,26 @@ class ForkTest(unittest.TestCase):
 
     def test_house_hunt_downsizing_by_bedrooms(self):
         sim = FakeSim(tick=at(10, 18, 30))
-        ari = sim.agents["ari"]
-        bendavid = sim.households["bendavid"]
-        set_funds(sim, "bendavid", 25000)
-        self.assertTrue(housing.move_household(sim, bendavid, "main_55", "buy"))
-        set_funds(sim, "bendavid", 3000)
+        dana = sim.agents["dana"]
+        cohen = sim.households["cohen"]
+        set_funds(sim, "cohen", 25000)
+        self.assertTrue(housing.move_household(sim, cohen, "main_55", "buy"))
+        set_funds(sim, "cohen", 3000)
+        cohen.cooldowns.clear()
+        sim.clock.tick = cohen.moved_tick + housing_forks.DOWNSIZE_AFTER_DAYS * DAY  # a Wednesday, 18:30
+        self.assertIsNone(housing_forks.house_hunt_fork(sim, dana))  # three in four bedrooms, as they chose
+        gone(sim, "noa")  # now two in four
+        cohen.cooldowns.clear()
         sim.clock.tick = at(95, 18, 30)
-        self.assertIsNone(housing_forks.house_hunt_fork(sim, ari))  # 95 days into the game, but 85 in the house
-        bendavid.cooldowns.clear()
-        sim.clock.tick = bendavid.moved_tick + housing_forks.DOWNSIZE_AFTER_DAYS * DAY  # a Wednesday, 18:30
-        fork = self.check(housing_forks.house_hunt_fork(sim, ari), "house_hunt", True)
-        self.assertIn("more home than you need with 4 bedrooms for just you.", fork.question)
+        self.assertIsNone(housing_forks.house_hunt_fork(sim, dana))  # 95 days into the game, but 85 in the house
+        cohen.cooldowns.clear()
+        sim.clock.tick = cohen.moved_tick + housing_forks.DOWNSIZE_AFTER_DAYS * DAY
+        fork = self.check(housing_forks.house_hunt_fork(sim, dana), "house_hunt", True)
+        self.assertIn("more home than you need with 4 bedrooms for the 2 of you.", fork.question)
         self.assertTrue(labels(fork)[0].endswith("buy the smaller 12 River Road for $11,550"), labels(fork))
         self.assertAlmostEqual(fork.options[0].base, housing_forks.DOWNSIZE_BASE)  # not retired: no lift
-        scores = forks.default_scores(ari, fork, sim)
-        self.assertEqual(scores.index(max(scores)), 2)  # Ari keeps looking for the right smaller place
+        scores = forks.default_scores(dana, fork, sim)
+        self.assertEqual(scores.index(max(scores)), 3, scores)  # Dana stays: it's home
 
     def test_house_hunt_downsizing_with_one_move(self):
         sim = FakeSim(tick=at(95, 18, 30))
@@ -1505,10 +1620,12 @@ class EngineTest(unittest.TestCase):
         cohen = sim.households["cohen"]
         fork = housing_forks.house_hunt_fork(sim, dana)
         funds = housing.funds(sim, cohen)
-        price = housing.value(sim, "river_28")
+        price, reno = housing.value(sim, "river_28"), housing.reno_cost(sim, "river_28")
+        self.assertGreater(reno, 0)  # bought run-down, with its renovation
         sim._decide(dana, fork, 0, "model", "")
         self.assertEqual(cohen.home_id, "river_28")
-        self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST)
+        self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST - reno)
+        self.assertEqual(housing.condition_of(sim, "river_28"), 100)
         self.assertEqual(dana.activity_place, "river_28")
         self.assertEqual(sim.homes["main_20"].listing, "for_rent")
 
@@ -1520,12 +1637,14 @@ class EngineTest(unittest.TestCase):
         dana = sim.agents["dana"]
         cohen = sim.households["cohen"]
         fork = housing_forks.house_hunt_fork(sim, dana)
-        self.assertEqual(fork.options[0].extra, {"move": "river_28", "how": "buy"})
-        funds = housing.funds(sim, cohen)
+        self.assertEqual(fork.options[0].extra,
+                         {"move": "river_28", "how": "buy", "renovate": housing.reno_cost(sim, "river_28")})
+        funds, cond = housing.funds(sim, cohen), housing.condition_of(sim, "river_28")
         hide(sim, "river_28")  # another buyer has it under offer
         sim._decide(dana, fork, 0, "model", "")
         self.assertEqual(cohen.home_id, "main_20")
-        self.assertAlmostEqual(housing.funds(sim, cohen), funds)
+        self.assertAlmostEqual(housing.funds(sim, cohen), funds)  # no price, no van, no renovation
+        self.assertEqual(housing.condition_of(sim, "river_28"), cond)
         self.assertIn("The Cohens were too late: 28 River Road has been sold.", [e["text"] for e in sim.events])
         self.assertEqual(dana.activity_place, "main_20")
         self.assertNotIn(fork.id, " ".join(str(e.get("what")) for e in sim.luck_log))
@@ -1643,11 +1762,87 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(friedman.home_id, "river_12")
         self.assertAlmostEqual(housing.funds(sim, friedman), funds + sale - price - housing.MOVING_COST)
         self.assertEqual(friedman.cooldowns["house_hunt"], sim.clock.tick + housing_forks.DOWNSIZE_SETTLE)
+        self.assertEqual(friedman.cooldowns["bigger_home"], sim.clock.tick + housing_forks.DOWNSIZE_NO_BIGGER)
+        self.assertEqual(sim.homes["river_12"].arrived, {"residents": 2, "retired": True})
         park_78 = sim.homes["park_78"]
         self.assertEqual((park_78.owner, housing.listed(sim, park_78)), ("market", "for_sale"))
         self.assertIn(f"The Friedmans buy 12 River Road (house, {housing.district_name(sim, sim.homes['river_12'])}) "
                       f"for ${price:,}, selling 78 Park Avenue for ${sale:,}.", [e["text"] for e in sim.history])
         self.assertEqual(ruth.activity_place, "river_12")
+        self.assertFalse(housing.outgrown(sim, friedman))  # they moved in retired: not again
+
+    def test_a_downsizing_move_that_fails_does_not_settle(self):
+        """Another household buys the smaller home while the Friedmans' answer is on its way: they stay where they
+        are, with house_hunt's usual cooldown, not DOWNSIZE_SETTLE, and may still look at bigger homes."""
+        sim = self.sim
+        sim.clock.tick = at(95, 18, 30)
+        ruth, friedman = sim.agents["ruth"], sim.households["friedman"]
+        fork = housing_forks.house_hunt_fork(sim, ruth)
+        self.assertTrue(fork.question.endswith("Do you downsize?"))
+        self.assertEqual(fork.options[0].extra["move"], "river_12")
+        rival = sim.households["bendavid"]
+        set_funds(sim, "bendavid", 60000)
+        self.assertTrue(housing.move_household(sim, rival, "river_12", "buy"))
+        sim._decide(ruth, fork, 0, "model", "")
+        self.assertEqual(friedman.home_id, "park_78")
+        self.assertEqual(friedman.cooldowns["house_hunt"], sim.clock.tick + housing_forks.HUNT_COOLDOWN)
+        self.assertNotIn("bigger_home", friedman.cooldowns)
+        self.assertIn("The Friedmans were too late: 12 River Road has been sold.", [e["text"] for e in sim.history])
+        self.assertTrue(housing.outgrown(sim, friedman))  # still: the question comes round again
+
+    def test_a_fixer_upper_bought_on_a_weekday_evening_is_done_up_at_once(self):
+        """house_hunt at 19:00 on a Monday: the move takes the rest of the evening and then it is bedtime, so no
+        upkeep fork could renovate the house before its first night in use. The renovation comes with the purchase:
+        the house is done up the moment it is bought, and never neglected in use."""
+        sim = self.sim
+        sim.clock.tick = at(0, 19)
+        dana, cohen = sim.agents["dana"], sim.households["cohen"]
+        self.assertLess(housing.condition_of(sim, "river_28"), 40)  # neglected
+        price, reno = housing.value(sim, "river_28"), housing.reno_cost(sim, "river_28")
+        fork = housing_forks.house_hunt_fork(sim, dana)
+        self.assertEqual(labels(fork)[0],
+                         f"Buy 28 River Road (house, neglected) for ${price:,} and do it up (${reno:,})")
+        self.assertEqual(fork.options[0].cost, price + housing.MOVING_COST + reno)
+        funds = housing.funds(sim, cohen)
+        sim._decide(dana, fork, 0, "model", "")
+        self.assertEqual(cohen.home_id, "river_28")
+        self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST - reno)
+        self.assertEqual(housing.condition_of(sim, "river_28"), 100)
+        self.assertEqual(sim.lots["river_28"].works_until, sim.clock.tick + housing.RENOVATE_WORKS_MINUTES)
+        events, low, played = sim.drain()[0], 100.0, []
+        director = sim.director
+
+        def watch(agent, f):
+            played.append((agent.household_id, f.kind))
+            director(agent, f)
+
+        sim.director = watch
+        while sim.clock.tick < at(1, 1):  # past the first midnight
+            sim.step()
+            events += sim.drain()[0]
+            low = min(low, housing.condition_of(sim, "river_28"))
+        self.assertNotIn(("cohen", "upkeep"), played)  # nothing left to do up
+        self.assertGreater(low, 90)
+        self.assertEqual([e["text"] for e in events if e["place"] == "river_28"
+                          and e["tag"] in ("shabby", "neglect", "falling_apart")], [])
+        self.assertEqual([a.activity_place for a in housing.adults(sim, cohen)], ["river_28", "river_28"])
+
+    def test_a_haggle_buys_with_the_renovation(self):
+        """The seller accepts the Cohens' offer: they pay 90% of the price, and the renovation on top."""
+        sim = self.sim
+        cohen = sim.households["cohen"]
+        price, reno = housing._int(housing.value(sim, "river_28") * 0.9), housing.reno_cost(sim, "river_28")
+        funds = housing.funds(sim, cohen)
+        dana, fork = self.haggle("offer_accepted")
+        self.assertEqual(fork.options[1].outcomes[0].effects, {"factor": 0.9, "renovate": reno, "buy": "river_28"})
+        for _ in range(6 * 60):
+            sim.step()
+            if cohen.home_id == "river_28":
+                break
+        self.assertEqual((cohen.home_id, cohen.history[-1]["price"]), ("river_28", price))
+        self.assertAlmostEqual(housing.funds(sim, cohen), funds - price - housing.MOVING_COST - reno, delta=1)
+        self.assertGreater(housing.condition_of(sim, "river_28"), 99)
+        self.assertEqual(getattr(dana, "effect_args", None) or {}, {})  # the companions went with the purchase
 
 class ForkShapeTest(unittest.TestCase):
     """Every housing builder, probed for every character every half hour over 2 game days (Friday morning to
@@ -1704,18 +1899,21 @@ class ForkShapeTest(unittest.TestCase):
 
     def test_the_downsizing_variant_over_two_days(self):
         """house_hunt's downsizing variant on seeds 1-3, from a Friday morning past DOWNSIZE_AFTER_DAYS: the retired
-        Friedmans and a single in a four-bedroom house, probed with the smaller homes on the market and without."""
+        Friedmans and a couple who bought a four-bedroom house and then lost one of the two, probed with the
+        smaller homes on the market and without."""
         from gameofailife.sim import Simulation
         downsized = 0
         for seed in (1, 2, 3):
             with self.subTest(seed=seed):
                 sim = Simulation(seed=seed, now=lambda: 0.0)
                 sim.clock.tick = at(95, 6)
-                single = next(hh for hh in sim.households.values() if housing.residents(sim, hh) == 1
-                              and housing.adults(sim, hh) and not housing.retired(housing.adults(sim, hh)[0]))
+                single = next(hh for hh in sim.households.values() if housing.residents(sim, hh) == 2
+                              and len(housing.adults(sim, hh)) == 2
+                              and not any(housing.retired(a) for a in housing.adults(sim, hh)))
                 set_funds(sim, single.id, 25000)
                 self.assertTrue(housing.move_household(sim, single, "main_55", "buy"))
                 single.moved_tick = 0
+                sim._die(housing.adults(sim, single)[1], "dies")
                 set_funds(sim, single.id, 3000)
                 played, built = [], collections.Counter()
 
@@ -1755,8 +1953,9 @@ class ForkShapeTest(unittest.TestCase):
 @unittest.skipUnless(NODE, "node is not installed")
 class PortParityTest(unittest.TestCase):
     """The housing builders this file pins, built in the same state by the Python engine and its JS port
-    (port/src): every option, outcome and default score the same. The lockstep runs of tests/test_port.py are a
-    few days long, too short to reach a downsizing or a fixer-upper's first evening."""
+    (port/src): every option, outcome and default score the same, and what a choice, a death or a move leaves
+    behind. The lockstep runs of tests/test_port.py are a few days long, too short to reach a downsizing, a
+    landlord's sale or a fixer-upper's first evening."""
 
     JS = r"""
     const G = require(process.argv[1]).load();
@@ -1769,6 +1968,7 @@ class PortParityTest(unittest.TestCase):
     for (const ops of JSON.parse(require("fs").readFileSync(0, "utf8"))) {
       const sim = new G.sim.Simulation(1);
       const got = [];
+      let last = null;
       for (const [op, ...a] of ops) {
         const hh = id => sim.households.get(id);
         if (op === "tick") sim.clock.tick = a[0];
@@ -1780,9 +1980,24 @@ class PortParityTest(unittest.TestCase):
         else if (op === "hide") sim.homes.get(a[0]).under_offer_until = sim.clock.tick + a[1] * DAY;
         else if (op === "move") got.push(H.move_household(sim, hh(a[0]), a[1], a[2], 1.0, null, null, true, false));
         else if (op === "arrears") hh(a[0]).arrears = a[1];
-        else if (op === "build") {
+        else if (op === "gone") {
+          const agent = sim.agents.get(a[0]), house = hh(agent.household_id);
+          agent.alive = false;
+          house.member_ids = house.member_ids.filter(m => m !== a[0]);
+        } else if (op === "cooldown") hh(a[0]).cooldowns[a[1]] = sim.clock.tick + a[2];
+        else if (op === "home") {
+          const h = sim.homes.get(a[0]);
+          got.push({owner: h.owner, listing: h.listing, household: h.household, arrived: h.arrived,
+            condition: H.condition_of(sim, a[0])});
+        } else if (op === "news") got.push(sim.history.filter(e => e.tag === a[0]).map(e => e.text));
+        else if (op === "decide") {
+          const agent = sim.agents.get(a[0]), house = hh(agent.household_id);
+          sim._decide(agent, last, a[1], "model", "");
+          got.push({home: house.home_id, cooldowns: house.cooldowns});
+        } else if (op === "build") {
           const agent = sim.agents.get(a[1]);
           const fork = G.housing_forks[a[0]](sim, agent);
+          last = fork;
           got.push(fork === null ? null : {kind: fork.kind, question: fork.question, major: fork.major,
             options: fork.options.map(opt), scores: G.forks.default_scores(agent, fork, sim),
             cooldowns: hh(agent.household_id).cooldowns});
@@ -1807,7 +2022,7 @@ class PortParityTest(unittest.TestCase):
         out = []
         for ops in cases:
             sim = Simulation(seed=1, now=lambda: 0.0)
-            got = []
+            got, last = [], None
             for op, *a in ops:
                 if op == "tick":
                     sim.clock.tick = a[0]
@@ -1821,9 +2036,24 @@ class PortParityTest(unittest.TestCase):
                     got.append(housing.move_household(sim, sim.households[a[0]], a[1], a[2], check=False))
                 elif op == "arrears":
                     sim.households[a[0]].arrears = a[1]
+                elif op == "gone":
+                    gone(sim, a[0])
+                elif op == "cooldown":
+                    sim.households[a[0]].cooldowns[a[1]] = sim.clock.tick + a[2]
+                elif op == "home":
+                    h = sim.homes[a[0]]
+                    got.append({"owner": h.owner, "listing": h.listing, "household": h.household,
+                                "arrived": h.arrived, "condition": housing.condition_of(sim, a[0])})
+                elif op == "news":
+                    got.append([e["text"] for e in sim.history if e["tag"] == a[0]])
+                elif op == "decide":
+                    agent = sim.agents[a[0]]
+                    hh = sim.households[agent.household_id]
+                    sim._decide(agent, last, a[1], "model", "")
+                    got.append({"home": hh.home_id, "cooldowns": hh.cooldowns})
                 elif op == "build":
                     agent = sim.agents[a[1]]
-                    fork = getattr(housing_forks, a[0])(sim, agent)
+                    fork = last = getattr(housing_forks, a[0])(sim, agent)
                     got.append(None if fork is None else {
                         "kind": fork.kind, "question": fork.question, "major": fork.major,
                         "options": [opt(o) for o in fork.options], "scores": forks.default_scores(agent, fork, sim),
@@ -1844,10 +2074,10 @@ class PortParityTest(unittest.TestCase):
             + [["build", "house_hunt_fork", "ruth"]],
             # two months on: more inviting
             [["tick", at(155, 18, 30)], ["build", "house_hunt_fork", "ruth"]],
-            # by bedrooms: a single in a four-bedroom house, too soon and then settled in
-            [["tick", at(10, 18, 30)], ["funds", "bendavid", 25000], ["move", "bendavid", "main_55", "buy"],
-             ["funds", "bendavid", 3000], ["tick", at(95, 18, 30)], ["build", "house_hunt_fork", "ari"],
-             ["tick", at(100, 18, 30)], ["build", "house_hunt_fork", "ari"]],
+            # by bedrooms: three in a four-bedroom house, who lose one; too soon and then settled in
+            [["tick", at(10, 18, 30)], ["funds", "cohen", 25000], ["move", "cohen", "main_55", "buy"],
+             ["funds", "cohen", 3000], ["gone", "noa"], ["tick", at(95, 18, 30)], ["build", "house_hunt_fork", "dana"],
+             ["tick", at(100, 18, 30)], ["build", "house_hunt_fork", "dana"]],
             # upkeep: a fixer-upper's first evening, and the weekend after
             [["tick", at(1, 18)], ["condition", "river_28", 20.0], ["move", "cohen", "river_28", "buy"],
              ["build", "upkeep_fork", "dana"], ["tick", at(5, 10)], ["build", "upkeep_fork", "yossi"]],
@@ -1856,8 +2086,23 @@ class PortParityTest(unittest.TestCase):
              ["build", "housing_trouble_fork", "shai"]],
             [["tick", monday], ["funds", "peretz", -800], ["arrears", "peretz", 1],
              ["build", "housing_trouble_fork", "eli"]],
-            # the usual hunt, with a rental and a purchase
+            # the usual hunt, with a rental and a purchase (of a run-down house, with its renovation)
             [["tick", at(0, 18, 30)], ["build", "house_hunt_fork", "dana"], ["build", "house_hunt_fork", "sara"]],
+            # downsizing: the move goes through and settles them; another buyer is first, and it doesn't
+            [["tick", evening], ["build", "house_hunt_fork", "ruth"], ["decide", "ruth", 0], ["home", "river_12"]],
+            [["tick", evening], ["build", "house_hunt_fork", "ruth"], ["move", "bendavid", "river_12", "buy"],
+             ["decide", "ruth", 0], ["home", "park_78"]],
+            # retirees with money to spare look at no bigger home; nor, for a while, does a household that downsized
+            [["tick", evening], ["funds", "segal", 60000], ["build", "house_hunt_fork", "yuval"]],
+            [["tick", at(0, 18, 30)], ["funds", "peretz", 60000], ["cooldown", "peretz", "bigger_home", 30 * DAY],
+             ["build", "house_hunt_fork", "eli"]],
+            # no house for sale for 14 days: the landlord sells the house the Cohens leave (on a Monday evening)
+            [["tick", at(20, 18, 30)], ["move", "weiss", "river_12", "buy"], ["move", "shapiro", "main_55", "buy"],
+             ["move", "peretz", "park_66", "buy"], ["move", "amar", "park_104", "buy"], ["tick", at(35, 18, 30)],
+             ["move", "cohen", "river_28", "buy"], ["home", "main_20"], ["news", "home_listed"],
+             ["funds", "gold", 60000], ["build", "house_hunt_fork", "lina"]],
+            # a fixer-upper bought through the fork on a weekday evening, done up at once
+            [["tick", at(0, 19)], ["build", "house_hunt_fork", "dana"], ["decide", "dana", 0], ["home", "river_28"]],
         ]
         run = subprocess.run([NODE, "-e", self.JS, str(ROOT / "port" / "tools" / "engine.cjs")],
                              input=json.dumps(cases), capture_output=True, text=True, timeout=300, check=False)
@@ -1866,15 +2111,30 @@ class PortParityTest(unittest.TestCase):
         self.assertEqual(len(js), len(py))
         for i, (got, want) in enumerate(zip(js, py)):
             self.assertEqual(got, want, f"case {i} differs (JS first)")
-        variants = [r for case in py for r in case if isinstance(r, dict) and r["question"].endswith("downsize?")]
-        self.assertEqual(len(variants), 5)  # the cases do reach the downsizing variant
+        variants = [r for case in py for r in case
+                    if isinstance(r, dict) and r.get("question", "").endswith("downsize?")]
+        self.assertEqual(len(variants), 8)  # the cases do reach the downsizing variant: cases 0-2, 4, 5 and 10-12
         self.assertEqual([py[1][0]["options"][0]["label"], py[2][0]["options"][1]["label"]],
                          ["Talk it over and decide another time"] * 2)
         self.assertIsNone(py[3][0])  # nowhere smaller for the Friedmans: no fork
         self.assertAlmostEqual(py[4][0]["options"][0]["base"] - py[0][0]["options"][0]["base"],
                                2 * housing_forks.DOWNSIZE_DRIFT)
-        self.assertIsNone(py[5][1])  # Ari, 85 days in
+        self.assertIsNone(py[5][1])  # the Cohens, 85 days in
+        self.assertIn("with 4 bedrooms for the 2 of you", py[5][2]["question"])
         self.assertEqual(py[6][1]["options"][0]["extra"]["repair"], 80)  # the fixer-upper's first evening
+        self.assertIn("and do it up ($880)", py[9][0]["options"][0]["label"])
+        evening = at(95, 18, 30)
+        self.assertEqual((py[10][1]["home"], py[10][1]["cooldowns"]),
+                         ("river_12", {"house_hunt": evening + housing_forks.DOWNSIZE_SETTLE,
+                                       "bigger_home": evening + housing_forks.DOWNSIZE_NO_BIGGER}))
+        self.assertEqual((py[11][2]["home"], py[11][2]["cooldowns"]),
+                         ("park_78", {"house_hunt": evening + housing_forks.HUNT_COOLDOWN}))
+        self.assertTrue(py[12][0]["question"].endswith("downsize?"))  # nothing bigger for the Segals
+        self.assertNotIn("river_28", json.dumps(py[13][0]["options"]))  # three bedrooms: the Peretzes have two
+        self.assertEqual((py[14][5]["owner"], py[14][5]["listing"]), ("market", "for_sale"))
+        self.assertEqual(len(py[14][6]), 1)  # the landlord's sale is news
+        self.assertIn("20 Main Street", json.dumps(py[14][7]["options"]))  # and on the market for the Golds
+        self.assertEqual(py[15][2]["condition"], 100)
 
 if __name__ == "__main__":
     unittest.main()
