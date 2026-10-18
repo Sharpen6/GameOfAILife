@@ -154,12 +154,82 @@
           p.savings = r2(p.savings + amount);
         }
       }
-      const live = home.emergency;
-      if (live !== null && live !== undefined && home.household === hh.id) {
-        const cost = H.TIERS[home.tier].emergency_cost;
-        if (funds(folk, hh) >= FIX_FACTOR * cost) {
-          _pay(richest(payers), cost);
-          H.fix_emergency(sim, hh);
+      if (home.emergency !== null && home.emergency !== undefined && home.household === hh.id) {
+        _fix(sim, folk, hh, home);
+      }
+    }
+  }
+
+  // A live emergency is fixed, by the richest adult, once the household holds twice its cost (Sundays after the
+  // charges and every midnight).
+  function _fix(sim, folk, hh, home) {
+    const H = housing();
+    const payers = adults(folk, hh);
+    const cost = H.TIERS[home.tier].emergency_cost ?? 0;
+    if (!payers.length || funds(folk, hh) < FIX_FACTOR * cost) return false;
+    const payer = richest(payers);
+    _pay(payer, cost);
+    H.fix_emergency(sim, hh, payer); // the payer as agent keeps the news folk-only
+    return true;
+  }
+
+  // Midnight, after housing.nightly (which leaves the townsfolk homes alone): an emergency left unfixed for
+  // EMERGENCY_DAYS settles as lost condition; the residents of a neglected or derelict folk home lose health to
+  // damp (doubled in winter) and may catch a chill; an owner-occupied folk home without an emergency rolls for one,
+  // which goes live at once. A live one is fixed first when affordable (`_fix`). Rolls on (NS_FOLK_HOME, home_id,
+  // day) of `sim.dice_seed`, drawn only where needed.
+  function nightly(sim) {
+    const H = housing();
+    const luck_odds = G.forks.luck_odds;
+    const folk = _folk(sim);
+    const households = folk.households;
+    if (!households || !households.length) return;
+    const winter = sim.clock.season === "winter";
+    const now = sim.clock.tick, day = sim.clock.day;
+    for (const hh of households) {
+      if (hh.gone) continue;
+      const home = sim.homes.get(hh.home_id);
+      if (home === undefined || home.household !== hh.id) continue;
+      const mem = members(folk, hh);
+      const ids = mem.map(p => p.id);
+      let live = home.emergency;
+      if (live && _fix(sim, folk, hh, home)) live = null;
+      if (live && now - live.since >= H.EMERGENCY_DAYS * H.DAY) {
+        home.emergency = null;
+        sim.event(`The ${H.EMERGENCY_NAME[live.kind]} at ${home.name} is never properly fixed.`, null, null,
+          { tag: "emergency_settled", agents: ids, place: home.place });
+        H._change_condition(sim, sim.lots.get(home.place), -H.SETTLE_DAMAGE);
+      }
+      if (!mem.length) continue;
+      const st = H.stage_of(H.condition_of(sim, home.id));
+      const payers = mem.filter(p => p.age >= ADULT_AGE);
+      const roll_emergency = payers.length > 0 && home.owner === hh.id && !home.emergency && !home.pending_emergency;
+      const damp = H.DAMP_HEALTH[st] !== undefined;
+      if (!damp && !roll_emergency) continue;
+      const rr = G.dice.stream(sim.dice_seed, G.folk_model.NS_FOLK_HOME, home.id, day);
+      if (damp) {
+        const k = winter ? 2 : 1;
+        for (const p of mem) {
+          p.health = Math.max(0.0, p.health - H.DAMP_HEALTH[st] * k);
+          if (rr.random() < luck_odds(H.DAMP_CHILL[st] * k, -1, p.luck)) {
+            p.health = Math.max(0.0, p.health + H.CHILL.health);
+            p.adjust("fun", H.CHILL.fun);
+            sim.event(`${p.name} catches a chill in the damp house.`, p, null, { tag: "damp_chill", place: home.place });
+          }
+        }
+      }
+      if (roll_emergency) {
+        let p0 = (H.TIERS[home.tier].emergency_p ?? 0.0) + (H.EMERGENCY_STAGE_P[st] ?? 0.0);
+        if (winter) p0 *= H.WINTER_EMERGENCY;
+        let luck = 0.0;
+        for (const p of payers) luck += p.luck;
+        if (rr.random() < luck_odds(p0, -1, luck / payers.length)) {
+          const kinds = ["leak", "electrics", "boiler"].concat(winter ? ["boiler", "boiler"] : [],
+            (sim.weather || "clear") === "rain" ? ["roof"] : []);
+          const kind = rr.pick(kinds);
+          home.emergency = { kind, since: now };
+          sim.event(H.EMERGENCY_NEWS[kind].replace("{home}", home.name), null, null,
+            { tag: "emergency", agents: ids, place: home.place });
         }
       }
     }
@@ -512,7 +582,7 @@
   G.folk_life = {
     BILLS_PER_ADULT, CAR_BILL, PENSION, PENSION_AGE, SAVE_BASE, SAVE_THRIFT, ARREARS_MOVE, FORCED_PER_BEDROOM,
     FIX_FACTOR, RENT_SHARE, RENT_WEEKS, SCHOOL_AGE, TEEN_AGE, ADULT_AGE, PARENT_GAP, _cents, members, adults, funds,
-    weekly_income, pay_shift, pensions, weekly, richest, fall_behind, on_birthday, nearest_school, join, split,
+    weekly_income, pay_shift, pensions, weekly, nightly, richest, fall_behind, on_birthday, nearest_school, join, split,
     cheapest_rental, release, vacancies, new_household, on_household_empty, folk_move, folk_vacate,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

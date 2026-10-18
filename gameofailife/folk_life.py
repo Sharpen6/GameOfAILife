@@ -4,16 +4,17 @@ High at 11, school ends at 18) and the folk homes' moves.
 
 folk_life never rolls illness, death or births, ages anyone, hires, fires or promotes (life, career and money own
 those for both tiers). `folk.py` (F2a) calls `pay_shift` at every folk shift end and delegates `pensions`, `weekly`,
-`new_household`, `on_household_empty`, `join`, `split`, `release` and `on_birthday` here. Money is kept in cents
-(`r2`), so each household's books balance to the cent. Nothing here draws `sim.rng`.
+`new_household`, `on_household_empty`, `join`, `split`, `release`, `on_birthday` and `nightly` (the folk homes'
+damp and emergencies) here. Money is kept in cents (`r2`), so each household's books balance to the cent. Nothing
+here draws `sim.rng`.
 """
 
 from __future__ import annotations
 
 import math
 
-from . import housing
-from .folk_model import FolkHousehold, household_id
+from . import dice, housing
+from .folk_model import NS_FOLK_HOME, FolkHousehold, household_id
 from .rng import r2
 
 BILLS_PER_ADULT = 80.0  # sim.BILLS_PER_ADULT
@@ -169,13 +170,83 @@ def weekly(sim) -> None:
             if amount > 0:
                 p.money = r2(p.money - amount)
                 p.savings = r2(p.savings + amount)
+        if home.emergency is not None and home.household == hh.id:
+            _fix(sim, folk, hh, home)
+
+
+def _fix(sim, folk, hh, home) -> bool:
+    """A live emergency is fixed, by the richest adult, once the household holds twice its cost (Sundays after the
+    charges and every midnight)."""
+    payers = adults(folk, hh)
+    cost = housing.TIERS[home.tier].get("emergency_cost", 0)
+    if not payers or funds(folk, hh) < FIX_FACTOR * cost:
+        return False
+    payer = richest(payers)
+    _pay(payer, cost)
+    housing.fix_emergency(sim, hh, payer)  # the payer as agent keeps the news folk-only
+    return True
+
+
+def nightly(sim) -> None:
+    """Midnight, after housing.nightly (which leaves the townsfolk homes alone): an emergency left unfixed for
+    EMERGENCY_DAYS settles as lost condition; the residents of a neglected or derelict folk home lose health to damp
+    (doubled in winter) and may catch a chill; an owner-occupied folk home without an emergency rolls for one, which
+    goes live at once. A live one is fixed first when affordable (`_fix`). Rolls on (NS_FOLK_HOME, home_id, day) of
+    `sim.dice_seed`, drawn only where needed."""
+    from .forks import luck_odds  # forks reaches housing, so not at the top
+    folk = _folk(sim)
+    households = getattr(folk, "households", None)
+    if not households:
+        return
+    winter = sim.clock.season == "winter"
+    now, day = sim.clock.tick, sim.clock.day
+    for hh in households:
+        if hh.gone:
+            continue
+        home = sim.homes.get(hh.home_id)
+        if home is None or home.household != hh.id:
+            continue
+        mem = members(folk, hh)
+        ids = [p.id for p in mem]
         live = home.emergency
-        if live is not None and home.household == hh.id:
-            cost = housing.TIERS[home.tier]["emergency_cost"]
-            if funds(folk, hh) >= FIX_FACTOR * cost:
-                payer = richest(payers)
-                _pay(payer, cost)
-                housing.fix_emergency(sim, hh)
+        if live and _fix(sim, folk, hh, home):
+            live = None
+        if live and now - live["since"] >= housing.EMERGENCY_DAYS * housing.DAY:
+            home.emergency = None
+            sim.event(f"The {housing.EMERGENCY_NAME[live['kind']]} at {home.name} is never properly fixed.", None,
+                      tag="emergency_settled", agents=ids, place=home.place)
+            housing._change_condition(sim, sim.lots[home.place], -housing.SETTLE_DAMAGE)
+        if not mem:
+            continue
+        st = housing.stage_of(housing.condition_of(sim, home.id))
+        payers = [p for p in mem if p.age >= ADULT_AGE]
+        roll_emergency = bool(payers) and home.owner == hh.id and not home.emergency and not home.pending_emergency
+        damp = st in housing.DAMP_HEALTH
+        if not damp and not roll_emergency:
+            continue
+        rr = dice.stream(sim.dice_seed, NS_FOLK_HOME, home.id, day)
+        if damp:
+            k = 2 if winter else 1
+            for p in mem:
+                p.health = max(0.0, p.health - housing.DAMP_HEALTH[st] * k)
+                if rr.random() < luck_odds(housing.DAMP_CHILL[st] * k, -1, p.luck):
+                    p.health = max(0.0, p.health + housing.CHILL["health"])
+                    p.adjust("fun", housing.CHILL["fun"])
+                    sim.event(f"{p.name} catches a chill in the damp house.", p, tag="damp_chill", place=home.place)
+        if roll_emergency:
+            p0 = housing.TIERS[home.tier].get("emergency_p", 0.0) + housing.EMERGENCY_STAGE_P.get(st, 0.0)
+            if winter:
+                p0 *= housing.WINTER_EMERGENCY
+            luck = 0.0
+            for p in payers:
+                luck += p.luck
+            if rr.random() < luck_odds(p0, -1, luck / len(payers)):
+                kinds = ["leak", "electrics", "boiler"] + (["boiler", "boiler"] if winter else []) + \
+                        (["roof"] if getattr(sim, "weather", "clear") == "rain" else [])
+                kind = rr.pick(kinds)
+                home.emergency = {"kind": kind, "since": now}
+                sim.event(housing.EMERGENCY_NEWS[kind].format(home=home.name), None, tag="emergency", agents=ids,
+                          place=home.place)
 
 
 def richest(people: list):

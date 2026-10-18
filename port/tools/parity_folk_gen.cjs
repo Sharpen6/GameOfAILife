@@ -9,14 +9,17 @@ const fs = require("fs");
 const path = require("path");
 const G = require("./engine.cjs").load();
 
-// Three scripted weeks of folk_life on generated townsfolk: joins, splits and leavers on day 3, broke households
-// (some laid off, so the third Sunday moves them somewhere cheaper) on day 5, birthdays on day 10, every workday's
-// shift pay, Friday pensions and Sunday books. Line by line with rehearse in tests/test_folk_money.py.
+// Three scripted weeks of folk_life on generated townsfolk: each midnight's damp and emergency rolls; joins,
+// splits and leavers on day 3; broke households (some laid off, so the third Sunday moves them somewhere cheaper)
+// on day 5; birthdays on day 10; every workday's shift pay, Friday pensions and Sunday books. Line by line with
+// rehearse in tests/test_folk_money.py.
 function rehearse(sim, days = 22) {
   const FL = G.folk_life, MPD = G.clock.MINUTES_PER_DAY, { r2 } = G.rng;
   const folk = sim.folk;
   for (let day = 0; day < days; day++) {
     const weekday = day % 7;
+    sim.clock.tick = day * MPD;
+    FL.nightly(sim);
     sim.clock.tick = day * MPD + 8 * 60;
     if (day === 3) {
       const adults = folk.people.filter(p => p.age >= 25 && !p.gone);

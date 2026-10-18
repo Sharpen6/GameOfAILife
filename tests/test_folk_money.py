@@ -62,12 +62,15 @@ def check_households(test, sim):
 
 
 def rehearse(sim, days: int = 22) -> dict:
-    """Three scripted weeks of folk_life on generated townsfolk: joins, splits and leavers on day 3, broke households
-    (some laid off, so the third Sunday moves them somewhere cheaper) on day 5, birthdays on day 10, every workday's
-    shift pay, Friday pensions and Sunday books. Line by line with rehearse in port/tools/parity_folk_gen.cjs."""
+    """Three scripted weeks of folk_life on generated townsfolk: each midnight's damp and emergency rolls; joins,
+    splits and leavers on day 3; broke households (some laid off, so the third Sunday moves them somewhere cheaper)
+    on day 5; birthdays on day 10; every workday's shift pay, Friday pensions and Sunday books. Line by line with
+    rehearse in port/tools/parity_folk_gen.cjs."""
     folk = sim.folk
     for day in range(days):
         weekday = day % 7
+        sim.clock.tick = day * MINUTES_PER_DAY
+        folk_life.nightly(sim)
         sim.clock.tick = day * MINUTES_PER_DAY + 8 * 60
         if day == 3:
             adults = [p for p in folk.people if p.age >= 25 and not p.gone]
@@ -300,6 +303,44 @@ class HouseholdTest(unittest.TestCase):
         folk_life.on_birthday(sim, kid)
         self.assertEqual(kid.job.place_id, folk_gen.HIGH_SCHOOL)
         self.assertEqual(kid.job.end_hour, folk_gen.student_job(11, folk_gen.HIGH_SCHOOL).end_hour)
+
+
+class NightlyTest(unittest.TestCase):
+    """The townsfolk homes' own damp and emergencies (housing.nightly leaves them alone), on the dice."""
+
+    def nights(self, sim, first, last):
+        for day in range(first, last + 1):
+            sim.clock.tick = day * MINUTES_PER_DAY
+            folk_life.nightly(sim)
+
+    def test_damp_and_emergencies(self):
+        sim = SimStub(1)
+        folk = sim.folk
+        owned = [hh for hh in folk.households if sim.homes[hh.home_id].owner == hh.id]
+        self.assertGreater(len(owned), 20)
+        hh = owned[0]
+        home = sim.homes[hh.home_id]
+        sim.lots[home.place].condition = 5.0  # derelict: damp
+        mem = folk_life.members(folk, hh)
+        before = [p.health for p in mem]
+        self.nights(sim, 1, 1)
+        for p, h in zip(mem, before):
+            self.assertLess(p.health, h, p.id)
+        worth0 = {x.id: household_cents(folk, x) for x in owned}
+        self.nights(sim, 2, 21)
+        tags = [ev["tag"] for ev in sim.events]
+        self.assertGreater(tags.count("emergency"), 5)
+        fixed = [ev for ev in sim.events if ev["tag"] == "emergency_settled" and " is fixed" in ev["text"]]
+        self.assertGreater(len(fixed), 0)
+        for ev in sim.events:  # folk news names folk only: every agent a townsperson
+            for a in ev["agents"] + ([ev["agent"]] if ev["agent"] else []):
+                self.assertTrue(a.startswith("f"), ev)
+        paid = [x for x in owned if household_cents(folk, x) < worth0[x.id]]
+        self.assertGreater(len(paid), 0)  # a fix costs the household (nobody is paid in these nights)
+        again = SimStub(1)
+        again.lots[again.homes[hh.home_id].place].condition = 5.0
+        self.nights(again, 1, 21)
+        self.assertEqual([ev["text"] for ev in again.events], [ev["text"] for ev in sim.events])
 
 
 class NodeParityTest(unittest.TestCase):
