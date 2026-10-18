@@ -51,7 +51,8 @@ NOTICE_FROM_DAY = 120  # from this game day, while no house is for sale (house_d
 NOTICE_DAYS = 14  # ... with notice: the tenants have this long to move out, and then it goes on the market ...
 NOTICE_GAP_DAYS = 30  # ... at most once in this many days in the town ...
 NOTICE_SETTLED_DAYS = 120  # ... and never to tenants who moved in less than this long ago
-NOTICE_HOUR = 9  # it gives notice, and lists a house whose notice ran out, at this hour (no household is talking money)
+NOTICE_MIN_DAYS = 7  # when tenants buy the house, the next notice keeps its sale date but gives at least this long
+NOTICE_HOUR = 9  # it gives notice (but at once after tenants buy), and lists a house whose notice ran out, at this hour
 WINTER_DECAY = 1.25
 CROWD_DECAY = 0.10  # +10% decay per resident beyond two
 EMERGENCY_DECAY = 4.0  # extra decay per day while an emergency is unfixed
@@ -187,15 +188,17 @@ class Home:
     held_for: str | None = None  # the household whose offer holds it while under offer (None: another buyer)
     pending_emergency: dict | None = None  # hidden {"kind", "due"}: never serialised
     emergency: dict | None = None  # live {"kind", "since"}: public
-    history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "household", "price"}
+    history: list[dict] = field(default_factory=list)  # {"tick", "time", "event", "household", "price"}; "off_market"
+    # on the "bought" row of a let house its tenants bought from the landlord (`buy_let_home`)
     # The owner household's adults' shares of the home, adult id -> share summing to 1: what each one paid of the
     # price when the household bought it. Empty (equal shares) for a home a household had at the start, or one
     # nobody paid for; emptied when the home goes back on the market.
     shares: dict[str, float] = field(default_factory=dict)
     # The landlord's notice on a let house it is selling, {"household", "since", "due"} (ticks): the tenants move out
-    # by "due" and the house goes on the market then (`give_notice`), unless they buy it. `noticed` is the tick of
-    # the last notice given here, kept after that and moved on a day for each day its sale waits for the tenants to
-    # go, so the landlord's sales are NOTICE_GAP_DAYS apart (`landlord_notices`).
+    # by "due" and the house goes on the market then (`give_notice`), unless they buy it. `noticed` is NOTICE_DAYS
+    # before the sale of the last notice given here (when it was given, unless it took over the date of a sale the
+    # tenants bought out), kept after that and moved on a day for each day its sale waits for the tenants to go, so
+    # the landlord's sales are NOTICE_GAP_DAYS apart (`landlord_notices`); cleared when the tenants buy the house.
     notice: dict | None = None
     noticed: int | None = None
 
@@ -594,8 +597,9 @@ def downsize_candidates(sim, hh: Household) -> list[Home]:
 
 def house_drought(sim, but: str | None = None) -> bool:
     """No house or big house other than `but` has been for sale for LANDLORD_SELLS_DAYS: none is for sale now
-    (under offer included) and none was bought in that time (a home is for sale until it is bought). The landlord
-    then sells a let house its tenants leave, and owners who have outgrown their homes think harder about selling."""
+    (under offer included) and none was bought in that time (a home is for sale until it is bought; one its tenants
+    bought from the landlord, marked off_market, never was). The landlord then sells a let house its tenants leave,
+    and owners who have outgrown their homes think harder about selling."""
     now = sim.clock.tick
     if now < LANDLORD_SELLS_DAYS * DAY:
         return False
@@ -604,7 +608,8 @@ def house_drought(sim, but: str | None = None) -> bool:
             continue
         if h.household is None and h.listing == "for_sale":
             return False
-        if any(r["event"] == "bought" and now - r["tick"] < LANDLORD_SELLS_DAYS * DAY for r in h.history):
+        if any(r["event"] == "bought" and not r.get("off_market") and now - r["tick"] < LANDLORD_SELLS_DAYS * DAY
+               for r in h.history):
             return False
     return True
 
@@ -977,26 +982,28 @@ def renovate(sim, hh: Household, cost: int) -> None:
 
 # --- group B: the landlord sells a let house with notice --------------------------------------
 
-def give_notice(sim, home: Home) -> None:
-    """The landlord is selling a let house: its tenants have NOTICE_DAYS to move out (house_hunt's notice variant asks
-    them where to go at once), and it goes on the market when the notice runs out (`landlord_notices`)."""
+def give_notice(sim, home: Home, due: int | None = None) -> None:
+    """The landlord is selling a let house: its tenants have NOTICE_DAYS to move out, or until `due` when the notice
+    takes over the date of a sale the last tenants bought out (`buy_let_home`); house_hunt's notice variant asks them
+    where to go at once, and the house goes on the market when the notice runs out (`landlord_notices`)."""
     hh = sim.households[home.household]
     now = sim.clock.tick
-    home.notice = {"household": hh.id, "since": now, "due": now + NOTICE_DAYS * DAY}
-    home.noticed = now
+    due = now + NOTICE_DAYS * DAY if due is None else due
+    home.notice = {"household": hh.id, "since": now, "due": due}
+    home.noticed = due - NOTICE_DAYS * DAY
     hh.cooldowns.pop("house_hunt", None)
-    _event(sim, f"{LANDLORD} is selling {home.name} and gives {_hh_lower(sim, hh)} {NOTICE_DAYS // 7} weeks' notice.",
-           "home_listed", home.place, (adults(sim, hh) or [None])[0], [a.id for a in _members(sim, hh)])
+    notice = (f"{NOTICE_DAYS // 7} weeks' notice" if due - now == NOTICE_DAYS * DAY
+              else f"notice to move out by {stamp_of(due)}")
+    _event(sim, f"{LANDLORD} is selling {home.name} and gives {_hh_lower(sim, hh)} {notice}.", "home_listed",
+           home.place, (adults(sim, hh) or [None])[0], [a.id for a in _members(sim, hh)])
 
 
 def landlord_notices(sim) -> None:
     """NOTICE_HOUR every day. A house whose notice has run out goes on the market, its tenants moved first into the
     cheapest fitting home to let if they are still there (an eviction: the landlord's van, no affordability gate;
     crowding relaxed to FORCED_CROWDING when nothing else fits, and another day's wait when nothing is free, which
-    the next notice waits too). The sale is NOTICE_DAYS after the notice however soon the tenants go, so the
-    landlord's sales are as far apart as its notices. Then, from day NOTICE_FROM_DAY, while no house has been for
-    sale for LANDLORD_SELLS_DAYS (`house_drought`), no notice is running and none was given in the last
-    NOTICE_GAP_DAYS, the landlord gives notice on one let house (`notice_home`)."""
+    the next notice waits too). The sale is when the notice runs out however soon the tenants go, so the landlord's
+    sales are as far apart as its notices. Then the landlord may give a notice (`_landlord_sells`)."""
     now = sim.clock.tick
     for home in sim.homes.values():
         if home.notice is None or home.notice["due"] > now:
@@ -1005,25 +1012,36 @@ def landlord_notices(sim) -> None:
             hh = sim.households[home.household]
             rental = cheapest_rental(sim, hh) or cheapest_rental(sim, hh, per_bedroom=FORCED_CROWDING)
             if rental is None or not move_household(sim, hh, rental.id, "rent", forced="evicted"):
-                home.notice["due"] = now + DAY
+                home.notice["due"] += DAY
                 home.noticed += DAY
                 continue
         home.notice = None
         home.owner, home.listing = "market", "for_sale"
         _event(sim, f"{LANDLORD} puts {home.name} up for sale (${value(sim, home.id):,}).", "home_listed", home.place)
+    _landlord_sells(sim)
+
+
+def _landlord_sells(sim, due: int | None = None) -> None:
+    """From day NOTICE_FROM_DAY, while no house has been for sale for LANDLORD_SELLS_DAYS (`house_drought`), no notice
+    is running and none was given in the last NOTICE_GAP_DAYS (counted from NOTICE_DAYS before its sale,
+    `Home.noticed`), the landlord gives notice on one let house (`notice_home`), to move out by `due` when given."""
+    now = sim.clock.tick
     if now < NOTICE_FROM_DAY * DAY or any(h.notice is not None for h in sim.homes.values()) or not house_drought(sim):
         return
     if any(h.noticed is not None and now - h.noticed < NOTICE_GAP_DAYS * DAY for h in sim.homes.values()):
         return
     home = notice_home(sim)
     if home is not None:
-        give_notice(sim, home)
+        give_notice(sim, home, due)
 
 
 def buy_let_home(sim, hh: Household, agent: Agent | None = None) -> bool:
     """Tenants under notice buy the let house they live in from the landlord at its value, paid from the household
-    pot; each adult's share of it is what they paid, and the notice ends. Returns False, with a too_late event, when
-    the notice is over or they can't raise the money after all."""
+    pot; each adult's share of it is what they paid, and the notice ends. The house was never on the market, so the
+    purchase leaves a house drought standing (its "bought" row is marked off_market) and doesn't count towards the
+    gap between the landlord's sales: the landlord gives notice on the next let house at once (`_landlord_sells`),
+    to move out by the same date, so its sale is not put off (but never less than NOTICE_MIN_DAYS from now). Returns
+    False, with a too_late event, when the notice is over or they can't raise the money after all."""
     home = sim.homes[hh.home_id]
     who = household_name(sim, hh)
     if under_notice(sim, hh) is None or not can_buy_let_home(sim, hh):
@@ -1031,17 +1049,20 @@ def buy_let_home(sim, hh: Household, agent: Agent | None = None) -> bool:
         return False
     now, stamp = sim.clock.tick, sim.clock.stamp()
     price = value(sim, home.id)
+    sale = home.notice["due"]
     dues = pay_household(sim, hh, price)
-    home.owner, home.listing, home.notice = hh.id, None, None
+    home.owner, home.listing, home.notice, home.noticed = hh.id, None, None, None
     home.shares = {aid: due / price for aid, due in dues.items()}
     hh.weekly_rent = 0
     hh.hardship_rent = None
     _history(hh.history, {"tick": now, "time": stamp, "event": "bought", "home": home.id, "name": home.name,
                           "price": price})
-    _history(home.history, {"tick": now, "time": stamp, "event": "bought", "household": hh.id, "price": price})
+    _history(home.history, {"tick": now, "time": stamp, "event": "bought", "household": hh.id, "price": price,
+                            "off_market": True})
     _event(sim, f"{who} {'buys' if _one(sim, hh) else 'buy'} {home.name} ({TIERS[home.tier]['label']}, "
                 f"{district_name(sim, home)}) from {LANDLORD} for ${price:,}.", "home_bought", home.place, agent,
            [a.id for a in _members(sim, hh)])
+    _landlord_sells(sim, max(sale, now + NOTICE_MIN_DAYS * DAY))
     return True
 
 
@@ -1369,8 +1390,7 @@ def _call_off(agent: Agent, opt) -> None:
 def apply_extra(sim, agent: Agent, fork, opt) -> None:
     """The housing extras of a chosen option, at decision time (PLAN 3.11): move (with what comes only if the move
     goes through: settle, household cooldowns {key: minutes}, and renovate, the price of doing up the home
-    bought; a rental under the landlord's notice, marked notice, skips the affordability gate as housing_trouble's
-    do), buy_let (tenants under notice buy the house they rent), hold, repair, works, fix_emergency, hh_cooldown,
+    bought), buy_let (tenants under notice buy the house they rent), hold, repair, works, fix_emergency, hh_cooldown,
     belt_tighten, sell_car, sell_stuff, ask_help and odd_jobs."""
     extra = getattr(opt, "extra", None) or {}
     if not extra:
@@ -1381,7 +1401,7 @@ def apply_extra(sim, agent: Agent, fork, opt) -> None:
         hh.cooldowns[fork.kind] = now + extra["hh_cooldown"]
     if "move" in extra:
         how = extra.get("how", "buy")
-        down = how == "rent" and (extra.get("notice") or (fork is not None and fork.kind == "housing_trouble"))
+        down = how == "rent" and fork is not None and fork.kind == "housing_trouble"
         if move_household(sim, hh, extra["move"], how, decider=agent, plan_decider=False, check=not down):
             for key, minutes in (extra.get("settle") or {}).items():
                 hh.cooldowns[key] = now + minutes

@@ -314,27 +314,28 @@ def _downsize_hunt(sim: Simulation, agent: Agent, hh: Household, months: int) ->
 
 def _notice_hunt(sim: Simulation, agent: Agent, hh: Household, home) -> Fork | None:
     """house_hunt for tenants whose let house the landlord is selling (`housing.give_notice`), asked in the household
-    window until they have moved: rent the best fitting home to let they can carry (else the best that fits), rent
-    the cheapest one when that costs less a week, buy the house from the landlord when they can afford it,
-    or ask the landlord for more time (it waits no longer than the notice, after which it moves them itself). A move
-    that isn't available gives its slot to keep looking (two kinds) or "decide another time". The move out skips the
-    affordability gate, as a step down out of housing trouble does: the household has to go somewhere."""
+    window until they have moved: rent the best fitting home to let they can carry, rent the cheapest one they can
+    carry when that costs less a week, buy the house from the landlord when they can afford it, or ask the landlord
+    for more time (it waits no longer than the notice, after which it moves them itself). A move that isn't
+    available gives its slot to keep looking (two kinds) or "decide another time". The rentals offered pass the
+    affordability gate of every house_hunt move (PLAN decision 57); a household that can carry none is moved into the
+    cheapest fitting one by the landlord when the notice runs out (`housing.landlord_notices`)."""
     now = sim.clock.tick
     if not _hh_window(sim) or not _ready(sim, agent, hh, "house_hunt") or sim.on_shift_now(agent):
         return None
     hh.cooldowns["house_hunt"] = now + NOTICE_RETRY
-    pool = [h for h in housing.vacancies(sim, "for_rent") if housing.fits(sim, hh, h)]
-    carried = [h for h in pool if housing.affordable(sim, hh, h.id)]
-    best = (max(carried or pool, key=lambda h: (TIERS[h.tier]["rank"], h.bedrooms, housing.condition_of(sim, h.id),
-                                                -h.rent, h.id)) if pool else None)
-    cheap = housing.cheapest_rental(sim, hh)
-    if cheap is not None and best is not None and cheap.rent >= best.rent:
+    carried = [h for h in housing.vacancies(sim, "for_rent")
+               if housing.fits(sim, hh, h) and housing.affordable(sim, hh, h.id)]
+    best = (max(carried, key=lambda h: (TIERS[h.tier]["rank"], h.bedrooms, housing.condition_of(sim, h.id), -h.rent,
+                                        h.id)) if carried else None)
+    cheap = min(carried, key=lambda h: (h.rent, -housing.condition_of(sim, h.id), h.id)) if carried else None
+    if cheap is not None and cheap.rent >= best.rent:
         cheap = None
 
     def rent(h, the: str, base: float, tags: dict) -> Option:
         text = f"Rent {the}{h.name} ({TIERS[h.tier]['label']}{_stage_note(sim, h.id)}) for ${h.rent}/week"
         return Option(text, [("move_house", h.place)], cost=MOVING_COST, base=base, tags=tags, gains={"fun": 10},
-                      outcomes=_downsize_outcomes(sim, hh), extra={"move": h.id, "how": "rent", "notice": True},
+                      outcomes=_downsize_outcomes(sim, hh), extra={"move": h.id, "how": "rent"},
                       household_pays=True, charge=False)
 
     first = (rent(best, "", 0.45, {"family": 0.3, "diligence": 0.3, "thrift": -0.1}) if best

@@ -297,27 +297,28 @@
   }
 
   // house_hunt for tenants whose let house the landlord is selling (`housing.give_notice`), asked in the household
-  // window until they have moved: rent the best fitting home to let they can carry (else the best that fits), rent
-  // the cheapest one when that costs less a week, buy the house from the landlord when they can afford it,
-  // or ask the landlord for more time (it waits no longer than the notice, after which it moves them itself). A move
-  // that isn't available gives its slot to keep looking (two kinds) or "decide another time". The move out skips the
-  // affordability gate, as a step down out of housing trouble does: the household has to go somewhere.
+  // window until they have moved: rent the best fitting home to let they can carry, rent the cheapest one they can
+  // carry when that costs less a week, buy the house from the landlord when they can afford it, or ask the landlord
+  // for more time (it waits no longer than the notice, after which it moves them itself). A move that isn't
+  // available gives its slot to keep looking (two kinds) or "decide another time". The rentals offered pass the
+  // affordability gate of every house_hunt move (PLAN decision 57); a household that can carry none is moved into the
+  // cheapest fitting one by the landlord when the notice runs out (`housing.landlord_notices`).
   function _notice_hunt(sim, agent, hh, home) {
     const housing = H();
     const now = sim.clock.tick;
     if (!_hh_window(sim) || !_ready(sim, agent, hh, "house_hunt") || sim.on_shift_now(agent)) return null;
     hh.cooldowns.house_hunt = now + NOTICE_RETRY;
-    const pool = housing.vacancies(sim, "for_rent").filter(h => housing.fits(sim, hh, h));
-    const carried = pool.filter(h => housing.affordable(sim, hh, h.id));
-    const best = pool.length ? maxBy(carried.length ? carried : pool,
+    const carried = housing.vacancies(sim, "for_rent")
+      .filter(h => housing.fits(sim, hh, h) && housing.affordable(sim, hh, h.id));
+    const best = carried.length ? maxBy(carried,
       h => [TIERS[h.tier].rank, h.bedrooms, housing.condition_of(sim, h.id), -h.rent, h.id]) : null;
-    let cheap = housing.cheapest_rental(sim, hh);
-    if (cheap !== null && best !== null && cheap.rent >= best.rent) cheap = null;
+    let cheap = carried.length ? minBy(carried, h => [h.rent, -housing.condition_of(sim, h.id), h.id]) : null;
+    if (cheap !== null && cheap.rent >= best.rent) cheap = null;
 
     const rent = (h, the, base, tags) => {
       const text = `Rent ${the}${h.name} (${TIERS[h.tier].label}${_stage_note(sim, h.id)}) for $${h.rent}/week`;
       return new Option(text, [["move_house", h.place]], { cost: MOVING_COST, base, tags, gains: { fun: 10 },
-        outcomes: _downsize_outcomes(sim, hh), extra: { move: h.id, how: "rent", notice: true },
+        outcomes: _downsize_outcomes(sim, hh), extra: { move: h.id, how: "rent" },
         household_pays: true, charge: false });
     };
 

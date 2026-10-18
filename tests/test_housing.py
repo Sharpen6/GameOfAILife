@@ -2684,9 +2684,9 @@ class NoticeTest(unittest.TestCase):
                                         "Ask Millbrook Homes for more time"])
         self.assertEqual([o.cost for o in fork.options], [housing.MOVING_COST, housing.MOVING_COST, 0, 0])
         self.assertEqual([o.extra for o in fork.options], [
-            {"move": "main_39", "how": "rent", "notice": True},
-            {"move": "birch_court_1b", "how": "rent", "notice": True},
+            {"move": "main_39", "how": "rent"}, {"move": "birch_court_1b", "how": "rent"},
             {"hh_cooldown": housing_forks.NOTICE_RETRY}, {"hh_cooldown": housing_forks.NOTICE_LATER}])
+        self.assertTrue(all(housing.affordable(sim, hh, h) for h in ("main_39", "birch_court_1b")))
         self.assertLess(housing.weekly_outgo(sim, hh, "birch_court_1b"), housing.weekly_outgo(sim, hh, "main_39"))
         self.assertEqual(hh.cooldowns["house_hunt"], at(121, 18, 30))  # asked again tomorrow if nothing comes of it
         self.assertIsNone(housing_forks.house_hunt_fork(sim, sim.agents["rina"]))  # one ask for the household
@@ -2711,21 +2711,50 @@ class NoticeTest(unittest.TestCase):
         self.assertIsNotNone(housing_forks.house_hunt_fork(sim, sim.agents["rina"]))
         self.assertIsNone(housing_forks.house_hunt_fork(sim, sim.agents["lior"]))  # a child
 
-    def test_tenants_in_arrears_are_asked_and_can_always_go(self):
-        """The ordinary house_hunt skips a household in arrears; under notice it is asked, and the move to a rental
-        skips the affordability gate, as housing_trouble's step down does: it has to go somewhere."""
+    def test_tenants_in_arrears_are_asked_and_offered_what_they_can_carry(self):
+        """The ordinary house_hunt skips a household in arrears; under notice it is asked. The rentals it is offered
+        pass the affordability gate of every house_hunt move (PLAN decision 57): with $5,000 the Mizrahis can carry
+        only the flats, and broke none, so they keep looking, and the landlord moves them into the cheapest fitting
+        home to let when the notice runs out (no van to pay)."""
         sim = drought(120)
         housing.tick(sim)
         sim.clock.tick = at(120, 18, 30)
         hh, avi = sim.households["mizrahi"], sim.agents["avi"]
         hh.arrears = 2
-        set_funds(sim, "mizrahi", 0)
+        set_funds(sim, "mizrahi", 5000)
         fork = housing_forks.house_hunt_fork(sim, avi)
-        self.assertEqual(labels(fork)[:2], ["Rent 39 Main Street (house) for $330/week",
+        self.assertFalse(housing.affordable(sim, hh, "main_39"))
+        self.assertEqual(labels(fork)[:2], ["Rent Birch Court, flat 3B (flat) for $260/week",
                                             "Rent the cheaper Birch Court, flat 1B (flat) for $220/week"])
-        self.assertFalse(housing.affordable(sim, hh, "birch_court_1b"))
-        housing.apply_extra(sim, avi, fork, fork.options[1])
-        self.assertEqual(hh.home_id, "birch_court_1b")
+        self.assertTrue(all(housing.affordable(sim, hh, o.extra["move"]) for o in fork.options[:2]))
+        set_funds(sim, "mizrahi", 0)
+        hh.cooldowns.clear()
+        fork = housing_forks.house_hunt_fork(sim, avi)
+        self.assertEqual(labels(fork), ["Look for somewhere else to rent", "Keep looking for the right place",
+                                        "Talk it over and decide another time", "Ask Millbrook Homes for more time"])
+        housing.apply_extra(sim, avi, fork, fork.options[0])
+        self.assertEqual(hh.home_id, "main_13")
+        sim.clock.tick = at(134, 9)
+        housing.tick(sim)
+        self.assertEqual((hh.home_id, housing.funds(sim, hh)), ("birch_court_1b", 0))
+        self.assertEqual(sim.texts("evicted"), ["Millbrook Homes evicts the Mizrahis from 13 Main Street. They move "
+                                                "into Birch Court, flat 1B at $220/week."])
+
+    def test_no_rental_offered_that_the_income_does_not_cover(self):
+        """The Nassars' income ($532 a week) covers neither the house nor the flat to let (with bills, living and
+        the commute): with $6,000 put by they are offered no rental, rather than the dearer house."""
+        sim = drought(120)
+        hh, home = sim.households["nassar"], sim.homes["river_20"]
+        set_funds(sim, "nassar", 6000)
+        housing.give_notice(sim, home)
+        sim.clock.tick = at(120, 18, 30)
+        self.assertEqual(round(housing.weekly_income(sim, hh)), 532)
+        for home_id in ("main_39", "birch_court_1b"):
+            self.assertLess(housing.weekly_income(sim, hh), housing.weekly_outgo(sim, hh, home_id))
+            self.assertFalse(housing.affordable(sim, hh, home_id))
+        fork = housing_forks.house_hunt_fork(sim, housing.adults(sim, hh)[0])
+        self.assertEqual(labels(fork)[:2], ["Look for somewhere else to rent", "Keep looking for the right place"])
+        self.assertEqual(len(set(labels(fork))), 4)
 
     def test_nothing_to_let_keeps_looking(self):
         sim = drought(120)
@@ -2758,6 +2787,10 @@ class NoticeTest(unittest.TestCase):
                     sim.clock.tick = at(120, 18, 30)
                     fork = housing_forks.house_hunt_fork(sim, housing.adults(sim, hh)[0])
                     self.assertEqual(len(set(labels(fork))), 4, labels(fork))
+                    for option in fork.options:  # every rental offered passes the affordability gate
+                        if "move" in option.extra:
+                            self.assertTrue(housing.affordable(sim, hh, option.extra["move"]), labels(fork))
+                            seen["rentals"] += 1
                     first, second = fork.options[0], fork.options[1]
                     if "the cheaper" in second.label:
                         self.assertLess(spend(sim, hh, second.extra["move"]), spend(sim, hh, first.extra["move"]))
@@ -2771,6 +2804,7 @@ class NoticeTest(unittest.TestCase):
                     seen["buy"] += labels(fork)[2].startswith("Buy ")
         self.assertGreater(seen["cheaper"], 10)
         self.assertGreater(seen["buy"], 5)
+        self.assertGreater(seen["rentals"], 40)
 
     def test_moving_out_leaves_the_house_empty_until_the_notice_runs_out(self):
         sim = drought(120)
@@ -2854,6 +2888,68 @@ class NoticeTest(unittest.TestCase):
         self.assertEqual((sim.homes["main_20"].owner, housing.funds(sim, hh)), ("landlord", 9000))
         self.assertEqual(sim.texts("too_late"), ["The Cohens can't buy 20 Main Street after all."])
         self.assertEqual(dana.plan, [("idle", "home")])
+
+    def test_a_purchase_hands_the_sale_date_to_the_next_notice(self):
+        """Tenants who buy the house leave the drought standing (the house was never on the market) and don't hold up
+        the landlord's sales: it gives notice on the next let house at once, to move out by the same date."""
+        sim = drought(120)
+        hh, dana, home = sim.households["cohen"], sim.agents["dana"], sim.homes["main_20"]
+        housing.give_notice(sim, home)
+        sim.clock.tick = at(120, 18, 30)
+        fork = housing_forks.house_hunt_fork(sim, dana)
+        housing.apply_extra(sim, dana, fork, fork.options[2])
+        self.assertEqual((home.owner, home.notice, home.noticed), ("cohen", None, None))
+        self.assertEqual(home.history[-1], {"tick": at(120, 18, 30), "time": sim.clock.stamp(), "event": "bought",
+                                            "household": "cohen", "price": 15900, "off_market": True})
+        self.assertTrue(housing.house_drought(sim))
+        self.assertEqual(noticed(sim), ["main_13"])  # at once, not 30 days on
+        nxt, mizrahi = sim.homes["main_13"], sim.households["mizrahi"]
+        self.assertEqual(nxt.notice, {"household": "mizrahi", "since": at(120, 18, 30), "due": at(134, 9)})
+        self.assertEqual(nxt.noticed, at(120, 9))  # the sale it took over was noticed then
+        self.assertEqual(sim.texts("home_listed"), [
+            "Millbrook Homes is selling 20 Main Street and gives the Cohens 2 weeks' notice.",
+            "Millbrook Homes is selling 13 Main Street and gives the Mizrahis notice to move out by Day 135 Tue "
+            "09:00."])
+        fork = housing_forks.house_hunt_fork(sim, sim.agents["avi"])  # asked that evening
+        self.assertIn("you have to move out by Day 135 Tue 09:00.", fork.question)
+        self.assertEqual(mizrahi.cooldowns["house_hunt"], at(121, 18, 30))
+        sim.clock.tick = at(134, 9)
+        housing.tick(sim)
+        self.assertEqual((nxt.owner, nxt.listing, mizrahi.home_id), ("market", "for_sale", "birch_court_1b"))
+        sim.clock.tick = at(134, 18, 30)
+        self.assertTrue(housing.move_household(sim, sim.households["rosen"], "main_13", "buy", check=False))
+        sim.clock.tick = at(149, 9)
+        housing.tick(sim)
+        self.assertEqual(noticed(sim), [])  # the next sale is 30 days after this one, as ever
+        sim.clock.tick = at(150, 9)
+        housing.tick(sim)
+        self.assertEqual(noticed(sim), ["main_21"])
+
+    def test_a_late_purchase_still_gives_a_week(self):
+        sim = drought(120)
+        housing.give_notice(sim, sim.homes["main_20"])
+        sim.clock.tick = at(130, 18, 30)
+        self.assertTrue(housing.buy_let_home(sim, sim.households["cohen"]))
+        nxt = sim.homes["main_13"]
+        self.assertEqual((nxt.notice["due"], nxt.noticed), (at(137, 18, 30), at(123, 18, 30)))
+        self.assertEqual(sim.texts("home_listed")[-1], "Millbrook Homes is selling 13 Main Street and gives the "
+                                                       "Mizrahis notice to move out by Day 138 Fri 18:30.")
+        sim.clock.tick = at(137, 9)
+        housing.tick(sim)
+        self.assertEqual((nxt.owner, nxt.listing), ("landlord", None))
+        sim.clock.tick = at(138, 9)
+        housing.tick(sim)
+        self.assertEqual((nxt.owner, nxt.listing, sim.households["mizrahi"].home_id),
+                         ("market", "for_sale", "birch_court_1b"))
+
+    def test_no_next_notice_once_a_house_is_for_sale(self):
+        sim = drought(120)
+        housing.give_notice(sim, sim.homes["main_20"])
+        self.assertTrue(housing.move_household(sim, sim.households["levi"], "cedar_court_3b", "rent", check=False))
+        self.assertEqual(sim.homes["main_28"].listing, "for_sale")
+        sim.clock.tick = at(120, 18, 30)
+        self.assertTrue(housing.buy_let_home(sim, sim.households["cohen"]))
+        self.assertEqual(noticed(sim), [])
 
     def test_a_death_under_notice(self):
         sim = drought(120)
@@ -3180,12 +3276,17 @@ class NoticeParityTest(unittest.TestCase):
                      ["office"], ["tick", at(134, 18, 30)], ["move", "rosen", "main_13", "buy"], ["tick", at(149, 9)],
                      ["office"], ["candidate"], ["state", "cohen", "main_20"], ["tick", at(150, 9)], ["office"],
                      ["state", "cohen", "main_20"]],
-            # in arrears and broke, the move still goes; a death under notice
+            # broke: no rental offered, and the landlord moves them out when the notice runs out; a death under notice
             start + [["tick", at(120, 9)], ["office"], evening, ["cash", "avi", 0.0], ["cash", "rina", 0.0],
-                     ["build", "avi"], ["decide", "avi", 0], mizrahi],
+                     ["build", "avi"], ["decide", "avi", 0], mizrahi, ["tick", at(134, 9)], ["office"], mizrahi],
             start + [["tick", at(120, 9)], ["notice", "river_20"], ["die", "noam", "ronit", "amira"],
                      ["state", "nassar", "river_20"], ["tick", at(134, 9)], ["office"],
                      ["state", "nassar", "river_20"]],
+            # a purchase by the tenants hands the sale date to the next notice: the same day, or a week from a late one
+            start + [["tick", at(120, 9)], ["notice", "main_20"], evening, ["build", "dana"], ["decide", "dana", 2],
+                     mizrahi, ["candidate"], evening, ["build", "avi"], ["tick", at(134, 9)], ["office"], mizrahi],
+            start + [["tick", at(120, 9)], ["notice", "main_20"], ["tick", at(130, 18, 30)], ["buy_let", "cohen"],
+                     mizrahi, ["tick", at(137, 9)], ["office"], mizrahi, ["tick", at(138, 9)], ["office"], mizrahi],
         ]
         payload = {"buyers": FIVE_BUYERS, "cases": cases}
         run = subprocess.run([NODE, "-e", self.JS, str(ROOT / "port" / "tools" / "engine.cjs")],
@@ -3217,8 +3318,17 @@ class NoticeParityTest(unittest.TestCase):
                           py[7][2]["hh"]["home_id"]], ["main_13", at(135, 9), at(121, 9), "birch_court_1b"])
         self.assertEqual([py[8][1], py[8][2]["home"]["notice"], py[8][3]["home"]["notice"]["due"]],
                          [["main_20", True], None, at(164, 9)])
-        self.assertEqual(py[9][1]["hh"]["home_id"], "main_39")
+        self.assertEqual(py[9][0]["labels"][:2], ["Look for somewhere else to rent",
+                                                  "Keep looking for the right place"])
+        self.assertEqual([py[9][1]["hh"]["home_id"], py[9][2]["hh"]["home_id"]], ["main_13", "birch_court_1b"])
         self.assertEqual((py[10][0]["home"]["listing"], py[10][1]["home"]["listing"]), (None, "for_sale"))
+        self.assertEqual([py[11][1]["home"]["notice"], py[11][1]["home"]["noticed"], py[11][2]],
+                         [{"household": "mizrahi", "since": at(120, 18, 30), "due": at(134, 9)}, at(120, 9),
+                          ["main_13", True]])  # the drought stands
+        self.assertIn("you have to move out by Day 135 Tue 09:00.", py[11][3]["question"])
+        self.assertEqual(py[11][4]["home"]["listing"], "for_sale")
+        self.assertEqual([py[12][0], py[12][1]["home"]["notice"]["due"], py[12][2]["home"]["listing"],
+                          py[12][3]["home"]["listing"]], [True, at(137, 18, 30), None, "for_sale"])
 
 
 if __name__ == "__main__":
