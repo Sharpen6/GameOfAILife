@@ -1471,7 +1471,7 @@
       const st = scene.stats;
       return { big: BIG, lod: scene.lodNow || lodOf(scene.cam.zoom), level: scene.lodNow === "near" ? null : scene.levelNow || null,
         zoom: scene.cam.zoom, phone: isPhone(), frames: frameNo, drawMs: st.draw || 0, buildMs: st.buildMs || 0, groundMs: st.groundMs || 0,
-        itemsMs: st.itemsMs || 0, labelsMs: st.labelsMs || 0, spriteMs: st.spriteMs || 0,
+        itemsMs: st.itemsMs || 0, labelsMs: st.labelsMs || 0, spriteMs: st.spriteMs || 0, lowMs: st.lowMs || 0,
         chunks: chunks ? chunks.size() : 0, chunkMP: chunks ? chunks.mp / 1e6 : 0, chunkCapMP: lowCap() / 1e6, pending: chunks ? chunks.pending : 0,
         chunksBuilt: chunks ? chunks.built : 0, nearMP: nearPx() / 1e6, cacheMP: ((chunks ? chunks.mp : 0) + nearPx()) / 1e6,
         sprites: sprites.size, spriteMP: spriteMP / 1e6, spriteCapMP: scene.spriteCap / 1e6, queue: spriteQueue.size, spriteBuilds: st.spriteBuilds || 0,
@@ -1482,7 +1482,7 @@
     // idle prefetch: the far levels over the whole map, so a zoom out finds them baked
     const prefetch = () => { const r = { x0: B.x0, y0: B.y0 - 1024, x1: B.x1, y1: B.y1 }; chunks.prefetch("c", 0.0625, r, budget) || chunks.prefetch("c", 0.125, r, budget); };
     function drawLow(v, lod, now) {
-      const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom);
+      const S = v.S, far = lod === "far", lv = levelFor(lod, scene.cam.zoom), tLow = performance.now();
       scene.levelNow = lv;
       // the chunk budget (24 MP, 10 on phones) is shared with the near ground cache, which keeps a quarter of it
       trimNear(lowCap() / 4);
@@ -1532,7 +1532,9 @@
       if (still && !chunks.pending) prefetch();
       scene.stats.items = 0; scene.stats.chunks = n; scene.stats.boxes = 0;
       scene.stats.buildMs = budget.spent;
+      const tL = performance.now();
       labels(v, now);
+      scene.stats.labelsMs = performance.now() - tL; scene.stats.lowMs = tL - tLow;
     }
 
     // The tiles a place's overlay tint covers: a house's lot (its footprint and garden), or for places without a
