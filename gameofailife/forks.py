@@ -102,6 +102,7 @@ class Fork:
     controller: str | None = None  # the controller asked, if one was
     model: str | None = None  # the model that controller declared in its hello
     profile_choice: int | None = None  # the option the profile scores highest (first on ties), set when asked
+    about: list[str] = field(default_factory=list)  # lines on who or what the fork is about (life.md 8.2)
 
 
 def luck_odds(p: float, valence: int, luck: float) -> float:
@@ -257,7 +258,7 @@ def _best_friend(sim: Simulation, agent: Agent, exclude_household: bool = True,
     hh = sim.household(agent).member_ids
     pool = [(r.affinity, oid) for oid, r in agent.relationships.items()
             if not (exclude_household and oid in hh) and r.affinity > 10
-            and sim.agents[oid].alive and (not adults_only or sim.agents[oid].is_adult)]
+            and oid in sim.agents and sim.agents[oid].alive and (not adults_only or sim.agents[oid].is_adult)]
     if not pool:
         return None
     return sim.agents[max(pool)[1]]
@@ -267,7 +268,8 @@ def _playmate(sim: Simulation, agent: Agent) -> Agent | None:
     """A child's best friend among the other children outside the household (affinity over 10), or None."""
     hh = sim.household(agent).member_ids
     pool = [(r.affinity, oid) for oid, r in agent.relationships.items()
-            if oid not in hh and r.affinity > 10 and sim.agents[oid].alive and not sim.agents[oid].is_adult]
+            if oid not in hh and r.affinity > 10 and oid in sim.agents and sim.agents[oid].alive
+            and not sim.agents[oid].is_adult]
     if not pool:
         return None
     return sim.agents[max(pool)[1]]
@@ -297,7 +299,7 @@ def _short_of(agent: Agent, cost: float) -> bool:
 
 def _closest_family(sim: Simulation, agent: Agent) -> Agent | None:
     pool = [(r.affinity, oid) for oid, r in agent.relationships.items()
-            if r.kind.value in ("family", "partner") and sim.agents[oid].alive]
+            if r.kind.value in ("family", "partner") and oid in sim.agents and sim.agents[oid].alive]
     return sim.agents[max(pool)[1]] if pool else None
 
 
@@ -314,7 +316,9 @@ def invite_fork(sim: Simulation, agent: Agent) -> Fork | None:
         return None  # off to work first; the invite waits or expires
     if not _open_on_arrival(sim, agent, invite["place"]):
         return None  # the place is shut by then; the invite waits or expires
-    host = sim.agents[invite["from"]]
+    host = sim.person(invite["from"])
+    if host is None:
+        return None
     place = sim.town.places[invite["place"]]
     rel = ("rel", host.id)
     meet = "play" if place.kind == "park" else "hang_out"  # children ask each other to play in a park
@@ -357,6 +361,9 @@ def work_fork(sim: Simulation, agent: Agent) -> Fork | None:
     job = agent.job
     if not job or agent.worked_today == sim.clock.day:
         return None
+    from . import life  # lazy: life imports this module
+    if life.in_hospital(agent):
+        return None  # on the ward: no shift today
     minutes_to_start = job.start_hour * 60 - sim.clock.minute_of_day
     if not job.workdays.count(sim.clock.weekday) or not -WORK_LATE <= minutes_to_start <= 180:
         return None
@@ -689,7 +696,8 @@ def free_time_fork(sim: Simulation, agent: Agent) -> Fork | None:
 
 # The fork builders in priority order, by name: "housing_forks." names live in housing_forks.py, which imports
 # this module, so build_fork looks them up when it runs rather than at import.
-BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "housing_forks.repair_fork", "payday_fork",
+BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "people.pending_fork",
+            "housing_forks.repair_fork", "payday_fork",
             "groceries_fork", "housing_forks.housing_trouble_fork", "housing_forks.house_hunt_fork",
             "housing_forks.upkeep_fork", "lonely_fork", "free_time_fork"]
 
@@ -699,12 +707,13 @@ COOLDOWN = {"groceries": 360, "lonely": 150, "free_time": 90, "hunger": 45, "sle
 
 
 def builders() -> list:
-    """BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too)."""
-    from . import housing_forks  # it imports this module, so not at the top
+    """BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too):
+    a bare name is this module's, "<module>.<fn>" that module's (imported here: it may import this one)."""
+    import importlib
 
     here = globals()
-    return [getattr(housing_forks, name[len("housing_forks."):]) if name.startswith("housing_forks.") else here[name]
-            for name in BUILDERS]
+    return [getattr(importlib.import_module(f".{name.rpartition('.')[0]}", __package__), name.rpartition(".")[2])
+            if "." in name else here[name] for name in BUILDERS]
 
 
 def build_fork(sim: Simulation, agent: Agent) -> Fork | None:

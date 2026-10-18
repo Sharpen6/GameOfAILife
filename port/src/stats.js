@@ -14,7 +14,7 @@
 // builders read G.housing and G.town when they run, by which time every engine script has loaded.
 (function (G) {
   "use strict";
-  const { sum, sortedBy, count, commas, keepLast, PyError, pyInt, pyStr } = G.py;
+  const { sum, sortedBy, count, commas, keepLast, PyError, pyInt, pyStr, hasOwn } = G.py;
 
   // The decision counters, as in the `stats.llm.today` and `stats.llm.total` blocks:
   //   asked          forks sent to a controller
@@ -149,7 +149,7 @@
       lots_by_stage: by_stage, neglected_lived_in: neglected };
   }
 
-  function _city_block(sim, people) {
+  function _city_block(sim, people, parts = null) {
     const alive = people.map(p => p.agent);
     const adults = alive.filter(a => a.is_adult);
     const dead = Array.from(sim.agents.values()).filter(a => !a.alive);
@@ -157,8 +157,10 @@
     const lucks = alive.map(a => a.luck);
     const needs = {};
     for (const n of ["hunger", "energy", "social", "fun"]) needs[n] = _int(_mean(alive.map(a => a.needs[n])));
-    return {
-      population: alive.length, start_population: sim.agents.size, deaths: dead.length, births: 0, // nobody is born yet
+    const counts = sim.life.counts; // every birth and death of both tiers, once life counts them
+    const block = {
+      population: alive.length, start_population: sim.agents.size,
+      deaths: hasOwn(counts, "deaths") ? counts.deaths : dead.length, births: counts.births ?? 0,
       adults: adults.length, children: alive.length - adults.length,
       working: count(alive, a => a.job && a.job.hourly_wage > 0),
       students: count(alive, a => a.job && a.job.hourly_wage <= 0),
@@ -171,7 +173,43 @@
       luck: { touched: count(lucks, x => x !== 50), raised: count(lucks, x => x > 50),
         lowered: count(lucks, x => x < 50), mean: _int(_mean(lucks)) },
       recent_deaths: died.map(a => ({ id: a.id, name: a.name, age: a.age, time: a.died.time, how: a.died.how })),
+      life: G.life.stats_block(sim),
     };
+    if (parts) _add_parts(block, people, parts);
+    return block;
+  }
+
+  // The city counters the townsfolk's `city_parts` adds to (people counted, never means or money).
+  const PART_COUNTS = ["population", "start_population", "adults", "children", "working", "students", "retired",
+    "out_of_work"];
+
+  // Add the townsfolk to a city block (Folk.city_parts(sim), F2a); every key is optional (see the Python twin).
+  function _add_parts(block, people, parts) {
+    const named_n = block.population;
+    for (const k of PART_COUNTS) block[k] += pyInt(parts[k] ?? 0);
+    const n = block.population;
+    if (n && parts.population) {
+      const alive = people.map(p => p.agent);
+      block.mood = _int((sum(alive.map(a => a.mood)) + (parts.mood_sum ?? 0.0)) / n);
+      block.health = _int((sum(alive.map(a => a.health)) + (parts.health_sum ?? 0.0)) / n);
+      const needs = parts.needs_sum ?? {};
+      const out = {};
+      for (const k of Object.keys(block.needs)) out[k] = _int((sum(alive.map(a => a.needs[k])) + (needs[k] ?? 0.0)) / n);
+      block.needs = out;
+      const luck = parts.luck ?? {};
+      for (const k of ["touched", "raised", "lowered"]) block.luck[k] += pyInt(luck[k] ?? 0);
+      block.luck.mean = _int((sum(alive.map(a => a.luck)) + (luck.sum ?? 50.0 * (n - named_n))) / n);
+    }
+    const worths = parts.adult_worths;
+    if (worths && worths.length) {
+      const adults = people.filter(p => p.agent.is_adult).map(p => p.worth).concat(worths);
+      const w = block.wealth;
+      w.total += sum(worths);
+      w.median = _int(median(adults));
+      w.top10_share = top_share(adults);
+      w.gini = gini(adults);
+      w.in_debt += pyInt(parts.in_debt ?? 0);
+    }
   }
 
   function _counter_json(block) {
@@ -194,17 +232,26 @@
   }
 
   // Every district with at least one home, in town order.
-  function _districts(sim, people) {
+  // Every district with at least one home, in town order (the region's after Millbrook's in the region);
+  // parts.districts (the townsfolk's city_parts) adds the townsfolk living there.
+  function _districts(sim, people, parts = null) {
     const district = _district_of_place(sim);
+    const folk = (parts || {}).districts ?? {};
     const out = [];
-    for (const [did, name] of G.town.DISTRICTS) {
+    const names = (sim.world ?? "millbrook") === "region" ? sim.town.districts.map(d => [d.id, d.name])
+      : G.town.DISTRICTS.map(d => [d[0], d[1]]);
+    for (const [did, name] of names) {
       const homes = Array.from(sim.homes.values()).filter(h => district.get(h.place) === did);
       if (!homes.length) continue;
       const here = people.filter(p =>
         district.get(sim.homes.get(sim.households.get(p.agent.household_id).home_id).place) === did);
+      const f = hasOwn(folk, did) ? folk[did] : {};
+      const n = here.length + pyInt(f.people ?? 0);
+      const worths = here.filter(p => p.agent.is_adult).map(p => p.worth).concat(f.adult_worths ?? []);
       out.push({
-        id: did, name, people: here.length, mood: _int(_mean(here.map(p => p.agent.mood))),
-        median_worth: _int(median(here.filter(p => p.agent.is_adult).map(p => p.worth))),
+        id: did, name, people: n,
+        mood: n ? _int((sum(here.map(p => p.agent.mood)) + (f.mood_sum ?? 0.0)) / n) : 0,
+        median_worth: _int(median(worths)),
         homes: homes.length, vacant: count(homes, h => h.household === null),
         shabby_plus: count(sim.lots, ([pid, lot]) => district.get(pid) === did
           && G.housing.stage_of(lot.condition) >= 2),
@@ -240,11 +287,39 @@
   // the samples recorded since the previous push, and each sample goes in one push only.
   function stats_json(sim, full = false) {
     const people = _people(sim);
+    const parts = sim.folk.n ? sim.folk.city_parts(sim) : null;
     const samples = full ? sim.stats.samples.slice() : sim.stats.take_new_samples();
-    return { type: "stats", full: Boolean(full), tick: sim.clock.tick, time: sim.clock.stamp(),
-      day: sim.clock.day, city: _city_block(sim, people), llm: _llm_block(sim),
-      districts: _districts(sim, people), households: _households(sim),
+    const out = { type: "stats", full: Boolean(full), tick: sim.clock.tick, time: sim.clock.stamp(),
+      day: sim.clock.day, city: _city_block(sim, people, parts), llm: _llm_block(sim),
+      districts: _districts(sim, people, parts), households: _households(sim),
       people: _people_rows(sim, people), samples };
+    if (sim.folk.n) out.folk = sim.folk.stats_json(sim); // {v, worth, worth_24h, mood, health, luck}: ints by index
+    if ((sim.world ?? "millbrook") === "region") out.region = region_block(sim, out.city);
+    return out;
+  }
+
+  // `stats.region` (view.md 4.3), region world only (see the Python twin for Folk.region_parts).
+  function region_block(sim, city) {
+    const named = count(Array.from(sim.agents.values()), a => a.alive);
+    const fp = typeof sim.folk.region_parts === "function" ? sim.folk.region_parts(sim) : {};
+    const board = sim.life.board;
+    const filled = count(board.holder, h => h !== null && h !== undefined);
+    const trains = sim.trains();
+    const counts = sim.life.counts, today = sim.life.today;
+    const commute = { walk: 0, car: 0, bus: 0, train: 0, bike: 0 };
+    for (const [k, v] of Object.entries(fp.commute ?? {})) commute[k] = (commute[k] ?? 0) + pyInt(v);
+    const lines = fp.train_lines_today ?? {};
+    return {
+      population: city.population, named, folk: pyInt(fp.folk ?? sim.folk.living().length),
+      births: counts.births ?? 0, deaths: counts.deaths ?? 0,
+      births_today: today.births ?? 0, deaths_today: today.deaths ?? 0,
+      jobs: { total: board.jobs.length, filled, open: board.jobs.length - filled },
+      commute,
+      train: { riders_now: sum(trains.map(t => t.riders ?? 0)), riders_today: pyInt(fp.train_riders_today ?? 0),
+        lines: (((sim.town.rail || {}).lines) || []).map(line => ({ id: line.id, riders_today: pyInt(lines[line.id] ?? 0) })) },
+      bus: { riders_now: count(Array.from(sim.agents.values()), a => a.alive && a.riding),
+        riders_today: pyInt(fp.bus_riders_today ?? 0) },
+    };
   }
 
   // --- the LLM log ----------------------------------------------------------------------------------------------
@@ -326,7 +401,7 @@
     sample(sim) {
       if (!sim.agents || !sim.agents.size) return null;
       const people = _people(sim);
-      const city = _city_block(sim, people);
+      const city = _city_block(sim, people, sim.folk.n ? sim.folk.city_parts(sim) : null);
       const homes = city.homes;
       this.samples.push({
         tick: sim.clock.tick, day: sim.clock.day, pop: city.population, mood: city.mood,
@@ -345,6 +420,7 @@
         keepLast(ring, WORTH_HOURS);
       }
       this._check_richest(sim, people.filter(p => p.agent.is_adult));
+      sim.folk.sample_hour(sim); // the townsfolk's worth rings (stats.folk.worth_24h)
       return null;
     }
 
@@ -374,6 +450,7 @@
     COUNTERS, SHOWN_COUNTERS, DECIDED_BY, SAMPLES_KEPT, WORTH_HOURS, RICHEST_GAIN, RICHEST_MARGIN, TOWN,
     RECENT_DEATHS, LOG_DECIDERS, DECISIONS_LIMIT, DECISIONS_MAX, _zeros, avg_seconds, _int, _mean, median, gini,
     top_share, _money, _Person, _people, _district_of_place, _homes_at, _wealth_block, _homes_block, _city_block,
-    _counter_json, _llm_block, _districts, _households, _people_rows, stats_json, decisions, CityStats,
+    _counter_json, _llm_block, _districts, _households, _people_rows, stats_json, region_block, PART_COUNTS,
+    _add_parts, decisions, CityStats,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));
