@@ -4,8 +4,8 @@ The view is a set of classic browser scripts that share one global, window.CityV
 it that way: every file is present, nothing uses ES module syntax, nothing reaches for the network or
 for image files (or data:image URIs), view.css styles only .cv-* classes, the page's ticker is marked for
 the view's labels to avoid, the view's stage palette is the dashboard's, the dev fixture has the PLAN 3.2
-and 3.3 shapes, the timetable still has the bus meetings the browser smoke test draws, and (when Node is
-installed) every script parses and the scripts define only CityView.
+and 3.3 shapes and the spots the browser smoke test is about, the timetable still has the bus meetings it
+draws, and (when Node is installed) every script parses and the scripts define only CityView.
 With Node and Playwright installed and GOAL_SLOW=1, tests/browser/view_smoke.cjs runs the view in headless
 Chromium (about 2 minutes).
 """
@@ -228,6 +228,38 @@ class ClientViewBusScenes(unittest.TestCase):
         # the first frame of the fresh view in the smoke test
         at = self.rows(0)
         self.assertEqual(sorted(b for b in at if (at[b]["x"], at[b]["y"]) == (3, 25)), ["1a", "2a"])
+
+
+class ClientViewFixtureScenes(unittest.TestCase):
+    # view_smoke.cjs's stages and movers runs are about these spots of the seed-1 fixture (review H5 and ART-5),
+    # so a fixture change that moves them shows here.
+    @classmethod
+    def setUpClass(cls):
+        ClientViewFixture.setUpClass.__func__(cls)
+
+    def test_bus_shelters_stand_before_66_and_92_park_avenue(self):
+        # the City Hall and Hilltop stops stand on the road row just south of each house's south-east lot tile,
+        # the camera-nearest one, so a board there would be behind the shelter
+        stops = {s["id"]: (s["x"], s["y"]) for s in self.town["stops"]}
+        places = {p["id"]: p for p in self.town["places"]}
+        for home, stop in (("park_66", "city_hall"), ("park_92", "hilltop_east")):
+            p, (sx, sy) = places[home], stops[stop]
+            self.assertEqual(p["face"], "s")
+            self.assertIn(sy, self.town["road_rows"])
+            self.assertEqual((sx, sy - 1), (p["x"] + p["w"], p["y"] + p["h"]), (home, stop))
+            self.assertEqual(self.town["tiles"][sy - 1][sx], ".")
+
+    def test_three_walkers_from_three_homes_on_one_kerb(self):
+        # ari, lea and efrat live in three homes and, by the view's hash (game.js's FNV-1a), keep to the same kerb
+        def fnv(s):
+            h = 2166136261
+            for c in s:
+                h = ((h ^ ord(c)) * 16777619) & 0xFFFFFFFF
+            return h
+        agents = {a["id"]: a for a in self.state["agents"]}
+        homes = [agents[i]["home"] for i in ("ari", "lea", "efrat")]
+        self.assertEqual(len(set(homes)), 3, homes)
+        self.assertEqual(len({fnv(i) % 2 for i in ("ari", "lea", "efrat")}), 1)
 
 
 class ClientViewBrowser(unittest.TestCase):

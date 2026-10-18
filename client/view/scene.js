@@ -293,9 +293,9 @@
     // SALE / RENT / LET board stand on them (PLAN decision 83), so they read even when the door is on a wall
     // turned away from the camera. A house's lot is its garden; a block of flats has none, so its paved apron
     // stands in. road: the side of the tile that meets the road (the camera-nearest one on a corner tile).
-    // Ties go to the tile nearer the door. A tile where a nearer building would hide most of the board
-    // (hidden: 55 Main Street's corner behind the Grand Arcade) goes after those where it shows.
-    // Worked out once per static rebuild.
+    // Ties go to the tile nearer the door. A tile where a nearer building or kerbside prop would hide most of
+    // the board (hidden: 55 Main Street's corner behind the Grand Arcade, 66 Park Avenue's behind the City
+    // Hall bus shelter) goes after those where it shows. Worked out once per static rebuild.
     const SIDES = [["n", 0, -1], ["e", 1, 0], ["s", 0, 1], ["w", -1, 0]];
     let frontCache = new Map();
     function frontTiles(p, i) {
@@ -336,17 +336,36 @@
       const x0 = Math.round(w[0] - spr.ax) + 1, y0 = Math.round(w[1] - spr.ay) + 1;
       return { x0, y0, x1: x0 + 24, y1: y0 + 12, depth: proj.depth(a, b) };
     }
-    // The share of a board on lot tile t that buildings nearer the camera cover.
+    // The share of a board on lot tile t that buildings, and the props drawn before boards are placed
+    // (bus shelters with their line plates, traffic lights, trees), nearer the camera cover.
+    let coverProps = [];
     function boardCover(p, t) {
       const { x0, y0, x1, y1, depth } = boardRect(p, t);
       const near = buildings.filter(B => B.b.ox < x1 && B.b.ox + B.b.c.width > x0 && B.b.oy < y1 && B.b.oy + B.b.c.height > y0);
-      if (!near.length) return 0;
+      const props = coverProps.filter(it => it.depth > depth && it.wx < x1 && it.wx + it.sw > x0 && it.wy < y1 && it.wy + it.sh > y0);
+      if (!near.length && !props.length) return 0;
       let n = 0, hid = 0;
       for (let x = x0 + 1; x < x1; x += 2) for (let y = y0 + 1; y < y1; y += 2) {
         n++;
-        if (near.some(B => { const sl = B.slices.find(q => x >= q.wx && x < q.wx + q.sw); return !!sl && sl.depth > depth && opaqueAt(B, x, y); })) hid++;
+        if (near.some(B => { const sl = B.slices.find(q => x >= q.wx && x < q.wx + q.sw); return !!sl && sl.depth > depth && opaqueAt(B, x, y); })
+          || props.some(it => propOpaque(it, x, y))) hid++;
       }
       return hid / n;
+    }
+    // Is a static prop's sprite solid at world point (wx, wy)? Its alpha is read once per sprite canvas.
+    const propMasks = new WeakMap();
+    function propOpaque(it, wx, wy) {
+      let k = propMasks.get(it.img);
+      if (!k) {
+        const w = it.img.width, h = it.img.height, c = CV.canvas(w, h), q = c.getContext("2d", { willReadFrequently: true });
+        q.drawImage(it.img, 0, 0);
+        const d = q.getImageData(0, 0, w, h).data, m = new Uint8Array(w * h);
+        for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 40 ? 1 : 0;
+        k = { m, w };
+        propMasks.set(it.img, k);
+      }
+      const x = Math.floor(wx - it.wx), y = Math.floor(wy - it.wy);
+      return x >= 0 && y >= 0 && x < it.sw && y < it.sh && k.m[(y + it.sy) * k.w + x + it.sx] === 1;
     }
     // The van takes the camera-nearest road lot tile where a board would show; the board takes it too, or the
     // next one while the van or a car parked on the driveway (carOn) has it.
@@ -428,6 +447,27 @@
         }
         if (pathMask[i] && hash(`b${x},${y}`) % 4 === 0) addSprite(list, art.bench(), x + 0.82, y + 0.3, proj.depth(x + 0.82, y + 0.3), "p");
       }
+      // traffic lights on the two kerb corners that sit left and right on screen (north-east and south-west
+      // at rotation 0), so the two poles never stack into one post in the middle of the junction
+      signals = [];
+      const cornerPts = [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
+      const sx = ([u, v]) => { const q = proj.toWorld(u, v); return q[0] - q[1] * 1e-3; };
+      const left = cornerPts.reduce((m, c) => sx(c) < sx(m) ? c : m), right = cornerPts.reduce((m, c) => sx(c) > sx(m) ? c : m);
+      for (const [x, y] of town.junctions) {
+        if (x <= 0 || y <= 0 || x >= W - 1 || y >= H - 1) continue;
+        const a = addSprite(list, art.signal(scene.lights.ns || "green"), x + left[0], y + left[1], proj.depth(x + left[0], y + left[1]), "sig");
+        const b = addSprite(list, art.signal(scene.lights.ew || "red"), x + right[0], y + right[1], proj.depth(x + right[0], y + right[1]), "sig");
+        signals.push([a, "ns"], [b, "ew"]);
+      }
+      // bus stop shelters on the kerb
+      shelters = [];
+      for (const s of town.stops) {
+        const rowRoad = town.road_rows.includes(s.y);
+        const tx = rowRoad ? s.x + 0.5 : s.x + 0.06, ty = rowRoad ? s.y + 0.06 : s.y + 0.5;
+        shelters.push(addSprite(list, art.shelter((s.lines || ["1"]).join(",")), tx, ty, proj.depth(tx, ty), "stop", s.id));
+      }
+      // what stands nearer the camera than a board can hide it (boardCover): kerbside props placed so far
+      coverProps = list.filter(it => it.kind === "t" || it.kind === "sig" || it.kind === "stop");
       // street lamps on the north kerb of east-west roads and the west kerb of north-south roads; a lamp never
       // stands in front of a door's walk, the tile beside it or a lot's board (SALE, RENT, LET), nor in front
       // of the board on screen: it moves a tile along, or goes
@@ -457,25 +497,6 @@
         if (y == null) continue;
         addSprite(list, art.lamp(), rx + 0.07, y + 0.5, proj.depth(rx + 0.07, y + 0.5), "l");
         lampPts.push([rx + 0.07, y + 0.5]);
-      }
-      // traffic lights on the two kerb corners that sit left and right on screen (north-east and south-west
-      // at rotation 0), so the two poles never stack into one post in the middle of the junction
-      signals = [];
-      const cornerPts = [[0.08, 0.08], [0.92, 0.08], [0.92, 0.92], [0.08, 0.92]];
-      const sx = ([u, v]) => { const q = proj.toWorld(u, v); return q[0] - q[1] * 1e-3; };
-      const left = cornerPts.reduce((m, c) => sx(c) < sx(m) ? c : m), right = cornerPts.reduce((m, c) => sx(c) > sx(m) ? c : m);
-      for (const [x, y] of town.junctions) {
-        if (x <= 0 || y <= 0 || x >= W - 1 || y >= H - 1) continue;
-        const a = addSprite(list, art.signal(scene.lights.ns || "green"), x + left[0], y + left[1], proj.depth(x + left[0], y + left[1]), "sig");
-        const b = addSprite(list, art.signal(scene.lights.ew || "red"), x + right[0], y + right[1], proj.depth(x + right[0], y + right[1]), "sig");
-        signals.push([a, "ns"], [b, "ew"]);
-      }
-      // bus stop shelters on the kerb
-      shelters = [];
-      for (const s of town.stops) {
-        const rowRoad = town.road_rows.includes(s.y);
-        const tx = rowRoad ? s.x + 0.5 : s.x + 0.06, ty = rowRoad ? s.y + 0.06 : s.y + 0.5;
-        shelters.push(addSprite(list, art.shelter((s.lines || ["1"]).join(",")), tx, ty, proj.depth(tx, ty), "stop", s.id));
       }
       // home lots: fences or hedges, listing signs, junk, works and moving vans
       const snowy = !!(CV.SEASON[scene.season] && CV.SEASON[scene.season].snow);
