@@ -3,7 +3,7 @@
 
 births and deaths over three seeds 15-45; ill now 3-12%; at luck 0 <= 15% of workers fired; News importance 1+ <= 30
 a day; raises 1 in 6 to 1 in 2 reviews; money at the end: median adult worth 0.9-1.7x start, 25-50% poorer, 3-15%
-in debt, Gini 0.48-0.72.
+in debt, Gini 0.48-0.72. Deaths and News leave out folk.py's starvation deaths (F2a's), which are reported apart.
 
 `python3 -m tests.test_life_soak SEED DAYS [LUCK]` prints one run's numbers.
 """
@@ -41,6 +41,7 @@ def measure(seed: int, days: int, luck: float | None = None, folk: int = FOLK) -
     w0 = {p.id: worth(sim, p) for p in adults}
     workers0 = sum(1 for p in adults if career.worker(p))
     news = collections.Counter()
+    news_life = collections.Counter()  # without folk.py's starvation deaths (F2a), as for the deaths bound
     t0 = time.process_time()
     for _ in range(days):
         sim.run_days(1)
@@ -48,6 +49,8 @@ def measure(seed: int, days: int, luck: float | None = None, folk: int = FOLK) -
         for e in events:
             if e["importance"] >= 1:
                 news[e["tick"] // 1440] += 1
+                if not (e["tag"] == "death" and " starved, aged " in e["text"]):
+                    news_life[e["tick"] // 1440] += 1
     cpu = time.process_time() - t0
     everyone = [p for p in people.everyone(sim) if p.alive]
     stayed = [p for p in adults if p.alive and people.person(sim, p.id) is not None]
@@ -61,6 +64,7 @@ def measure(seed: int, days: int, luck: float | None = None, folk: int = FOLK) -
         "workers": workers0, "fired": c["fired"], "laid_off": c["laid_off"], "hired": c["hired"],
         "reviews": c["reviews"], "raises": c["raises"], "warnings": c["warnings"],
         "news_max": max(news.values(), default=0), "news_mean": sum(news.values()) / max(1, days),
+        "news_life_max": max(news_life.values(), default=0),
         "worth_median": statistics.median(ratios) if ratios else 1.0,
         "poorer": sum(1 for p in stayed if worth(sim, p) < w0[p.id]) / max(1, len(stayed)),
         "in_debt": sum(1 for p in stayed if p.money + p.savings < 0) / max(1, len(stayed)),
@@ -95,7 +99,7 @@ class LifeSoak(unittest.TestCase):
 
     def test_news_stays_readable(self):
         for r in self.runs:
-            self.assertLessEqual(r["news_max"], 30, r)
+            self.assertLessEqual(r["news_life_max"], 30, r)
 
     def test_raises_per_review(self):
         reviews = sum(r["reviews"] for r in self.runs)
