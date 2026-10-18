@@ -54,7 +54,7 @@
       budget.run(() => { while (J.i < J.steps.length) { J.steps[J.i++](); flush(J.c); if (performance.now() - t0 >= lim) break; } });
       if (J.i < J.steps.length) return false;
       if (e.c) C.mp -= e.c.width * e.c.height;
-      e.c = J.c; e.job = null; e.stale = !!J.dirty; e.tag = J.tag != null ? J.tag : null; C.built++;
+      e.c = J.c; e.job = null; e.stale = !!J.dirty; e.tag = J.tag != null ? J.tag : null; e.empty = !!J.empty; C.built++;
       C.mp += e.c.width * e.c.height;
       evict();
       return true;
@@ -100,7 +100,7 @@
     C.draw = function (g, e, v) {
       const dx0 = Math.round(e.wx0 * v.S + v.ox), dy0 = Math.round(e.wy0 * v.S + v.oy);
       const dx1 = Math.round((e.wx0 + e.span) * v.S + v.ox), dy1 = Math.round((e.wy0 + e.span) * v.S + v.oy);
-      if (e.c) { g.drawImage(e.c, 0, 0, e.c.width, e.c.height, dx0, dy0, dx1 - dx0, dy1 - dy0); return true; }
+      if (e.c) { if (!e.empty) g.drawImage(e.c, 0, 0, e.c.width, e.c.height, dx0, dy0, dx1 - dx0, dy1 - dy0); return true; } // (an empty one: nothing to draw)
       const o = painter.origin();
       // coarser levels first (one draw), then finer ones (up to four)
       for (const l2 of [0.0625, 0.125, 0.25, 0.5, 1].filter(l => l < e.level).reverse().concat([0.0625, 0.125, 0.25, 0.5, 1].filter(l => l > e.level))) {
@@ -113,6 +113,7 @@
         for (let cy = ay0; cy <= ay1; cy++) for (let cx = ax0; cx <= ax1; cx++) {
           const f = map.get(keyOf(e.layer, l2, cx, cy));
           if (!f || !f.c) continue;
+          if (f.empty) { f.used = C.frame; any = true; continue; }
           // the overlap of the two rects, in world px
           const x0 = Math.max(e.wx0, f.wx0), y0 = Math.max(e.wy0, f.wy0), x1 = Math.min(e.wx0 + e.span, f.wx0 + f.span), y1 = Math.min(e.wy0 + e.span, f.wy0 + f.span);
           if (x1 <= x0 || y1 <= y0) continue;

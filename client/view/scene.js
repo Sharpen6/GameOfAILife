@@ -1367,17 +1367,18 @@
       if (BIG) {
         const st = lastNearView && lastNearView[0] === v.S && lastNearView[1] === v.ox && lastNearView[2] === v.oy; lastNearView = [v.S, v.ox, v.oy];
         const a = performance.now(); buildQueued(budget, 4, st); scene.stats.spriteMs = performance.now() - a;
-        // sprite prefetch (view.md 3.2): the camera rests, the queue is empty, the frame is cheap so far, zoom >= 0.3
+        // sprite prefetch (view.md 3.2): the camera rests, the queue is empty, frames are cheap (the last one and this one so far), zoom >= 0.3
         // and sprites are under 75% of the cap: sprites for the view grown 75% each way, nearest first, within 4 ms
         // (once a pass over a view queues nothing, that view is done until the camera moves)
-        if (st && !spriteQueue.size && pfView !== v.S + ":" + v.ox + ":" + v.oy && scene.cam.zoom >= 0.3 && spriteMP < 0.75 * scene.spriteCap
-          && performance.now() - t0 < 8 && budget.left() > 0) {
+        // (every 4th frame, and what it leaves unbuilt leaves the queue: the frames between are not charged for it)
+        if (st && frameNo % 4 === 0 && !spriteQueue.size && pfView !== v.S + ":" + v.ox + ":" + v.oy && scene.cam.zoom >= 0.3 && spriteMP < 0.75 * scene.spriteCap
+          && (scene.stats.draw || 0) < 8 && performance.now() - t0 < 8 && budget.left() > 0) {
           const gx = (v.x1 - v.x0) * 0.75, gy = (v.y1 - v.y0) * 0.75;
           const st0 = scene.stats.staleSprites; // (staleSprites counts what is drawn)
           for (const o of inRect(v.x0 - gx, v.y0 - gy, v.x1 + gx, v.y1 + gy)) if (o.big) spriteOf(o);
           scene.stats.staleSprites = st0;
           if (!spriteQueue.size) pfView = v.S + ":" + v.ox + ":" + v.oy;
-          else { const b = performance.now(); buildQueued(budget, 4, true); scene.stats.spriteMs += performance.now() - b; }
+          else { const b = performance.now(); buildQueued(budget, 4, false); spriteQueue.clear(); scene.stats.spriteMs += performance.now() - b; } // (by estimate: no big one overruns)
         }
         if (st && !spriteQueue.size && !scene.stats.boxes) prefetch();
       }
@@ -1413,7 +1414,9 @@
       return lodCur;
     }
     scene.lod = () => lodCur || lodOf(scene.cam.zoom);
+    // (mid by zoom x min(dpr, 1.5): a dpr 2 backing store costs four times the raster, and finer chunks too)
     const levelFor = (lod, zoom) => lod === "far" ? (zoom * Math.min(scene.dpr, 1) >= 0.125 ? 0.125 : 0.0625)
+      : lod === "mid" ? (zoom * Math.min(scene.dpr, 1.5) >= 1 ? 1 : zoom * Math.min(scene.dpr, 1.5) >= 0.5 ? 0.5 : 0.25)
       : (zoom * scene.dpr >= 1 ? 1 : zoom * scene.dpr >= 0.5 ? 0.5 : 0.25);
     scene.levelFor = levelFor;
     const budget = CV.makeBudget ? CV.makeBudget(8) : null;
@@ -1465,6 +1468,8 @@
         if (layer === "g" || layer === "c") for (let k = 0; k < 4; k++) steps.push(() => CV.lowGround(q, R, proj, level, wx0, wy0, 512, scene.season, k * 128, (k + 1) * 128));
         if (layer === "u" || layer === "c" || layer === "l") {
           const list = inRect(wx0, wy0, wx0 + span, wy0 + span).sort((a, b) => a.depth - b.depth);
+          // an upright or lights chunk with nothing in it is not drawn (a full-screen pass less in the country)
+          if (layer !== "c" && !list.some(o => o.big || layer === "u")) job.empty = true;
           if (layer === "l") {
             const minute = scene.minute, bucket = CV.lightBucket(minute), occ = occNow();
             job.tag = { bucket, ver: occVer, sig: occSig(list, occ) };
@@ -1526,7 +1531,8 @@
       chunks.begin();
       g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = "source-over";
       g.fillStyle = "#1d2330"; g.fillRect(0, 0, cv.width, cv.height);
-      g.imageSmoothingEnabled = true;
+      // (on a high-dpi backing store chunks scale up unfiltered: bilinear raster in software costs a frame there)
+      g.imageSmoothingEnabled = !(scene.dpr > 1.25 && S >= lv);
       const night = scene.nightAlpha(scene.minute);
       const vv = { S, ox: v.ox, oy: v.oy, x0: v.x0, y0: v.y0, x1: v.x1, y1: v.y1, lod, level: lv, night };
       const [cx0, cy0, cx1, cy1] = chunks.range(lv, v);
