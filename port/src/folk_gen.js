@@ -18,6 +18,7 @@
   const CAR_NEAR_STATION = 0.6, STATION_NEAR = 15;
   const WALK_CAP = 40, CAR_CAP = 35, TRAIN_CAP = 50;
   const TRAIN_SAVES = 5, CAR_TRAIN_PREF = 8, WALK_ONLY = 12;
+  const ROTA_DAYS = 5; // a job open all week is worked on a rota of this many days in a row (`rota`)
   const RES_BASE = 15, RES_SKILL = 25;
   const SKILL_W = 25, JITTER = 6;
   // --- Millbrook rows and schools ---
@@ -828,7 +829,7 @@
         hired.add(p.i);
         holders.get(row[0])[k] = p.id;
         left.set(row[0], left.get(row[0]) - 1);
-        p.job = _job(row);
+        p.job = _job(row, k);
         p.commute = [row[2], got[2], got[3]];
         if (got[3] === "car") p.owns_car = true;
       }
@@ -885,7 +886,7 @@
       holders.get(row[0])[k] = p.id;
       left.set(row[0], left.get(row[0]) - 1);
       hired.add(p.i);
-      p.job = _job(row);
+      p.job = _job(row, k);
       const m = geo.mode(home, row[2], p.owns_car);
       p.commute = [row[2], m[0], m[1]];
     }
@@ -895,15 +896,24 @@
       const hs = holders.get(row[0]);
       for (let k = 0; k < row[7]; k++) {
         const holder = hs[k];
-        const job = holder === null ? _job(row) : people[_idx(holder)].job;
+        const job = holder === null ? _job(row, k) : people[_idx(holder)].job;
         const slot = b.add(job, holder);
         job.slot = slot;
       }
     }
   }
 
-  function _job(row) {
-    const job = new G.agent.Job(row[1], row[2], row[3], row[4], row[5], row[6].slice());
+  // A slot's workdays: a row open all week is worked on a rota (see folk_gen.py).
+  function rota(days, k, count) {
+    if (days.length < 7) return days.slice();
+    const start = Math.floor(k * 7 / Math.max(1, count)) % 7;
+    const out = [];
+    for (let d = 0; d < ROTA_DAYS; d++) out.push((start + d) % 7);
+    return out.sort((a, b) => a - b);
+  }
+
+  function _job(row, k = 0) {
+    const job = new G.agent.Job(row[1], row[2], row[3], row[4], row[5], rota(row[6], k, row[7]));
     job.slot = -1;
     return job;
   }
@@ -1297,7 +1307,7 @@
     SHIFT_OFFSETS, SCHOOL_LATE, stream, shift_offset, shift_hours, weekly_pay, Geo, ListBoard, board, set_rel,
     named_names, unique_name, baby_name, ages_for,
     PENSION_AGE, BILLS, CAR, FOOD_WEEK, BENEFIT, TooManyFolk, home_cost, pension_budget, _assign, capacity, rehouse,
-    pupil_commute,
+    pupil_commute, ROTA_DAYS, rota,
     make_deck, make_household, populate, region_homes, need_of, move_in, student_job, seats, assign_schools,
     job_rows, match_jobs, give_money, make_ties, newcomer, GenFolk, GenSim, build_lots, add_region_homes, generate,
     dump, _overlap,

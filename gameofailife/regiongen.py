@@ -15,9 +15,10 @@ factories at the stations, Millbrook East flats in the strip x 69-79, folk job r
 district price table, varied lot conditions, primary schools, and the decor pass (view.md 4.1).
 
 After the region freeze (PLAN 3, `v3-region-frozen`) changes are additive only: ids and counts stay.
-`ADDITIVE` lists the keys added since the hour-0 file (sha1 HOUR0_SHA1) and `RAISED` the job rows whose slot count
-was raised since (no row added or removed, no id changed); --write output minus those keys, with those counts put
-back, reproduces the hour-0 file byte for byte.
+`ADDITIVE` lists the keys added since the hour-0 file (sha1 HOUR0_SHA1), `RAISED` the job rows whose slot count
+was raised since (no row added or removed, no id changed) and `RETUNED` the line values changed since (the cars and
+capacity of a train); --write output minus those keys, with those counts and values put back, reproduces the
+hour-0 file byte for byte.
 """
 from __future__ import annotations
 
@@ -36,6 +37,10 @@ ADDITIVE = {"districts": ("parking_minutes",)}  # keys added after the hour-0 fi
 # Job rows (title, place) whose count was raised after the hour-0 file: (hour-0 count, count now). The green's
 # gardener has 2 so the named park keeper meets folk coworkers on the shift (F1, folk.md: >= 2).
 RAISED = {("gardener", "green"): (1, 2)}
+# Line values retuned after the hour-0 file: (line, key) -> (hour-0 value, value now). Trains of 2 cars for 120
+# riders, not 4 for 240: the region's 1,000 townsfolk make about 330 train trips a weekday and the busiest train
+# carries 15-20 (stage 5); the trains and the timetable are unchanged.
+RETUNED = {("R", "cars"): (4, 2), ("R", "capacity"): (240, 120), ("S", "cars"): (4, 2), ("S", "capacity"): (240, 120)}
 
 W, H = 256, 192
 FROZEN_W, FROZEN_H = 69, 50  # x < 69 and y < 50: Millbrook's own tiles from town.build_map(seed)
@@ -95,12 +100,12 @@ def district_of_block(c, r):
 
 # --- the railway: two double-track lines, each track a polyline of tile corners, buffer to buffer -----------------
 LINES = [
-    {"id": "R", "name": "Riverton Line", "trains": 6, "every": 10, "cars": 4, "capacity": 240, "speed": 10,
+    {"id": "R", "name": "Riverton Line", "trains": 6, "every": 10, "cars": 2, "capacity": 120, "speed": 10,
      "dwell": 1, "layover": 3, "fare": 3,
      "tracks": {"out": [(70, 33), (112, 33), (112, 68), (223, 68)], "in": [(223, 67), (113, 67), (113, 32), (70, 32)]},
      "stations": ["millbrook_station", "northgate_station", "quayside_station", "central_station", "midtown_station",
                   "ironworks_station"]},
-    {"id": "S", "name": "Southfield Line", "trains": 4, "every": 10, "cars": 4, "capacity": 240, "speed": 10,
+    {"id": "S", "name": "Southfield Line", "trains": 4, "every": 10, "cars": 2, "capacity": 120, "speed": 10,
      "dwell": 1, "layover": 3, "fare": 3,
      "tracks": {"out": [(124, 74), (124, 111), (43, 111)], "in": [(43, 112), (125, 112), (125, 74)]},
      "stations": ["central_station", "southfield_station", "fairview_station", "willow_hills_station"]},
@@ -812,13 +817,21 @@ def dumps(data: dict) -> str:
 
 
 def strip_additive(data: dict) -> dict:
-    """A copy of region.json's data without the keys added after the hour-0 file and with the RAISED job rows at
-    their hour-0 counts (for the byte check)."""
+    """A copy of region.json's data without the keys added after the hour-0 file, with the RAISED job rows at
+    their hour-0 counts and the RETUNED line values at their hour-0 values (for the byte check)."""
     out = dict(data)
     for top, keys in ADDITIVE.items():
         out[top] = [{k: v for k, v in row.items() if k not in keys} for row in data[top]]
     hour0 = {key: was for key, (was, now) in RAISED.items()}
     out["jobs"] = [row[:6] + [hour0[(row[0], row[1])]] if (row[0], row[1]) in hour0 else row for row in data["jobs"]]
+    lines = []
+    for ln in data["rail"]["lines"]:
+        ln = dict(ln)
+        for (lid, key), (was, now) in RETUNED.items():
+            if ln["id"] == lid:
+                ln[key] = was
+        lines.append(ln)
+    out["rail"] = {**data["rail"], "lines": lines}
     return out
 
 

@@ -40,6 +40,7 @@ CAR_P = {"flat": 0.2, "house": 0.55, "big_house": 0.9}
 CAR_NEAR_STATION, STATION_NEAR = 0.6, 15  # car odds x .6 for a home within 15 walking minutes of a station
 WALK_CAP, CAR_CAP, TRAIN_CAP = 40, 35, 50
 TRAIN_SAVES, CAR_TRAIN_PREF, WALK_ONLY = 5, 8, 12  # minutes
+ROTA_DAYS = 5  # a job open all week is worked on a rota of this many days in a row (`rota`)
 RES_BASE, RES_SKILL = 15, 25  # reservation wage, region rows only
 SKILL_W, JITTER = 25, 6
 # --- Millbrook rows and schools ----------------------------------------------------------------------------------
@@ -927,7 +928,7 @@ def match_jobs(sim, folk, geo: Geo, seekers: list, isolated: bool, rr: Rng) -> N
             hired.add(p.i)
             holders[row[0]][k] = p.id
             left[row[0]] -= 1
-            p.job = _job(row)
+            p.job = _job(row, k)
             p.commute = (row[2], got[2], got[3])
             if got[3] == "car":
                 p.owns_car = True
@@ -983,7 +984,7 @@ def match_jobs(sim, folk, geo: Geo, seekers: list, isolated: bool, rr: Rng) -> N
         holders[row[0]][k] = p.id
         left[row[0]] -= 1
         hired.add(p.i)
-        p.job = _job(row)
+        p.job = _job(row, k)
         m = geo.mode(home, row[2], p.owns_car)
         p.commute = (row[2], m[0], m[1])
     # every slot onto the board, in row order
@@ -993,15 +994,25 @@ def match_jobs(sim, folk, geo: Geo, seekers: list, isolated: bool, rr: Rng) -> N
         for k in range(row[7]):
             holder = hs[k]
             if holder is None:
-                job = _job(row)
+                job = _job(row, k)
             else:
                 job = people[int(holder[1:])].job
             slot = b.add(job, holder)
             job.slot = slot
 
 
-def _job(row) -> Job:
-    job = Job(row[1], row[2], row[3], row[4], row[5], tuple(row[6]))
+def rota(days, k: int, count: int) -> tuple:
+    """A slot's workdays: a row open all week (7 days) is worked on a rota, slot k of `count` working ROTA_DAYS
+    days in a row from day k * 7 // count, so the place is covered every day and nobody works 7; else the row's."""
+    days = tuple(days)
+    if len(days) < 7:
+        return days
+    start = (k * 7 // max(1, count)) % 7
+    return tuple(sorted((start + d) % 7 for d in range(ROTA_DAYS)))
+
+
+def _job(row, k: int = 0) -> Job:
+    job = Job(row[1], row[2], row[3], row[4], row[5], rota(row[6], k, row[7]))
     job.slot = -1
     return job
 

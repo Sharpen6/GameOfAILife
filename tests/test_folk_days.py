@@ -687,7 +687,8 @@ class GroceriesAndHealthTest(unittest.TestCase):
         money by day 10 of the 60-day soak: a late shift's morning at home breaks for lunch at LUNCH."""
         sim = make_world(SEEDS[0], N)
         f = sim.folk
-        late = [p for p in f.living() if p.job is not None and p.job.hourly_wage > 0 and len(p.job.workdays) == 7
+        late = [p for p in f.living() if p.job is not None and p.job.hourly_wage > 0
+                and {0, 1, 2} <= set(p.job.workdays)  # works the three days run (a 7-day job is a 5-day rota now)
                 and f._set_off(p) >= folk.LUNCH + folk.MEAL_MINUTES and f.home_place(p) is not None]
         self.assertTrue(late)
         p = late[0]

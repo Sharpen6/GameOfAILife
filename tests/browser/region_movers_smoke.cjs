@@ -11,7 +11,7 @@
 //     pick targets; >= 150 people drawn at the default view (1/4 at 85, 48) at 08:00; at far zoom people are
 //     dots (no sprites) when the scene has levels of detail; at 2 ticks a frame a car 16 tiles on glides
 //  9. trains: every car centre within 0.3 tiles of its track (speed 16); a train stands still while it stays at
-//     a station; it snaps on a track change and when i drops; its cars sit at i, i-1, i-2, i-3 (car k at s - k);
+//     a station; it snaps on a track change and when i drops; its cars sit at i, i-1, ... (car k at s - k);
 //     at 2 ticks a frame (speed 16) a train running 13 to 24 tiles glides, no snap
 // 10. bridges and crossings: a named car, a folk car and a walker each ease over a b tile and an x tile with no
 //     jump between frames
@@ -256,10 +256,11 @@ async function runTrains(browser) {
         worst = Math.max(worst, best); n++;
       }
     }
-    return { worst, n };
+    return { worst, n, want: town.rail.lines.reduce((s, l) => s + l.trains.length * l.cars, 0) };
   }));
-  const worst = Math.max(...dev.map(d => d.worst)), cars = dev[0].n;
-  check(cars === 40 && worst <= 0.3, "trains: every car centre within 0.3 tiles of its track (10 trains x 4 cars, 120 frames)", { worst, cars });
+  const worst = Math.max(...dev.map(d => d.worst)), cars = dev[0].n, want = dev[0].want;
+  // every train's cars (the lines' trains x cars: 10 trains x 2 cars since stage 5's shorter trains)
+  check(cars === want && want === 20 && worst <= 0.3, "trains: every car centre within 0.3 tiles of its track (10 trains x their cars, 120 frames)", { worst, cars, want });
   await ctx.close();
 
   ({ ctx, page, log } = await open(browser, "zoom=1&x=127&y=67&minute=480&drive=0"));
@@ -297,14 +298,14 @@ async function runTrains(browser) {
     return { moves, snaps };
   });
   check(glide.moves > 0 && glide.snaps === 0, "trains: at 2 ticks a frame (speed 16) a train running 13 to 24 tiles glides, no snap", glide);
-  // cars at i, i-1, i-2, i-3 once settled
+  // cars at i, i-1, ... (one per car of the line) once settled
   const settled = await page.evaluate(async () => {
     await new Promise(r => setTimeout(r, 700));
     const T = __view.trains(), row = T.rows().find(r => r.id === "R1"), l = __view.scene().town.rail.lines[0];
     const pl = CityView.railPolyline(l.tracks[row.track]);
-    return T.carsOf("R1").map((c, k) => { const p = CityView.railPointAt(pl, row.i - k); return Math.hypot(c.x - p.x, c.y - p.y); });
+    return { cars: l.cars, d: T.carsOf("R1").map((c, k) => { const p = CityView.railPointAt(pl, row.i - k); return Math.hypot(c.x - p.x, c.y - p.y); }) };
   });
-  check(settled.length === 4 && settled.every(d => d < 1e-6), "trains: car k sits at s - k (cars at i, i-1, i-2, i-3)", settled);
+  check(settled.d.length === settled.cars && settled.cars >= 2 && settled.d.every(d => d < 1e-6), "trains: car k sits at s - k (cars at i, i-1, ...)", settled);
   // snaps: a track change, and i dropping
   const snaps = await page.evaluate(async () => {
     const st = __frameAt(__tick() + 1), T = __view.trains();

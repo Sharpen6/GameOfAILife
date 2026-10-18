@@ -160,6 +160,12 @@ class Generator(unittest.TestCase):
         for key, (was, now) in regiongen.RAISED.items():
             self.assertEqual((hour0[key], rows[key]), (was, now), key)
         self.assertEqual(rows[("gardener", "green")], 2)
+        lines = {ln["id"]: ln for ln in d["rail"]["lines"]}
+        lines0 = {ln["id"]: ln for ln in regiongen.strip_additive(d)["rail"]["lines"]}
+        for (lid, key), (was, now) in regiongen.RETUNED.items():
+            self.assertEqual((lines0[lid][key], lines[lid][key]), (was, now), (lid, key))
+        self.assertEqual({lid: (ln["cars"], ln["capacity"], len(ln["trains"]), ln["every"]) for lid, ln in lines.items()},
+                         {"R": (2, 120, 6, 10), "S": (2, 120, 4, 10)})  # shorter trains, the same timetable
 
 
 class Fixture(unittest.TestCase):

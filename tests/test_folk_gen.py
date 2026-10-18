@@ -304,6 +304,47 @@ class IsolatedTest(unittest.TestCase):
         self.assertEqual(len(sim.folk.people), 1000)
 
 
+class RotaTest(unittest.TestCase):
+    """A job open all week (a hospital's nurses, a station's staff) is worked on a rota: nobody works 7 days, each
+    slot works folk_gen.ROTA_DAYS days in a row, and the slots of a row cover every day of the week."""
+
+    def test_nobody_works_seven_days_and_the_place_is_covered(self):
+        sim = folk_gen.generate(1)
+        jobs = sim.job_board.jobs
+        self.assertFalse([j for j in jobs if len(j.workdays) == 7])
+        rows = {}
+        for j in jobs:
+            rows.setdefault((j.title, j.place_id, j.start_hour), []).append(tuple(j.workdays))
+        week = 0
+        for key, days in rows.items():
+            if len(set(days)) > 1:  # a rota: the row's slots work different days
+                week += 1
+                self.assertTrue(all(len(d) == folk_gen.ROTA_DAYS for d in days), key)
+                self.assertEqual(set().union(*days), set(range(7)), key)
+        self.assertGreaterEqual(week, 10)  # nurses at the hospitals, station staff, offices' receptionists
+        for p in sim.folk.people:
+            if p.job is not None:
+                self.assertLess(len(p.job.workdays), 7, p.id)
+
+    def test_rota_days(self):
+        self.assertEqual(folk_gen.rota((0, 1, 2, 3, 4), 3, 6), (0, 1, 2, 3, 4))
+        self.assertEqual(folk_gen.rota(range(7), 0, 7), (0, 1, 2, 3, 4))
+        self.assertEqual(folk_gen.rota(range(7), 3, 7), (0, 3, 4, 5, 6))
+        self.assertEqual(folk_gen.rota(range(7), 1, 2), (0, 3, 4, 5, 6))
+        for count in range(2, 25):
+            self.assertEqual(set().union(*(folk_gen.rota(range(7), k, count) for k in range(count))), set(range(7)))
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_rota_in_the_port(self):
+        py = {count: [list(folk_gen.rota(range(7), k, count)) for k in range(count)] for count in range(1, 25)}
+        js = ('const G = require(process.argv[1] + "/port/tools/engine.cjs").load(); const out = {};'
+              'for (let c = 1; c < 25; c++) { out[c] = []; for (let k = 0; k < c; k++) '
+              'out[c].push(G.folk_gen.rota([0, 1, 2, 3, 4, 5, 6], k, c)); } console.log(JSON.stringify(out));')
+        out = subprocess.run([NODE, "-e", js, str(ROOT)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+        self.assertEqual(json.loads(out.stdout), {str(k): v for k, v in py.items()})
+
+
 class FixtureTest(unittest.TestCase):
     def test_fixture_matches_python(self):
         got = folk_gen.dump(folk_gen.generate(1))

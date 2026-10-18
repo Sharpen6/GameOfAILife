@@ -1402,8 +1402,8 @@ A line in `rail.lines`: `{"id", "name", "cars", "tracks", "track_tiles", "statio
 | `every` | Minutes between trains each way. |
 | `speed` | Tiles a minute. |
 | `dwell`, `layover` | Minutes at a stop and at the end of the line. |
-| `cars` | Cars a train draws, at `i-1` to `i-3`. |
-| `capacity` | Riders a train holds (reported, not enforced). |
+| `cars` | Cars a train draws, the head's at `i` and car k at `i-k` (2 on both lines). |
+| `capacity` | Riders a train holds (reported, not enforced): 120. |
 | `fare` | Dollars a ride for ages 18-64 (others ride free); the change at Central is free. |
 
 ## Trains
@@ -1435,7 +1435,7 @@ Riverton Central takes 2 minutes (free; the fare is paid once).
 | Field | Meaning |
 |-------|---------|
 | `id`, `name` | `"R"` / `"Riverton Line"`, `"S"` / `"Southfield Line"`. |
-| `cars` | Cars a train draws (4): the head at track index `i`, the cars behind it at `i-1` to `i-3`. |
+| `cars` | Cars a train draws (2): the head at track index `i`, the car behind it at `i-1`. |
 | `tracks` | `{"out": corners, "in": corners}`: each track's tile corners `[x, y]` in driving order, buffer to buffer. Every tile between two corners is track; draw them at the tile centres (corner + 0.5). |
 | `track_tiles` | `{"out": n, "in": n}`: tiles on each track (index `i` runs 0 to n - 1). |
 | `trains` | The train ids, e.g. `["R1", ..., "R6"]`. |
@@ -1466,7 +1466,7 @@ Sent in every state frame: one row per train, line `R` first, about 1.2 KB.
 ```json
 {"lines": [{"id": "R", "name": "Riverton Line", "stations": ["millbrook_station", "northgate_station",
   "quayside_station", "central_station", "midtown_station", "ironworks_station"], "trains": 6,
-  "every_minutes": 10, "cycle_minutes": 60, "fare": 3, "capacity": 240,
+  "every_minutes": 10, "cycle_minutes": 60, "fare": 3, "capacity": 120,
   "minutes": {"out": [0, 3, 8, 12, 19, 24], "in": [0, 4, 11, 15, 20, 24]}}, "..."],
  "transfer": {"central_station": 2}}
 ```
