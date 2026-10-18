@@ -735,7 +735,8 @@ class TestClaudeController(unittest.TestCase):
         msg = self.fork_message()
         you, home = msg["you"], msg["you"]["home"]
         page = cc.decision_page(msg)
-        where = "home" if you["where_name"] == you["home_name"] else you["where_name"]
+        at_home = you["where_name"] == you["home_name"] or you["home_name"].startswith(f"{you['where_name']}, ")
+        where = "home" if at_home else you["where_name"]  # a flat ("Birch Court, flat 2A") is in its building
         self.assertIn(f"You are at: {where}.", page)
         self.assertNotIn(you["where"], page, "a place's name, never its id")
         self.assertIn(f"${you['savings']:,.2f} in savings", page)

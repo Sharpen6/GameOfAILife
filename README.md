@@ -513,7 +513,7 @@ Useful flags:
 
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--host` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` to let friends on your network connect. |
+| `--host` | `127.0.0.1` | Address to listen on. Use `0.0.0.0` to let friends on your network connect. They open the page by your IP address, such as `http://192.168.1.20:8000`, and point controllers at `ws://192.168.1.20:8000/ws`; a name like `mypc.local` is refused. Anyone who can reach the port can act as God and play every character, so only do this on a network you trust. |
 | `--port` | `8000` | Port for the web page and the WebSocket (`0` picks a free one; the address is printed). |
 | `--seed` | `1` | Seed for the town's trees and its dice, so a run can be repeated. |
 | `--speed` | `1` | Starting speed: `0` (paused), `1`, `2`, `4`, `8` or `16`. At 1x a game day takes about ten real minutes. |

@@ -36,10 +36,29 @@ The same port serves two things:
 - `ws://host:port/ws` is the WebSocket endpoint. Any path other than `/ws`, or a
   request without `Upgrade: websocket`, is treated as a static file request.
 
-The WebSocket is plain RFC 6455 with no subprotocol, no authentication and no
-origin check. Only `ws://` is served (no TLS). `gameofailife/ws.py` has a small
-stdlib client, `connect("ws://127.0.0.1:8000/ws")`, that tests and example
-controllers can use.
+The WebSocket is plain RFC 6455 with no subprotocol and no authentication:
+anyone who can reach the port can be God or play characters. Only `ws://` is
+served (no TLS). `gameofailife/ws.py` has a small stdlib client,
+`connect("ws://127.0.0.1:8000/ws")`, that tests and example controllers can use.
+
+The upgrade is checked against other sites' pages and DNS rebinding. Its
+`Host` must be `localhost` or an IP address, with any port: an upgrade whose
+`Host` is a DNS name, or that has no `Host`, gets `403 Forbidden` and is closed,
+since whoever runs a name's DNS could point it at this machine. A browser also
+sends an `Origin` header, and the origin's host and port must be exactly the
+request's `Host`, or the upgrade gets the same 403. So the God page served from
+this port connects, and so do a friend's browser and controllers that use your
+IP address (`http://192.168.1.20:8000`, `ws://192.168.1.20:8000/ws`). A page
+from another site cannot connect, and neither can anything that comes through a
+DNS name such as `mypc.local`: use the IP address instead. Clients that send no
+`Origin`, such as the Python and Node controllers, need only the `Host` rule.
+When `--host` is a DNS name, the startup message gives the address it resolved
+to.
+
+The request line and headers must arrive within 10 seconds, with at most 100
+header lines and 16 KiB of them. A slower request is closed. A longer one gets
+`431 Request Header Fields Too Large` and is closed. Once the upgrade is done,
+the WebSocket session has no time limit.
 
 Two roles share the endpoint. The first message you send picks yours:
 
@@ -51,13 +70,20 @@ Two roles share the endpoint. The first message you send picks yours:
 ## Message basics
 
 - Every message in both directions is one JSON object in one text frame.
-  Binary and fragmented frames are accepted and decoded as UTF-8. The largest
-  accepted frame or message is 4 MiB: a bigger one gets a close frame with code
-  1000 and the server closes the connection. A single frame over 4 MiB is
-  refused from its header, so the rest of it is never read, and closing with
-  that data unread may reset the connection after the close frame. A client
-  still sending the frame may see only the reset; one that reads while it sends
-  gets the close frame first.
+  Binary and fragmented frames are accepted and decoded as UTF-8. The server
+  reads at most 64 KiB (65,536 bytes) of one message from a client. A bigger
+  message, up to 4 MiB, is read past without being unmasked or parsed and gets
+  the `message too large` error (see [Errors](#errors)) with no `req_id`, as
+  the server never read one; the connection stays open. A frame or message over
+  4 MiB gets a close frame with code 1000 and the server closes the connection.
+  A single frame over 4 MiB is refused from its header, so the rest of it is
+  never read, and closing with that data unread may reset the connection after
+  the close frame. A client still sending the frame may see only the reset; one
+  that reads while it sends gets the close frame first.
+  No client message needs more than a few KB, since the server keeps at most
+  1000 characters of a prompt, 500 of a text and 300 of a reason. The server's
+  own messages can be bigger: God's welcome passes 100 KB after a few game
+  days. The `gameofailife/ws.py` client accepts up to 4 MiB.
 - Pings get a pong with the same payload. Control frames (ping, pong, close)
   carry at most 125 bytes and are never fragmented (RFC 6455 5.5): a longer or
   fragmented one fails the connection with close code 1002.
@@ -169,7 +195,7 @@ If another God view is already connected, it is demoted (see
 |--------------|----------|---------|
 | `name`       | no       | Your controller name, cut to 40 characters. Default `"controller"`. If the name is taken by a connected controller, the server appends `-2`, `-3`, ... until it is free. The final name is in the welcome. |
 | `model`      | no       | The model behind the controller (any value, turned into a string and cut to 60 characters). Shown to God only: in `stats.llm.controllers` and in the `model` field of the forks this controller is asked. Characters never see it. A later `claim` keeps it. |
-| `characters` | no       | A list of character ids to claim, or the string `"all"` to claim every living character no other controller holds. Default: claim nothing. Characters that are dead, unknown, or held by another controller are skipped without an error. |
+| `characters` | no       | A list of character ids to claim, or the string `"all"` to claim every living character no other controller holds. Default: claim nothing. Characters that are dead, unknown, or held by another controller are skipped without an error. A repeated id counts once. |
 
 Reply:
 
@@ -826,6 +852,7 @@ connection stays open, except after a bad hello role. All error strings:
 |---------|------|
 | `messages must be JSON` | A frame was not valid JSON: also bad UTF-8, a number too long to parse, or nesting too deep. Never carries a `req_id`. |
 | `messages must be JSON objects` | Valid JSON that is not an object (an array, a number, a string, `null`). Never carries a `req_id`. |
+| `message too large: the most the server reads is 65,536 bytes, so it was dropped unread` | A message over 64 KiB and not over 4 MiB (see [Message basics](#message-basics)). Nothing in it is done. Never carries a `req_id`. |
 | `say hello first` | Any message before `hello`. |
 | `bad hello: <detail>` | A controller `hello` whose `characters` is neither a list, `"all"` nor an empty value (for example `5` or `"dana"`; see [Bad hello](#bad-hello)): `bad hello: characters must be a list of ids or "all"`. You may say `hello` again. |
 | `role must be god or controller` | Bad hello role; the server closes the connection. |
@@ -855,9 +882,9 @@ Some refusals are not `error` messages but come in the normal reply, with
 `claimed` (from `claim`), `invited` (from `invite`) and `luck_set` (from
 `set_luck`, for an unknown id) report a refusal with `ok: false` only, and no
 `error` field. The frame-level failures in [Message basics](#message-basics) (a
-frame over 4 MiB, a bad control frame, a push left waiting more than 5 seconds
-once the network buffers are full) close the connection instead of sending an
-error.
+frame or message over 4 MiB, a bad control frame, a push left waiting more than
+5 seconds once the network buffers are full) close the connection instead of
+sending an error.
 
 ## Answer windows: 5 seconds and 10 seconds
 

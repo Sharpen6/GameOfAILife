@@ -22,7 +22,7 @@ from gameofailife.server import GameServer
 from gameofailife.sim import Simulation
 
 TIMEOUT = 3.0
-UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 
@@ -528,7 +528,7 @@ class TestBadInput(ServerCase):
     async def test_unreadable_json_gets_error_and_keeps_characters(self):
         # Finding 16: a 5000-digit integer (ValueError) and deep nesting (RecursionError).
         c, _ = await self.controller("bot", ["tom"])
-        for text in ('{"type": "query", "n": ' + "1" * 5000 + "}", "[" * 100_000):
+        for text in ('{"type": "query", "n": ' + "1" * 5000 + "}", "[" * 60_000):  # under the 64 KiB limit
             await c.send(text)
             r = await c.expect("error")
             self.assertEqual(r["error"], "messages must be JSON")

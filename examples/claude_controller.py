@@ -136,8 +136,20 @@ def persona(you: dict) -> str:
             "Stay fully yourself: think and decide the way you would, with your own worries, habits and hopes.")
 
 
+def _amount(x, places: int) -> str:
+    """Money with its sign in front: "$1,200", and a debt as "-$400" (never "$-400")."""
+    if not isinstance(x, (int, float)):
+        return "$?"
+    x = round(x, places)
+    return f"{'-' if x < 0 else ''}${abs(x):,.{places}f}"
+
+
 def _dollars(x) -> str:
-    return f"${x:,.0f}" if isinstance(x, (int, float)) else "$?"
+    return _amount(x, 0)
+
+
+def _cents(x) -> str:
+    return _amount(x, 2)
 
 
 def home_line(you: dict) -> str:
@@ -259,9 +271,11 @@ def decision_page(msg: dict, about: dict | None = None, history: list[dict] | No
     goal_line = (f"Saving for {goal.get('name')}: ${goal.get('saved', 0):.0f} of ${goal.get('target')}."
                  if isinstance(goal, dict) else "No particular savings goal.")
     where = you.get("where_name") or you.get("where")
-    if where and where == you.get("home_name"):
+    home_name = you.get("home_name") or ""
+    # A flat is named after its building ("Birch Court, flat 2A"), and the building is the place they are in.
+    if where and (where == home_name or home_name.startswith(f"{where}, ")):
         where = "home"
-    money = f"Money ${you.get('money', 0):,.2f} on you, ${you.get('savings') or 0:,.2f} in savings"
+    money = f"Money {_cents(you.get('money', 0))} on you, {_cents(you.get('savings') or 0)} in savings"
     if you.get("household_funds") is not None:
         money += f", household {_dollars(you['household_funds'])} between you"
     now = [f"{msg.get('time')}, {msg.get('season')}, {msg.get('weather')}. You are at: {where}.",
@@ -351,7 +365,7 @@ class ClaudeController:
                 self.spawn(self.send({"type": "query", "agent_id": claimed[0], "what": "people"}))
             for agent_id in claimed:
                 self.refresh(agent_id)
-            else:
+            if not claimed:
                 print(f"Nobody claimed. Free characters: {', '.join(msg.get('available') or []) or 'none'}")
         elif t == "answer" and msg.get("what") == "people":
             self.names.update(msg.get("data") or {})
