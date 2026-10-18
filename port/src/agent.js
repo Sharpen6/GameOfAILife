@@ -12,13 +12,18 @@
 
   // Python's RelationKind(str, Enum): the values are the strings, so `r.kind.value` is `r.kind` here.
   const RelationKind = { PARTNER: "partner", FAMILY: "family", FRIEND: "friend", COWORKER: "coworker",
-    ACQUAINTANCE: "acquaintance" };
+    ACQUAINTANCE: "acquaintance", DATING: "dating", EX: "ex", RIVAL: "rival" };
 
   class Relationship {
     constructor(kind, affinity, trust = 50.0) {
       this.kind = kind;
       this.affinity = affinity; // -100 .. 100
       this.trust = trust;
+      this.romance = 0.0; // 0 .. 100, this side's
+      this.since = 0; // tick the relationship (or the current kind of it, for dating and partners) began
+      this.seen = 0; // tick the two last talked
+      this.married = false;
+      this.talks = 0; // talks so far
     }
 
     bump(amount) { this.affinity = Math.max(-100.0, Math.min(100.0, this.affinity + amount)); }
@@ -27,16 +32,22 @@
   }
 
   class Job {
-    constructor(title, place_id, hourly_wage, start_hour, end_hour, workdays) {
+    constructor(title, place_id, hourly_wage, start_hour, end_hour, workdays, slot = -1) {
       this.title = title;
       this.place_id = place_id;
       this.hourly_wage = hourly_wage;
       this.start_hour = start_hour;
       this.end_hour = end_hour;
       this.workdays = workdays; // an array of weekdays (a tuple in Python)
+      this.slot = slot; // its slot on career.JobBoard (not in the JSON)
     }
 
-    on_shift(weekday, hour) { return this.workdays.includes(weekday) && this.start_hour <= hour && hour < this.end_hour; }
+    // On a workday inside the hours; a night shift (end <= start) runs from start to midnight and from midnight to end.
+    on_shift(weekday, hour) {
+      if (!this.workdays.includes(weekday)) return false;
+      if (this.end_hour <= this.start_hour) return this.start_hour <= hour || hour < this.end_hour;
+      return this.start_hour <= hour && hour < this.end_hour;
+    }
 
     to_json() {
       return { title: this.title, place: this.place_id, hourly_wage: this.hourly_wage,
@@ -155,6 +166,7 @@
       this.trip = null; // {mode: "bus", line, board, alight, phase, since} while on a bus trip
       this.riding = null; // bus id while on board
       this.died = null; // {tick, time, how}
+      this.life = null; // life.LifeState, set by life.init (not in the v2 JSON)
       // Python sets these on the fly (getattr(agent, name, default)); undefined means "not set yet".
       this.paid = undefined; // [payer id, cost] of the choice being carried out
       this.work_started = undefined;

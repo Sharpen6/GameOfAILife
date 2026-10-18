@@ -196,7 +196,9 @@ class Lot:
 
 
 def build_homes(town: TownMap) -> dict[str, Home]:
-    """Every home in HOME_SPECS order, unoccupied; `init(sim)` moves the cast in."""
+    """Every home in HOME_SPECS order, unoccupied; `init(sim)` moves the cast in. In the region world the
+    region's homes (`town.home_specs`) follow the 37: empty and unlisted, owned by the landlord (a let home) or
+    the market, until the townsfolk move in and `list_vacancies` lists what is left."""
     homes = {}
     for hid, place_id, unit, tier, beds, base, rent, start, _ in HOME_SPECS:
         place = town.places[place_id]
@@ -204,15 +206,25 @@ def build_homes(town: TownMap) -> dict[str, Home]:
         name = f"{place.name}, flat {unit}" if unit else place.name
         homes[hid] = Home(hid, place_id, unit, name, tier, beds, base, rent, start,
                           owner=START_OWNER[start], listing=START_LISTING[start])
+    # --- region ---
+    for hid, place_id, unit, tier, beds, base, rent, start, _ in getattr(town, "home_specs", ()):
+        place = town.places[place_id]
+        assert place.kind == "home" and place.tier == tier and hid not in homes, (hid, place.kind, place.tier)
+        name = f"{place.name}, flat {unit}" if unit else place.name
+        homes[hid] = Home(hid, place_id, unit, name, tier, beds, base, rent, start,
+                          owner="landlord" if START_OWNER.get(start) == "landlord" else "market", listing=None)
+    # --- end region ---
     return homes
 
 
 def build_lots(town: TownMap, homes: dict[str, Home]) -> dict[str, Lot]:
-    """One lot per residential place that has homes, in place order, at its starting condition."""
+    """One lot per residential place that has homes, in place order, at its starting condition (the region's
+    lots from `town.lot_conditions`)."""
     start = dict(LOT_CONDITION)
     for hid, place_id, unit, *_, condition in HOME_SPECS:
         if condition is not None:
             start[place_id] = condition
+    start.update(getattr(town, "lot_conditions", None) or {})  # --- region ---
     used = {h.place for h in homes.values()}
     lots = {}
     for place in town.places.values():
@@ -233,6 +245,102 @@ def init(sim) -> None:
         home.household = hh.id
         if home.start == "owned":
             home.owner = hh.id
+
+
+# --- region ---
+# The 37 are the only homes the 60 are ever offered (PLAN 2.9): the region's homes are the townsfolk's market.
+V2_HOME_IDS = tuple(spec[0] for spec in HOME_SPECS)
+_V2_HOME_SET = frozenset(V2_HOME_IDS)
+
+
+def is_v2_home(home_id: str) -> bool:
+    """One of Millbrook's 37 homes (HOME_SPECS)."""
+    return home_id in _V2_HOME_SET
+
+
+def cast_homes(sim) -> list[Home]:
+    """The 37 in town.homes order: what every candidate list and market view of the cast looks at."""
+    homes = sim.homes
+    return [homes[hid] for hid in V2_HOME_IDS if hid in homes]
+
+
+def _person(sim, pid: str):
+    """A named Agent or a townsperson by id, else None: `sim.person` (people.person) once the hooks land, the
+    cast alone until then. The cast is looked up first, as people.person does."""
+    a = sim.agents.get(pid)
+    if a is not None:
+        return a
+    f = getattr(sim, "person", None)
+    return f(pid) if f else None
+
+
+def _household(sim, hid: str | None):
+    """A cast or townsfolk household by id, else None (`sim.household_by_id` once the hooks land)."""
+    hh = sim.households.get(hid)
+    if hh is not None or hid is None:
+        return hh
+    f = getattr(sim, "household_by_id", None)
+    return f(hid) if f else None
+
+
+def _here(p) -> bool:
+    """Alive and (a townsperson) still in town."""
+    return p is not None and p.alive and not getattr(p, "gone", False)
+
+
+def list_vacancies(sim) -> int:
+    """List every empty region home (to let at `region.rent_at` when the landlord owns it, else for sale at its
+    value) and unlist the occupied ones; returns how many region homes are listed. Only the townsfolk call it:
+    after populating and after each folk move, the only ways region homes change hands. With no townsfolk nothing
+    is ever listed. The 37 are left alone. The rent is always worked out from the base rent of `town.home_specs`,
+    never from the last listing."""
+    from . import region  # R1a's module; lazy (PLAN 2.16)
+
+    town = sim.town
+    specs = {row[0]: row for row in town.home_specs}
+    n = 0
+    for h in sim.homes.values():
+        if h.id in _V2_HOME_SET:
+            continue
+        if h.household is not None:
+            h.listing = None
+            continue
+        if h.owner == "landlord":
+            h.listing = "for_rent"
+            h.rent = region.rent_at(town, specs[h.id], sim.lots[h.place].condition)
+        else:
+            h.owner, h.listing = "market", "for_sale"
+        n += 1
+    return n
+
+
+def _folk_commute_cost(p) -> int:
+    """A townsperson's week of commuting by the mode in `p.commute` (place, minutes, mode): a car is
+    travel.TRIP_COST["car"] a workday, the train two fares (rail.fare: free under 18 and from 65), a walk nothing.
+    No travel call: travel.usual_mode reaches `sim.home_of`, which knows only the cast."""
+    job = p.job
+    if not job or job.hourly_wage <= 0:
+        return 0
+    mode = p.commute[2] if getattr(p, "commute", None) else "walk"
+    if mode == "car":
+        per = travel.TRIP_COST["car"]
+    elif mode == "train":
+        per = 2 * _fare(p.age)
+    else:
+        per = 0
+    return len(job.workdays) * per
+
+
+def _fare(age: int) -> int:
+    try:
+        from . import rail  # R2's module; lazy (PLAN 2.16)
+    except ImportError:
+        rail = None
+    f = getattr(rail, "fare", None)
+    if f is not None:
+        return f(age)
+    return 3 if 18 <= age < 65 else 0  # region.md 6.7 until rail.py lands
+# --- end region ---
 
 
 # --- helpers ------------------------------------------------------------------
@@ -303,11 +411,11 @@ def release(home: Home) -> None:
 
 def adults(sim, hh: Household) -> list[Agent]:
     """The household's living adults: the ones who pay and decide."""
-    return [a for a in (sim.agents[m] for m in hh.member_ids) if a.alive and a.is_adult]
+    return [a for a in (_person(sim, m) for m in hh.member_ids) if _here(a) and a.is_adult]  # region: _person
 
 
 def residents(sim, hh: Household) -> int:
-    return sum(1 for m in hh.member_ids if sim.agents[m].alive)
+    return sum(1 for m in hh.member_ids if _here(_person(sim, m)))  # region: _person
 
 
 def crowded(sim, hh: Household) -> bool:
@@ -361,8 +469,8 @@ def _surname(name: str) -> str:
 
 def household_name(sim, hh: Household) -> str:
     """"Ari Ben-David" for one adult, "The Cohens" when the adults share a surname, else "Dana and Yossi"."""
-    people = adults(sim, hh) or [a for a in (sim.agents[m] for m in hh.member_ids) if a.alive] \
-        or [sim.agents[m] for m in hh.member_ids]
+    people = adults(sim, hh) or _members(sim, hh) \
+        or [a for a in (_person(sim, m) for m in hh.member_ids) if a is not None]  # region: _person
     if not people:
         return hh.id
     if len(people) == 1:
@@ -379,7 +487,7 @@ def household_summary(sim, hh: Household) -> dict:
     """The stats push's households[] row."""
     home = sim.homes[hh.home_id]
     return {"id": hh.id, "name": household_name(sim, hh),
-            "members": [m for m in hh.member_ids if sim.agents[m].alive],
+            "members": [m for m in hh.member_ids if _here(_person(sim, m))],
             "home": home.id, "home_name": home.name, "place": home.place, "tier_label": TIERS[home.tier]["label"],
             "tenure": tenure(sim, hh), "weekly_cost": weekly_cost(sim, hh)}
 
@@ -423,7 +531,10 @@ def weekly_income(sim, hh: Household) -> float:
     for a in adults(sim, hh):
         job = a.job
         if job and job.hourly_wage > 0:
-            hours = (job.end_hour - job.start_hour) * len(job.workdays)
+            span = job.end_hour - job.start_hour
+            if span <= 0:  # region: a night shift (life.md 3.2) ends the next morning
+                span += 24
+            hours = span * len(job.workdays)
             total += job.hourly_wage * hours * (1 - income_tax(job.hourly_wage))
         elif retired(a):
             total += PENSION
@@ -439,13 +550,20 @@ def bills(sim, hh: Household) -> float:
 
 def living(sim, hh: Household) -> float:
     """The weekly living estimate: LIVING_PER_PERSON a resident, LIVING_PER_RETIREE for a retiree."""
-    return sum(LIVING_PER_RETIREE if retired(a) else LIVING_PER_PERSON
-               for a in (sim.agents[m] for m in hh.member_ids) if a.alive)
+    return sum(LIVING_PER_RETIREE if retired(a) else LIVING_PER_PERSON for a in _members(sim, hh))
 
 
 def commute(sim, hh: Household) -> float:
-    """The adults' weekly commuting costs by their usual way to work."""
-    return sum(travel.weekly_commute_cost(sim, a) for a in adults(sim, hh))
+    """The adults' weekly commuting costs by their usual way to work (a townsperson's by `p.commute`)."""
+    total = 0
+    for a in adults(sim, hh):
+        # --- region ---
+        if a.profile is None:  # a townsperson
+            total += _folk_commute_cost(a)
+            continue
+        # --- end region ---
+        total += travel.weekly_commute_cost(sim, a)
+    return total
 
 
 def buys(home: Home) -> bool:
@@ -530,8 +648,9 @@ def is_upgrade(sim, hh: Household, home_id: str) -> bool:
 
 
 def vacancies(sim, listing: str | None = None) -> list[Home]:
-    """Vacant homes buyers and renters can see now (not under offer), in town.homes order."""
-    return [h for h in sim.homes.values()
+    """Vacant homes buyers and renters can see now (not under offer), in town.homes order: the cast's market,
+    so only the 37 (PLAN 2.9; the townsfolk list theirs with folk_life.vacancies)."""
+    return [h for h in cast_homes(sim)  # region: the 37 only
             if h.household is None and listed(sim, h) and (listing is None or listed(sim, h) == listing)]
 
 
@@ -566,7 +685,7 @@ def house_drought(sim, but: str | None = None) -> bool:
     now = sim.clock.tick
     if now < LANDLORD_SELLS_DAYS * DAY:
         return False
-    for h in sim.homes.values():
+    for h in cast_homes(sim):  # region: the 37 only
         if h.tier == "flat" or h.id == but:
             continue
         if h.household is None and h.listing == "for_sale":
@@ -723,7 +842,7 @@ def agent_page_fields(sim, agent: Agent) -> dict:
 def market_json(sim) -> dict:
     """Controller `query market`: the vacant homes listed for sale and to let, in town.homes order."""
     out = {"for_sale": [], "for_rent": []}
-    for h in sim.homes.values():
+    for h in cast_homes(sim):  # region: the 37 only (the townsfolk's homes are not the cast's market)
         shown = listed(sim, h)
         if h.household is not None or shown is None:
             continue
@@ -743,7 +862,7 @@ def home_page(sim, home_id: str) -> dict | None:
         return None
     lot = sim.lots[h.place]
     st = stage_of(lot.condition)
-    hh = sim.households.get(h.household) if h.household else None
+    hh = _household(sim, h.household) if h.household else None  # region: a townsfolk household too
     history = [{"time": row.get("time"), "event": row.get("event"), "household": row.get("household"),
                 "price": row.get("price")} for row in h.history[-20:]]
     return {
@@ -752,7 +871,7 @@ def home_page(sim, home_id: str) -> dict | None:
         "hh": h.household, "household_name": household_name(sim, hh) if hh else None, "owner": h.owner,
         "listing": listed(sim, h), "price": _price(sim, h), "value": value(sim, h.id),
         "emergency": _emergency_json(h), "condition": _condition_json(lot), "stage": st, "stage_name": stage_name(st),
-        "residents": [sim.agents[m].name for m in hh.member_ids if sim.agents[m].alive] if hh else [],
+        "residents": [a.name for a in _members(sim, hh)] if hh else [],
         "history": history,
     }
 
@@ -769,7 +888,7 @@ def _event(sim, text: str, tag: str, place: str, agent: Agent | None = None, age
 
 
 def _members(sim, hh: Household) -> list[Agent]:
-    return [a for a in (sim.agents[m] for m in hh.member_ids) if a.alive]
+    return [a for a in (_person(sim, m) for m in hh.member_ids) if _here(a)]  # region: _person
 
 
 def available(sim, hh: Household, home: Home) -> bool:
@@ -1051,7 +1170,7 @@ def weekly_charges(sim) -> None:
 
 # --- group B: condition, stages and emergencies ----------------------------------------------
 
-def _stage_news(sim, lot: Lot) -> None:
+def _stage_news(sim, lot: Lot, homes: list[Home] | None = None) -> None:
     """Announce a newly reached shabby, neglected or derelict stage, or a return to kept, for an owner-occupied
     home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
     poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
@@ -1060,8 +1179,11 @@ def _stage_news(sim, lot: Lot) -> None:
     is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
     first evening never makes the news as falling apart."""
     st = stage_of(lot.condition)
-    homes = lot_homes(sim, lot.place)
+    if homes is None:
+        homes = lot_homes(sim, lot.place)
     home = homes[0] if len(homes) == 1 and owner_occupied(homes[0]) else None
+    if home is not None and home.household not in sim.households:  # region: a townsfolk home is never news
+        home = None
     lot.worst = max(lot.worst, st)
     if st <= 1:
         if st == 0:
@@ -1098,8 +1220,8 @@ def _decay(sim, lot: Lot, homes: list[Home], winter: bool) -> None:
     if tier == "flat":  # a block wears at the flat rate whether or not its flats are let
         rate = TIERS["flat"]["decay"] * season
     elif lived_in:
-        hh = sim.households[lived_in[0].household]
-        rate = TIERS[tier]["decay"] * season * (1 + CROWD_DECAY * max(0, residents(sim, hh) - 2))
+        hh = _household(sim, lived_in[0].household)  # region: a townsfolk household too
+        rate = TIERS[tier]["decay"] * season * (1 + CROWD_DECAY * max(0, (residents(sim, hh) if hh else 0) - 2))
         if lived_in[0].emergency:
             rate += EMERGENCY_DECAY
     else:
@@ -1112,9 +1234,9 @@ def _decay(sim, lot: Lot, homes: list[Home], winter: bool) -> None:
     if floor is not None and all(h.owner == "landlord" for h in homes) and lot.condition < floor:
         lot.condition = float(LANDLORD_RESTORE)
         lot.works_until = sim.clock.tick + LANDLORD_WORKS_MINUTES
-        if lived_in:
+        if any(h.household in sim.households for h in lived_in):  # region: news for the cast only
             _event(sim, f"{LANDLORD} repaints {sim.town.places[lot.place].name}.", "repaint", lot.place)
-    _stage_news(sim, lot)
+    _stage_news(sim, lot, homes)
 
 
 def nightly(sim) -> None:
@@ -1123,12 +1245,17 @@ def nightly(sim) -> None:
     from .forks import luck_odds  # forks reaches housing through default_scores, so not at the top
 
     winter = sim.clock.season == "winter"
+    by_place = {}  # region: lot_homes for every lot in one pass (612 homes in the region)
+    for home in sim.homes.values():
+        by_place.setdefault(home.place, []).append(home)
     for lot in sim.lots.values():
-        _decay(sim, lot, lot_homes(sim, lot.place), winter)
+        _decay(sim, lot, by_place[lot.place], winter)
     for home in sim.homes.values():
         if not home.household:
             continue
-        hh = sim.households[home.household]
+        hh = sim.households.get(home.household)
+        if hh is None:  # region: the townsfolk roll their own homes' damp and emergencies (F1)
+            continue
         st = stage_of(condition_of(sim, home.id))
         if st in DAMP_HEALTH:
             for a in _members(sim, hh):
@@ -1161,6 +1288,12 @@ def tick(sim) -> None:
     now = sim.clock.tick
     for home in sim.homes.values():
         pending = home.pending_emergency
+        # --- region ---
+        if not pending and not home.emergency:
+            continue
+        if home.household is not None and home.household not in sim.households:
+            continue  # a townsfolk home's emergencies are the townsfolk's (F1)
+        # --- end region ---
         if pending and pending["due"] <= now:
             home.pending_emergency = None
             if owner_occupied(home):
@@ -1350,8 +1483,16 @@ def afford_score(sim, agent: Agent, opt) -> float:
     cost = opt.cost
     if cost <= 0:
         return 0.0
-    hh = sim.households[agent.household_id]
-    thrift = agent.profile.traits["thrift"] * (3 if hh.tight_until > sim.clock.tick else 1)
+    # --- region --- (people.household / people.traits take a townsperson too; v2's lookups until L1's lands)
+    try:
+        from . import people  # L1's module; lazy (PLAN 2.16)
+    except ImportError:
+        people = None
+    household, traits = getattr(people, "household", None), getattr(people, "traits", None)
+    hh = household(sim, agent) if household else _household(sim, agent.household_id)
+    own = traits(agent) if traits else agent.profile.traits if agent.profile is not None else agent.traits
+    thrift = own["thrift"] * (3 if hh.tight_until > sim.clock.tick else 1)
+    # --- end region ---
     if getattr(opt, "household_pays", False):
         spare = funds(sim, hh) - 2 * weekly_outgo(sim, hh)
         return -1.5 if cost > spare else -thrift * (cost / spare) ** 2
