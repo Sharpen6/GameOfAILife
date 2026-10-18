@@ -380,5 +380,66 @@ class TestPortKeys(unittest.TestCase):
         self.compare(FOLK)
 
 
+# --- client/dev/fixture_folk.js ---------------------------------------------------------------------------------
+
+FIXTURE = ROOT / "client" / "dev" / "fixture_folk.js"
+FIXTURE_AT = "Day 1 Mon 08:00"
+FIXTURE_HEAD = f"""// Townsfolk dev fixture (folk.md 14): window.FOLK_FIXTURE = {{welcome, frames}}, recorded from the real server.
+//   welcome  GameServer's God welcome for the seed-1 region with 1,000 townsfolk at {FIXTURE_AT} (town, state with
+//            crowd, occ, trains and folk_n, history, news, stats with stats.folk and stats.region)
+//   frames   the next three state frames at speed 16, as the frame loop sends them
+// Made by `python3 -m tests.test_folk_protocol --write-fixture`; the integrator makes it again after a merge
+// that changes the engine. Generated data for the client's dev pages; classic script.
+"use strict";
+"""
+
+
+def fixture_data() -> dict:
+    """The seed-1 region's welcome at FIXTURE_AT and its next three frames, as the engines make them now."""
+    sim = Simulation(1, world="region", folk=FOLK)
+    while sim.clock.stamp() != FIXTURE_AT:
+        sim.step()
+        sim.drain()
+    server, view = god_server(sim)
+    welcome = server._welcome_god()
+    frames = []
+    while len(frames) < 3:
+        serve_frames(server, view, 1)
+        frames += [m for m in view.got if m["type"] == "state"]
+        view.got.clear()
+    return {"welcome": welcome, "frames": frames[:3]}
+
+
+def fixture_text(data: dict) -> str:
+    body = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return f"{FIXTURE_HEAD}window.FOLK_FIXTURE = {body};\n"
+
+
+class TestFolkFixture(unittest.TestCase):
+    """client/dev/fixture_folk.js has the shape the server sends (its values follow the engines at its making)."""
+
+    def test_the_fixture_is_a_region_welcome_and_three_frames(self):
+        import re
+        m = re.search(r"^window\.FOLK_FIXTURE = (.*?);?\s*\Z", FIXTURE.read_text(), re.M | re.S)
+        self.assertTrue(m, "client/dev/fixture_folk.js does not set window.FOLK_FIXTURE")
+        data = json.loads(m.group(1))
+        welcome = data["welcome"]
+        self.assertEqual((welcome["type"], welcome["town"]["world"], welcome["state"]["folk_n"]),
+                         ("welcome", "region", FOLK))
+        self.assertEqual(welcome["state"]["time"], FIXTURE_AT)
+        self.assertEqual(len(welcome["state"]["occ"]), len(welcome["town"]["places"]))
+        self.assertEqual(len(data["frames"]), 3)
+        for frame in data["frames"]:
+            self.assertEqual(frame["type"], "state")
+            self.assertLessEqual({"crowd", "trains", "folk_n", "talks", "agents"}, set(frame["state"]))
+        self.assertTrue(data["frames"][0]["state"]["crowd"], "08:00 has townsfolk out")
+        self.assertLessEqual(set(Simulation(1, world="region").state_json(housing=True)), set(welcome["state"]))
+
+
 if __name__ == "__main__":
-    unittest.main()
+    import sys
+    if "--write-fixture" in sys.argv:
+        FIXTURE.write_text(fixture_text(fixture_data()))
+        print(f"wrote {FIXTURE} ({FIXTURE.stat().st_size:,} bytes)")
+    else:
+        unittest.main()
