@@ -104,7 +104,8 @@ def _folk_life():
 
 
 def urgency(level: float) -> float:
-    return ((100 - level) / 100) ** 2
+    u = (100 - level) / 100
+    return u * u
 
 
 class Option:
@@ -280,7 +281,7 @@ class Folk:
         p.activity_place = place_id
         self.where[p.i] = place_id
         self.occupants.setdefault(place_id, {})[p.i] = None
-        if ACT.get(p.activity, ({}, False))[1] and p.activity == "walk_park":
+        if p.activity == "walk_park":
             self.strollers[p.i] = place_id
         else:
             k = self.pidx.get(place_id)
@@ -782,7 +783,6 @@ class Folk:
         if home is None:
             self._begin(p, now, "relax_home", 30)
             return
-        net = folk_transit.net(self.town)
         turn = None
         for pid in self._favs(p, "shopping") + self._favs(p, "coffee"):
             if pid != home:
@@ -800,7 +800,6 @@ class Folk:
         p.activity_place = home
         self.out[p.i] = None
         self.counters["trips"] += 1
-        del net
         self.stay[p.i] = (now, back[2])
         self.schedule(p, back[2])
 
@@ -816,6 +815,27 @@ class Folk:
             tiles = self._park_tiles[park] = [(x, y) for y in range(place.y, place.y + place.h)
                                               for x in range(place.x, place.x + place.w)] or [place.entry]
         return tiles[_dice().key(self.sim.dice_seed, NS_STROLL, p.i, tick // STROLL_EVERY) % len(tiles)]
+
+    def xy(self, p, tick: int) -> tuple[int, int]:
+        """The person's tile at tick: on a trip leg (a train's tile while aboard), strolling, else the entry of the
+        place they are at (or home)."""
+        trip = p.trip
+        if trip is not None:
+            leg = folk_transit.leg_at(trip.legs, tick)
+            if leg is not None:
+                kind, t0, t1, data = leg
+                if kind == WALK or kind == DRIVE:
+                    x, y, _ = data.at(max(0, tick - t0))
+                    return x, y
+                if kind == WAIT:
+                    return folk_transit.station_xy(self.town, data)
+                return folk_transit.train_xy(self.town, data, tick)
+        if p.i in self.strollers:
+            return self._locate(p, tick)
+        place = self.town.places.get(self.where.get(p.i) or self.home_place(p) or "")
+        if place is None:
+            return 0, 0
+        return place.entry[0], place.entry[1]
 
     def _leg_xy(self, p, tick: int):
         """(x, y, mode) of a traveller at tick, or None while aboard a train or a passenger."""
@@ -931,10 +951,11 @@ class Folk:
                     q = self.person(mid)
                     if q is not None and q.alive and not q.gone and q.age >= 18:
                         adults += 1
-                try:
+                lots = getattr(sim, "lots", None)
+                if lots is not None and home.place in lots:
                     from . import housing
                     value = housing.value(sim, hh.home_id)
-                except Exception:  # noqa: BLE001 - a home without a lot: its base value
+                else:  # a home without a lot (a test world): its base value
                     value = home.base_value
                 w += value / max(1, adults)
         return int(w // 1)
@@ -1018,7 +1039,7 @@ class Folk:
         hh = self.hh_of(p)
         home_id = hh.home_id if hh is not None else None
         home = getattr(sim, "homes", {}).get(home_id) if home_id else None
-        x, y = p.position(sim.clock.tick)
+        x, y = self.xy(p, sim.clock.tick)
         rels = {}
         for oid, r in sorted(p.relationships.items(), key=lambda kv: (-kv[1].affinity, kv[0])):
             rels[oid] = people.rel_row(sim, oid, r)

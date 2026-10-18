@@ -139,3 +139,8 @@ def fare(age: int) -> int:
 def station_xy(town, station_id: str) -> tuple[int, int]:
     p = town.places[station_id]
     return p.entry[0], p.entry[1]
+
+
+def train_xy(town, train_id: str, tick: int) -> tuple[int, int]:
+    x, y = rail.train_xy(town, train_id, tick)
+    return x, y
