@@ -238,6 +238,10 @@ def news_gate(sim, tag, importance, agent, agents) -> bool:
             state = sim._folk_news = [day, 0]
         state[1] += 1
         return state[1] <= FOLK_NEWS_CAP
+    day = sim.clock.day
+    if sim.__dict__.get("_folk_news_day") != day:  # a new game day, whoever clears sim.life.today
+        sim._folk_news_day = day
+        today["folk_news"] = 0
     today["folk_news"] = today.get("folk_news", 0) + 1
     return today["folk_news"] <= FOLK_NEWS_CAP
 

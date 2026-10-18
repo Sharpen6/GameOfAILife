@@ -2,7 +2,8 @@
   "engine": ["py.js", "rng.js", "dice.js", "clock.js", "agent.js", "people.js", "town.js", "region.js", "roads.js",
              "transit.js", "rail.js", "travel.js", "chronicle.js", "stats.js", "housing.js", "forks.js",
              "housing_forks.js", "life_tables.js", "talk.js", "social.js", "social_forks.js", "life.js", "career.js",
-             "money.js", "cast.js", "folk_model.js", "sim.js"],
+             "money.js", "cast.js", "folk_model.js", "folk_names.js", "folk_gen.js", "folk_transit.js", "folk_life.js",
+             "folk.js", "sim.js"],
   "host": ["host.js"],
   "guard": ["guard.js"],
   "page": ["page.js"]

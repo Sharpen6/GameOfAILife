@@ -86,7 +86,6 @@ class LookupTest(unittest.TestCase):
         self.assertTrue(day.on_shift(0, 8) and not day.on_shift(0, 16))
         self.assertEqual(day.slot, -1)
         self.assertNotIn("slot", day.to_json())
-        self.assertIsNone(self.sim.agents["dana"].life)
 
 
 class NewsGateTest(unittest.TestCase):
@@ -121,6 +120,7 @@ class PromptTest(unittest.TestCase):
         people.PROMPTS.update(self.saved)
 
     def test_no_life_no_prompt(self):
+        self.dana.life = None
         self.assertFalse(people.prompt(self.sim, self.dana, "crush", {}))
         self.assertIsNone(people.pending_fork(self.sim, self.dana))
 

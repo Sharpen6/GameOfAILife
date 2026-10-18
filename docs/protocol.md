@@ -1412,7 +1412,72 @@ How people talk, love, fall ill, work, earn and die, for the named and the towns
 
 ### Social
 
-L1 writes this section (`talks`, the social event tags, texts and invites to townsfolk).
+Everyone talks: the named and the townsfolk meet in rooms (a home's residents, a block's or house's visitors, a
+workplace, school, cafe or park), about 4 to 9 talks a person a game day. Talk moves both sides' `affinity`;
+friendships, falling-outs, rivals, flirting, dating, moving in, engagements, weddings, breakups, loans and rows
+follow from it. Romance between a named character and a townsperson stops at dating. Odds are never sent.
+
+**`state.talks`**: the talks begun in the last 10 game minutes, newest first, at most 20 rows:
+`[place_index, a_id, b_id, tone, tick]`. `place_index` is the place's position in `town.places` (-1 on a street);
+`a_id`, `b_id` the two (named or townsfolk ids); `tone` 1 warm, 0 pleasant, -1 awkward or an argument; `tick` the
+minute it began (for de-duplication across frames). Every talk with a named character comes first, then talks
+between townsfolk, at most one per place.
+
+**Relationships.** `get_agent` and the controller's `query` `relationships` give, for each other person by id,
+`{"id", "name", "named", "kind", "affinity", "trust", "romance", "married"}`: `named` false for a townsperson;
+`kind` one of `partner`, `family`, `friend`, `coworker`, `acquaintance`, `dating`, `ex` or `rival`; `affinity`
+-100..100 (rounded; a friend from 40, a rival at -15 or below), `trust` 0..100, `romance` 0..100 (this side's), and
+`married` true for a married couple. A person keeps at most 60 relationships: a new acquaintance pushes out the
+acquaintance or coworker seen longest ago (never a friend, family, partner or date), and an unseen friend slowly
+fades.
+
+**Talk lines.** A named character's last 12 talks are kept for their page (see [Life, work and money](#life-work-and-money)
+for where the page shows them) as `{"time", "with", "name", "topic", "tone", "text", "place"}`: `topic` one of
+`weather`, `work`, `school`, `money`, `family`, `health`, `news`, `love`; `tone` `warm`, `pleasant`, `awkward` or
+`argument`; `text` the two lines, `“...” “...”`, at most 160 characters. A `news` talk may quote a recent headline,
+never the richest-person headline or a controller's.
+
+**Events** (see [Event](#event)). Every social event carries `place` and `agents`. Talks and flirts are events only
+with a named character, and then only for arguments and for warm, news, love or baby talk away from home.
+
+| Tag | Importance | When |
+|-----|------------|------|
+| `talk` | 0 | "Dana Cohen and Ari Ben-David chat about the news at Corner Cafe: “...” “...”" (or `argue about`). |
+| `flirt` | 0 (1 for an ask-out) | Two single adults flirt; "Tom Levi asks Ari Ben-David out to dinner." |
+| `new_friend` | 2 between named, 1 with a townsperson | Affinity reached 40. |
+| `falling_out` | 2 between named, 1 with a townsperson | A friend or partner's affinity went below 0. |
+| `rival` | 1 | Affinity fell to -15: they can't stand each other. |
+| `row` | 1 | A weekly incident at work, school or on a block: affinity -15 both. |
+| `partner` | 2 | "... are going out!" |
+| `meetup` | 0 | A date between a named character and a townsperson. |
+| `moved_in`, `engaged`, `wedding` | 2 | Moving in together, an engagement, the wedding (a Saturday at 14:00 in a park). |
+| `breakup`, `divorce` | 2 | A couple splits (a married couple divorces, $1,500 each). |
+| `loan` | 1 (0 for a repayment) | A loan between family or friends, repaid once the borrower holds three times it. |
+| `invite`, `invite_accepted`, `invite_declined` | 0 / 1 / 0 | Invites, to the named and to townsfolk. |
+| `text` | 0 | A named character texts a townsperson. |
+
+News about townsfolk alone (an event naming a townsperson and no named character, importance 1 or more) is capped
+at 60 a game day; the rest are dropped.
+
+**Texts to townsfolk.** `send_message` with a townsperson's id as `to` works only when the sender knows them (else
+`{"ok": false, "error": "you don't know them"}`). The townsperson answers at once with a short reply, pushed as a
+[`message`](#message) whose `from` is their id and `from_name` their name; both sides' affinity rises by 1. Each
+Saturday at 12:00 a townsperson friend (affinity 40+) may text a named friend the same way.
+
+**Invites to townsfolk.** `invite` with a townsperson's id as `to` answers `{"type": "invited", "ok", "invite":
+{"id": "fi<n>", "from", "to", "place", "tick", "status"}}` (`ok` false when the townsfolk keep to themselves or the
+place is out of reach). The townsperson answers on the next game minute with an [`invite_answer`](#invite_answer)
+(`invite_id` the `fi<n>` id, `from` their id, `answer` `accept` or `decline`), and on `accept` heads there for 90
+minutes. Townsfolk invites are never in the named characters' invite list and never become an `invite` fork.
+
+**Social forks.** Eight kinds reach a named character as a [`fork`](#fork), each with four options and an `about`
+(who the other person is, how long the two have known each other, how often they have talked and how the character
+feels about them): `crush` (ask them out, a flirty text, wait, let it go), `asked_out` (yes, a coffee instead, stay
+friends, turn them down), `date` (go, coffee tomorrow, not tonight, end it), `move_in` (ask them to move in, move
+into their place, look for a place together, not yet), `propose` and `proposal` (the asking and the answer),
+`relationship_trouble` (talk it through, a special evening, a week's space, end it), `partner_split` (agree, try
+counselling, plead, storm out) and `friend_in_need` (lend it all, lend half, give a quarter, say no). The other
+person may be a townsperson (`crush`, `asked_out`, `date`, `relationship_trouble`, `friend_in_need`).
 
 ### Life, work and money
 

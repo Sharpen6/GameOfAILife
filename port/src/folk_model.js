@@ -69,7 +69,7 @@
       this.activity = "sleep";
       this.activity_place = null;
       this.state = "busy";
-      this.relationships = {}; // id -> agent Relationship over folk and named ids (people.set_rel)
+      this.relationships = new Map(); // id -> agent Relationship over folk and named ids (people.set_rel)
       this.life = null; // life LifeState, set by life.init
       this.memory = []; // last MEMORY_KEEP lines "stamp: text"
       this.traits = {}; // Profile.TRAITS keys
@@ -80,7 +80,8 @@
       this.choices = []; // last CHOICES_KEEP {time, kind, options, choice, by}
       this.inbox = []; // last INBOX_KEEP messages
       this.commute = null; // [place, minutes, mode] | null
-      this.skill = 0.0;
+      this.skill = 0.0; // job matching (generation)
+      this.role = "a"; // household role at generation: "a" head or partner, "k" child, "g" grandparent, "s" sharer
       this._needs = {};
       for (const n of NEEDS) this._needs[n] = 75.0;
       this._nt = 0;
@@ -166,8 +167,8 @@
           const at = data.at(m);
           return [at[0], at[1]];
         }
-        if (kind === WAIT && town !== null && town.places[data] !== undefined) {
-          const e = town.places[data].entry;
+        if (kind === WAIT && town !== null && town.places.has(data)) {
+          const e = town.places.get(data).entry;
           return [e[0], e[1]];
         }
         if (kind === RIDE && town !== null) {
@@ -181,8 +182,8 @@
         if (xy !== null && xy !== undefined) return [xy[0], xy[1]];
       }
       const pid = this.inside !== null ? this.inside : this.activity_place;
-      if (town !== null && pid !== null && town.places[pid] !== undefined) {
-        const e = town.places[pid].entry;
+      if (town !== null && pid !== null && town.places.has(pid)) {
+        const e = town.places.get(pid).entry;
         return [e[0], e[1]];
       }
       return [0, 0];
