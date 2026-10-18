@@ -53,7 +53,56 @@
     return lines;
   }
 
+  // The hidden aftertaste of each option that has no outcome of its own, by fork kind and option index (Luck shifts
+  // it like any other outcome): [id, label, p, valence, effects]; life_rel/life_rom values are bumps with the other one.
+  const MOODS = {
+    crush: [["nervous_ask", "Nervous, but glad they asked", 0.5, +1, { fun: 5 }], null,
+      ["daydream", "A pleasant daydream", 0.5, +1, { fun: 3 }],
+      ["lets_go", "Letting go feels lighter", 0.4, +1, { fun: 4 }]],
+    asked_out: [["excited", "Excited about Friday", 0.6, +1, { fun: 8 }],
+      ["nice_coffee", "A nice easy coffee", 0.5, +1, { life_rel: 3 }],
+      ["still_friends", "Still friends, no hard feelings", 0.5, +1, { life_rel: 2 }],
+      ["guilty", "Feels a little guilty", 0.4, -1, { fun: -4 }]],
+    date: [["good_food", "The food is good", 0.5, +1, { fun: 6 }],
+      ["understanding", "They understand", 0.5, +1, { life_rel: 1 }],
+      ["quiet_night", "A quiet night in", 0.5, +1, { energy: 6 }],
+      ["relief", "Relieved it's over", 0.4, 0, { fun: -5 }]],
+    move_in: [["happy_news", "Happy news", 0.5, +1, { life_rom: 3 }],
+      ["warm_welcome", "A warm welcome", 0.5, +1, { life_rom: 3 }],
+      ["house_hunting", "House hunting is fun", 0.5, +1, { fun: 6 }],
+      ["disappointed", "They seem disappointed", 0.4, -1, { life_rel: -3 }]],
+    propose: [["ring_fits", "The ring fits", 0.6, +1, { fun: 10 }],
+      ["sweet_moment", "A sweet moment", 0.6, +1, { fun: 8 }],
+      ["doubts", "Doubts creep in", 0.4, -1, { fun: -3 }],
+      ["relieved", "Relieved to have decided", 0.4, 0, { fun: 2 }]],
+    proposal: [["overjoyed", "Overjoyed", 0.6, +1, { fun: 10 }],
+      ["planning", "Starts planning", 0.5, +1, { fun: 6 }],
+      ["hurt", "They look hurt", 0.5, -1, { life_rel: -3 }],
+      ["tears", "Tears all round", 0.5, -1, { fun: -8 }]],
+    relationship_trouble: [null, null, ["clear_head", "A clearer head", 0.5, +1, { energy: 5 }],
+      ["hard_end", "Ending it is hard", 0.5, -1, { fun: -8 }]],
+    partner_split: [["amicable", "It ends amicably", 0.5, +1, { life_rel: 5 }], null, null,
+      ["regret", "Regrets storming out", 0.5, -1, { fun: -6 }]],
+    friend_in_need: [["grateful", "They are grateful", 0.6, +1, { life_rel: 3 }],
+      ["grateful_half", "They are grateful for the help", 0.6, +1, { life_rel: 2 }],
+      ["touched", "They are touched", 0.6, +1, { life_rel: 4 }],
+      ["awkward_refusal", "An awkward moment", 0.5, -1, { life_rel: -2 }]],
+  };
+
+  function _moods(kind, opts, q) {
+    const table = MOODS[kind] || [];
+    for (let i = 0; i < Math.min(opts.length, table.length); i++) {
+      const opt = opts[i], mood = table[i];
+      if (mood === null || opt.outcomes.length) continue;
+      const [oid, label, p, valence, effects] = mood;
+      const eff = {};
+      for (const [k, v] of Object.entries(effects)) eff[k] = (k === "life_rel" || k === "life_rom") ? [q.id, v] : v;
+      opt.outcomes = [Outcome(oid, label, p, valence, eff)];
+    }
+  }
+
   function _fork(sim, agent, kind, question, opts, q) {
+    _moods(kind, opts, q);
     const fork = new G.forks.Fork(agent.id, kind, question, opts, sim.clock.tick);
     fork.major = true;
     fork.about = about(sim, agent, q);
