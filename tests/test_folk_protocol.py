@@ -431,17 +431,8 @@ STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth")
 
 
 def city_stats_python(folk: int) -> tuple[Simulation, dict]:
-    """CITY_STATS_JS's run in Python: 200 steps, God's luck 95 on f0-f199, 70 steps. The named roll the JS port's
-    dice (1, as tests.test_port.DiceSim does), so the city's sums of the named can equal the port's too."""
-    from tests.test_port import MulberryDice
-
-    class RegionDiceSim(Simulation):
-        def _roll_weather(self) -> None:
-            if not isinstance(self.rng, MulberryDice):
-                self.rng = MulberryDice(1)
-            super()._roll_weather()
-
-    sim = RegionDiceSim(1, world="region", folk=folk)
+    """CITY_STATS_JS's run in Python: 200 steps, God's luck 95 on f0-f199, 70 steps."""
+    sim = Simulation(1, world="region", folk=folk)
     for _ in range(200):
         sim.step()
     for i in range(200):

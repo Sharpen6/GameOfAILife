@@ -451,16 +451,10 @@ class ApiTest(unittest.TestCase):
         cafe = next(pid for pid, pl in sim.town.places.items() if pl.kind == "cafe" and pl.is_open(14.5)
                     and f.allowed(pid))
         self.assertTrue(folk.send_to(sim, p, cafe, "hang_out", 60))
-        from unittest import mock
-
-        from gameofailife import social
-        # A friend's outing may take a free townsperson along on the way (L1's pick_companion, F2a's send_to
-        # interrupting the trip): kept out here, so the walk to this cafe is send_to's alone.
-        with mock.patch.object(social, "pick_companion", lambda *args: None):
-            for _ in range(200):
-                sim.step()
-                if p.inside == cafe:
-                    break
+        for _ in range(200):
+            sim.step()
+            if p.inside == cafe:
+                break
         self.assertEqual(p.inside, cafe)
         self.assertIn(p.i, f.present(cafe))
         busy = [q for q in f.living() if q.activity == "work"]

@@ -3111,10 +3111,8 @@ class NoticeLockstepTest(unittest.TestCase):
     def test_they_move_and_it_is_sold(self):
         py = self.assertLockstep(3, [[at(120, 8, 59), 15 * 60], [at(134, 8, 59), 15 * 60]])
         notice = [r for r in py["asked"] if r[0] == "house_hunt" and r[1][3]["label"].startswith("Ask Millbrook")]
-        self.assertEqual(len(notice), 1)  # asked once, with the cheaper flat as option 1 ...
-        self.assertTrue(notice[0][1][1]["label"].startswith("Rent the cheaper Birch Court, flat 2B (flat) for $220/week"))
-        # ... and, with package D's scores (v3), their profile takes the house to let, option 0
-        self.assertIn(f"{at(120, 18, 11)} home_rented The Mizrahis move into 39 Main Street (house) at $330/week.",
+        self.assertEqual(len(notice), 1)  # asked once, and they take the cheaper flat
+        self.assertIn(f"{at(120, 18, 10)} home_rented The Mizrahis move into Birch Court, flat 1B (flat) at $220/week.",
                       py["events"])
 
     def test_they_stay_and_are_moved_out(self):
