@@ -1572,6 +1572,8 @@ class Simulation:
                        for a in self.agents.values()],
             "trains": self.trains(), "crowd": self.folk.crowd(self), "folk_n": self.folk.n,
             "talks": social.talks_json(self),
+            # the played characters whose controller has yet to answer, in agents order (stats.thinking)
+            "thinking": [a.id for a in self.agents.values() if a.alive and a.controller and stats.thinking(self, a)],
         }
         if housing:
             state.update(self.housing_maps())

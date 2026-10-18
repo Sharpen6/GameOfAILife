@@ -777,11 +777,13 @@
     S.agentById = {};
     let playing = 0, thinking = 0;
     const by = {};   // controller name -> its characters thinking now
+    // state.thinking also lists a worker already setting off while the work fork is still asked (protocol: state)
+    const asked = new Set(st.thinking || []);
     for (const a of st.agents || []) {
       S.agentById[a.id] = a;
       if (a.alive && a.controller) {
         playing += 1;
-        if (a.state === "deciding") { thinking += 1; by[a.controller] = (by[a.controller] || 0) + 1; }
+        if (a.state === "deciding" || asked.has(a.id)) { thinking += 1; by[a.controller] = (by[a.controller] || 0) + 1; }
       }
     }
     S.playing = playing;

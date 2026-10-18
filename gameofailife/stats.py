@@ -374,9 +374,10 @@ def _counter_json(block: dict) -> dict:
     return {**{k: block[k] for k in SHOWN_COUNTERS}, "avg_seconds": avg_seconds(block)}
 
 
-def _thinking(sim: Simulation, a) -> bool:
+def thinking(sim: Simulation, a) -> bool:
     """A played character whose controller has not answered yet: standing on the question, or already setting off
-    the usual way while the work fork is still asked (sim._set_off_thinking)."""
+    the usual way while the work fork is still asked (sim._set_off_thinking). The state frame lists these characters
+    as `thinking`, so the dashboard's AI chip counts the same characters as stats.llm.thinking."""
     if a.state == "deciding":
         return True
     fork = sim.forks.get(a.fork_id) if a.fork_id is not None else None
@@ -390,7 +391,7 @@ def _llm_block(sim: Simulation) -> dict:
         "controllers": [{"name": name, "model": entry.get("model"),
                          "characters": sum(1 for a in playing if a.controller == name)}
                         for name, entry in sim.controllers.items()],
-        "playing": len(playing), "thinking": sum(1 for a in playing if _thinking(sim, a)),
+        "playing": len(playing), "thinking": sum(1 for a in playing if thinking(sim, a)),
         "today": _counter_json(sim.stats.today), "total": _counter_json(sim.stats.total),
         "habit_today": sim.stats.today["habit"], "default_today": sim.stats.today["default"],
     }

@@ -179,8 +179,10 @@ class StateJsonTest(unittest.TestCase):
     def check_state(self, state: dict, housing_maps: bool = True) -> None:
         sim = RUN["sim"]
         keys = {"tick", "time", "minute", "day", "season", "weather", "lights", "plane", "buses", "agents",
-                "trains", "crowd", "folk_n", "talks"}  # v3 (PLAN 2.10): in both worlds
+                "trains", "crowd", "folk_n", "talks", "thinking"}  # v3 (PLAN 2.10): in both worlds
         self.assertEqual(set(state), keys | ({"lots", "homes"} if housing_maps else set()))
+        played = [a["id"] for a in state["agents"] if a["alive"] and a["controller"]]
+        self.assertEqual(state["thinking"], [i for i in played if i in state["thinking"]])  # played, in agents order
         self.assertNotIn("bus", state)  # replaced by buses
         self.assertIsInstance(state["buses"], list)
         self.assertEqual(set(state["lights"]), {"ns", "ew"})

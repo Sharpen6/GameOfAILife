@@ -351,8 +351,9 @@
   }
 
   // A played character whose controller has not answered yet: standing on the question, or already setting off
-  // the usual way while the work fork is still asked (sim._set_off_thinking).
-  function _thinking(sim, a) {
+  // the usual way while the work fork is still asked (sim._set_off_thinking). The state frame lists these characters
+  // as `thinking`, so the dashboard's AI chip counts the same characters as stats.llm.thinking.
+  function thinking(sim, a) {
     if (a.state === "deciding") return true;
     const fork = a.fork_id !== null && a.fork_id !== undefined ? sim.forks.get(a.fork_id) : undefined;
     return fork !== undefined && fork.status === "asked";
@@ -364,7 +365,7 @@
     return {
       controllers: Array.from(sim.controllers, ([name, entry]) => ({ name, model: entry.model ?? null,
         characters: count(playing, a => a.controller === name) })),
-      playing: playing.length, thinking: count(playing, a => _thinking(sim, a)),
+      playing: playing.length, thinking: count(playing, a => thinking(sim, a)),
       today: _counter_json(sim.stats.today), total: _counter_json(sim.stats.total),
       habit_today: sim.stats.today.habit, default_today: sim.stats.today.default,
     };
@@ -585,7 +586,7 @@
     COUNTERS, SHOWN_COUNTERS, DECIDED_BY, SAMPLES_KEPT, WORTH_HOURS, RICHEST_GAIN, RICHEST_MARGIN, TOWN,
     RECENT_DEATHS, LOG_DECIDERS, DECISIONS_LIMIT, DECISIONS_MAX, _zeros, avg_seconds, _int, _mean, median, gini,
     top_share, _money, _Person, _people, _district_of_place, _homes_at, _wealth_block, _homes_block, _city_block,
-    _counter_json, _llm_block, _districts, _households, _people_rows, stats_json, region_block, PART_COUNTS,
+    _counter_json, thinking, _llm_block, _districts, _households, _people_rows, stats_json, region_block, PART_COUNTS,
     canon_parts,
     folk_parts, _sample_city,
     _add_parts, decisions, CityStats,

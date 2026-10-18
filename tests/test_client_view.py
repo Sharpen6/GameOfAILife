@@ -36,9 +36,9 @@ TOWN_KEYS = {"w", "h", "tiles", "places", "homes", "housing", "districts", "stre
 PLACE_KEYS = {"id", "name", "kind", "x", "y", "w", "h", "entry", "face", "hours", "district", "style", "floors",
               "tier", "units"}
 HOME_KEYS = {"id", "place", "unit", "name", "tier", "bedrooms", "base_value", "rent"}
-# v3 (PLAN 2.10) adds trains, crowd, folk_n and talks to the state and ill, stage to agent rows, in both worlds.
+# v3 (PLAN 2.10) adds trains, crowd, folk_n, talks and thinking to the state and ill, stage to agent rows, in both worlds.
 STATE_KEYS = {"tick", "time", "minute", "day", "season", "weather", "lights", "plane", "buses", "lots", "homes",
-              "agents", "trains", "crowd", "folk_n", "talks"}
+              "agents", "trains", "crowd", "folk_n", "talks", "thinking"}
 AGENT_KEYS = {"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood", "luck", "controller",
               "alive", "age", "home", "car", "riding", "ill", "stage"}
 BUS_KEYS = {"id", "line", "x", "y", "dir", "at_stop", "riders"}

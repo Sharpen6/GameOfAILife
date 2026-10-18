@@ -124,16 +124,22 @@ class ThinkFreeze(unittest.TestCase):
 
     def test_the_character_moves_while_asked(self):
         city = Played(seed=1, seconds=4.5)
-        moved = []
+        moved, listed = [], []
 
         def watch(sim):
+            thinking = None
             for fid, msg in city.asked.items():
                 a = sim.agents[msg["agent_id"]]
                 if msg["kind"] == "work" and sim.forks.get(fid) and sim.forks[fid].status == "asked":
                     moved.append(a.state)
+                    if thinking is None:
+                        thinking = sim.state_json(housing=False)["thinking"]
+                    listed.append(a.id in thinking)
         city.on_minute.append(watch)
         city.run(MINUTES_PER_DAY // 2)
         self.assertIn("travelling", moved)
+        # still thinking while on the way: the frame's `thinking` (the AI chip) lists them, as stats.llm.thinking counts
+        self.assertTrue(listed and all(listed), listed.count(False))
 
     def test_waiting_forks_other_than_work_still_stand_and_wait(self):
         city = Played(seed=1, seconds=4.5)

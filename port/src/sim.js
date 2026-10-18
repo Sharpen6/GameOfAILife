@@ -1641,6 +1641,9 @@
           ill: G.life.ill(a), stage: G.life.stage(a) })),
         trains: this.trains(), crowd: this.folk.crowd(this), folk_n: this.folk.n,
         talks: G.social.talks_json(this),
+        // the played characters whose controller has yet to answer, in agents order (stats.thinking)
+        thinking: Array.from(this.agents.values()).filter(a => a.alive && a.controller && G.stats.thinking(this, a))
+          .map(a => a.id),
       };
       if (with_housing) Object.assign(state, this.housing_maps());
       return state;
