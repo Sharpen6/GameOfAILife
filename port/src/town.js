@@ -53,10 +53,11 @@
   const EDGE_TREES = 0.12; // the north strip (y 0-2) and the west strip (x 0-2, y 3-44)
 
   const xy = (x, y) => `${x},${y}`; // a tile as a string key, for sets and maps
+  const EMPTY = Object.freeze([]), NO_LOTS = Object.freeze({}); // region defaults (TownMap below)
 
   class Place {
     constructor(id, name, kind, x, y, w, h, hours = null, entry = [0, 0], face = null, district = "", style = "",
-      floors = 0, tier = null, units = 0) {
+      floors = 0, tier = null, units = 0, capacity = 0) {
       this.id = id;
       this.name = name;
       this.kind = kind; // home, office, bank, townhall, school, hospital, market, shop, cafe, works, park
@@ -72,6 +73,7 @@
       this.floors = floors; // building height; 0 for parks
       this.tier = tier; // homes: "flat", "house" or "big_house"
       this.units = units; // homes inside: 1 for a house, 6 for an apartment block, 0 for everything else
+      this.capacity = capacity; // people inside at once (region world); 0 = not given, and then not in to_json
     }
 
     is_open(hour) {
@@ -81,12 +83,21 @@
     }
 
     to_json() {
-      return {
+      const out = {
         id: this.id, name: this.name, kind: this.kind,
         x: this.x, y: this.y, w: this.w, h: this.h, entry: this.entry.slice(), face: this.face,
         hours: this.hours ? this.hours.slice() : null, district: this.district, style: this.style,
         floors: this.floors, tier: this.tier, units: this.units,
       };
+      if (this.capacity > 0) out.capacity = this.capacity;
+      return out;
+    }
+
+    // dataclasses.replace(place, **changes): a copy with some fields changed.
+    replace(changes) {
+      const p = new Place(this.id, this.name, this.kind, this.x, this.y, this.w, this.h, this.hours, this.entry,
+        this.face, this.district, this.style, this.floors, this.tier, this.units, this.capacity);
+      return Object.assign(p, changes);
     }
   }
 
@@ -115,6 +126,20 @@
       this._roads = new Map(); // goal tile index -> road distance
       this._drives = new Map(); // "x,y,place id" -> [tiles, junctions]
       this.memo = new Map(); // derived values other modules cache on the shared map
+      // --- region ---
+      // Defaults of the region world's attributes (region.md 6.1), so callers need no world check: a RegionMap
+      // (port/src/region.js) sets them all. Read-only.
+      this.world = "millbrook";
+      this.millbrook_ids = null; // a RegionMap's Set of Millbrook's place ids
+      this.home_specs = EMPTY; // region homes after HOME_SPECS: [id, place, unit, tier, bedrooms, base_value, rent, start, cond]
+      this.lot_conditions = NO_LOTS; // region lots' starting condition by place id
+      this.job_slots = EMPTY; // folk job rows [title, place, wage, start, end, days, count]
+      this.rail = null; // {lines: [...]} (region.md 8)
+      this.decor = EMPTY; // [x, y, w, h, style, floors, variant] buildings with no sim role
+      this.highways = EMPTY;
+      this.interchanges = EMPTY;
+      this.highway_edges = EMPTY;
+      // --- end region ---
       this.junctions = new Set(); // road tiles with 3 or more road neighbours, as "x,y"
       for (let y = 0; y < this.h; y++) {
         for (let x = 0; x < this.w; x++) {
@@ -125,6 +150,14 @@
         }
       }
     }
+
+    // --- region ---
+    // True where the tiles are exactly build_map(seed)'s: everywhere in Millbrook's own world.
+    in_frozen(x, y) { return true; }
+
+    // Build one more idle-time field; false when there is nothing left to build (always, in Millbrook).
+    warm_next() { return false; }
+    // --- end region ---
 
     _is_road(x, y) { return 0 <= x && x < this.w && 0 <= y && y < this.h && this.tiles[y][x] === ROAD; }
 
