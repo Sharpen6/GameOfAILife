@@ -791,6 +791,16 @@
       if (dot) dot.hidden = thinking === 0;
     }
   }
+  // v3 tolerance (1,060 people): events may name townsfolk ("f417") in agent/agents, who have no row in
+  // state.agents and no page here tonight. A major raises a toast and a map ping only when it is city-wide
+  // (it names nobody), names one of the main characters, or is about the person selected; the rest still
+  // reach News and the ticker. A folk pick or a folk selection from the map opens nothing.
+  const isFolkId = id => typeof id === "string" && /^f\d+$/.test(id) && !(S && S.agentById[id]);
+  function toastWorthy(e) {
+    const ids = (e.agents || []).concat(e.agent != null ? [e.agent] : []);
+    if (!ids.length) return true;
+    return ids.some(id => !!S.agentById[id] || (S.selected != null && id === S.selected));
+  }
   function storeEvent(e) {
     if (!e || typeof e.seq !== "number") return false;
     if (S.ev.has(e.seq)) return false;
@@ -896,7 +906,7 @@
       if (!storeEvent(e)) continue;
       newEvents += 1;
       if (e.importance >= 1) { notable += 1; setTicker(e, true); }
-      if (e.importance >= 2) {
+      if (e.importance >= 2 && toastWorthy(e)) {
         const target = eventTarget(e);
         if (target) callView("ping", target, pingTopic(e));
         majorToast(e);
@@ -1042,6 +1052,7 @@
   function viewSelected(id) {
     if (!S) return;
     if (id == null) { if (S.selected) back({ fromView: true }); return; }
+    if (isFolkId(id)) return;
     selectAgent(id, { fromView: true });
   }
   function askAgent() {
@@ -1056,7 +1067,7 @@
   function pick(hit, ev) {
     if (S && (S.tipTouch || (ev && ev.touch))) hideTip();
     if (!S || !S.state || !hit) return;
-    if (hit.kind === "agent") { selectAgent(hit.id, { from: "map" }); return; }
+    if (hit.kind === "agent") { if (!hit.folk && !isFolkId(hit.id)) selectAgent(hit.id, { from: "map" }); return; }
     if (hit.kind === "bus") {
       const r = S.state.agents.find(a => a.alive && a.riding === hit.id);
       if (r) selectAgent(r.id, { from: "map" });
@@ -1117,7 +1128,7 @@
     if (!S || !S.state || !hit) return "";
     if (hit.kind === "agent") {
       const a = S.agentById[hit.id];
-      if (!a) return "";
+      if (!a) return hit.folk || isFolkId(hit.id) ? "A townsperson" : "";
       if (!a.alive) return `${a.name} · died`;
       return `${a.name}, ${a.age} · ${a.state === "deciding" ? "deciding…" : pretty(a.activity)}${a.riding ? " · on the bus" : ""}`;
     }
