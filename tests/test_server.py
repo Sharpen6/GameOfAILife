@@ -428,12 +428,12 @@ class TestController(ServerCase):
 
 class TestRobustness(ServerCase):
     async def test_oversized_frame_drops_connection(self):
-        # A frame declaring more than the server's SERVER_MAX_MESSAGE is refused and the socket is dropped.
+        # A frame declaring more than MAX_MESSAGE is refused and the socket is dropped.
         reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.port), TIMEOUT)
         try:
-            writer.write(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            writer.write(b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                          b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
-            writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.SERVER_MAX_MESSAGE + 1) + os.urandom(4))
+            writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.MAX_MESSAGE + 1) + os.urandom(4))
             await writer.drain()
             await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), TIMEOUT)
             rest = await asyncio.wait_for(reader.read(), TIMEOUT)  # reaching EOF is the point

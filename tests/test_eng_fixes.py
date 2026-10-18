@@ -1,9 +1,11 @@
 """The engineering review's server and controller fixes, over real sockets where it matters.
 
 * ENG-1: a WebSocket upgrade from another site's page (its Origin is not this server) or through a DNS name pointed
-  at this machine (DNS rebinding) gets 403; the God page (same origin) and controllers that send no Origin connect.
-* ENG-2: frames are unmasked in one operation, and the server reads at most SERVER_MAX_MESSAGE (64 KiB) from a
-  client, while clients still read up to MAX_MESSAGE.
+  at this machine (DNS rebinding) gets 403; the God page (same origin) and controllers that send no Origin connect
+  by localhost or an IP address. The startup message's URLs are ones the check lets in, also for --host <a name>.
+* ENG-2: frames are unmasked in one operation, and the server takes at most SERVER_MAX_MESSAGE (64 KiB) from a
+  client: a bigger message, up to MAX_MESSAGE, gets an error and the connection stays (so a God page that sends a
+  huge prompt keeps being God); past MAX_MESSAGE the connection ends. Clients still read up to MAX_MESSAGE.
 * ENG-4: Claude's page tells a flat's resident at home that they are at home, and writes a debt as -$400.00.
 * ENG-5: the request line and headers are read within HEADER_SECONDS and capped at HEADER_LINES / HEADER_BYTES (431);
   a WebSocket session after the upgrade has no time limit.
@@ -34,7 +36,7 @@ from unittest import mock
 
 from gameofailife import server as server_module, ws
 from gameofailife.forks import Fork, Option
-from gameofailife.server import GameServer, local_host, origin_allowed, serve
+from gameofailife.server import GameServer, local_host, origin_allowed, serve, url_host
 from gameofailife.sim import Simulation
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "examples"))
@@ -45,8 +47,9 @@ REPO = Path(__file__).resolve().parent.parent
 KEY = "dGhlIHNhbXBsZSBub25jZQ=="
 
 
-def masked_frame(fin: bool, opcode: int, payload: bytes) -> bytes:
-    """A client frame built by hand, masked byte by byte the way the RFC describes it."""
+def masked_frame(fin: bool, opcode: int, payload: bytes, by_byte: bool = True) -> bytes:
+    """A client frame built by hand, masked byte by byte the way the RFC describes it (or, for megabytes, with
+    ws.apply_mask, which TestMasking checks against the byte loop)."""
     head = bytearray([(0x80 if fin else 0) | opcode])
     if len(payload) < 126:
         head.append(0x80 | len(payload))
@@ -55,7 +58,8 @@ def masked_frame(fin: bool, opcode: int, payload: bytes) -> bytes:
     else:
         head += bytes([0x80 | 127]) + struct.pack("!Q", len(payload))
     key = os.urandom(4)
-    return bytes(head) + key + bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+    body = bytes(b ^ key[i % 4] for i, b in enumerate(payload)) if by_byte else ws.apply_mask(payload, key)
+    return bytes(head) + key + body
 
 
 def upgrade_request(host: str | None, origin: str | None = None, path: str = "/ws") -> bytes:
@@ -131,14 +135,18 @@ class TestOriginRules(unittest.TestCase):
                      "192.168.1.20:8000", "10.0.0.7"):
             self.assertTrue(local_host(host), host)
         for host in ("evil.example", "evil.example:8000", "mypc.local:8000", "localhost.evil.example:8000",
-                     "127.0.0.1.nip.io:8000", "", "[::1:8000", "x"):
+                     "127.0.0.1.nip.io:8000", "", "[::1:8000", "x", "::1:8000", "evil.example@127.0.0.1:8000",
+                     "127.0.0.1:8000/x", "127.0.0.1:99999", "127.0.0.1:abc"):
             self.assertFalse(local_host(host), host)
 
     def test_origin_must_be_this_server_on_a_local_address(self):
         allowed = origin_allowed
         self.assertTrue(allowed({"host": "127.0.0.1:8000"}), "no Origin: not a browser")
-        self.assertTrue(allowed({"host": "x"}), "no Origin: not a browser, whatever Host it sends")
-        self.assertTrue(allowed({}), "no Origin and no Host")
+        self.assertTrue(allowed({"host": "localhost:8000"}))
+        self.assertTrue(allowed({"host": "192.168.1.20:8000"}), "a friend's controller, by IP")
+        for host in ("x", "evil.example:8000", "mypc.local:8000"):
+            self.assertFalse(allowed({"host": host}), f"no Origin, but the Host {host} is a DNS name")
+        self.assertFalse(allowed({}), "no Origin and no Host")
         self.assertTrue(allowed({"host": "127.0.0.1:8000", "origin": "http://127.0.0.1:8000"}))
         self.assertTrue(allowed({"host": "localhost:8000", "origin": "http://localhost:8000"}))
         self.assertTrue(allowed({"host": "Localhost:8000", "origin": "http://localhost:8000"}), "names ignore case")
@@ -196,17 +204,45 @@ class TestOriginCheck(ServerCase):
         await self.assert_refused(f"127.0.0.1.nip.io:{p}", f"http://127.0.0.1.nip.io:{p}")
 
     async def test_no_origin_gets_101(self):
-        # Controllers and tools are not browsers: they send no Origin. Their Host is not checked, on purpose:
-        # every browser context sends an Origin on a WebSocket upgrade (so no web page is behind them), and a
-        # program could write Host: 127.0.0.1 as easily. ws.connect sends the URL's name, so a friend's
-        # controller pointed at ws://mypc.local:8000/ws connects.
+        # Controllers and tools are not browsers: they send no Origin, and connect by localhost or an IP address.
         await self.assert_god(f"127.0.0.1:{self.port}", None)
-        await self.assert_god("x", None)
-        await self.assert_god(f"evil.example:{self.port}", None)
-        await self.assert_god(f"mypc.local:{self.port}", None)
+        await self.assert_god(f"localhost:{self.port}", None)
+        await self.assert_god("127.0.0.1", None)
         sock = await self.connect()  # gameofailife.ws.connect, as the example controllers use it
         welcome = await self.hello(sock, role="controller", name="bot", characters=["tom"])
         self.assertEqual(welcome["characters"], ["tom"])
+
+    async def test_a_dns_name_gets_403_without_an_origin_too(self):
+        p = self.port
+        for host in (f"evil.example:{p}", f"mypc.local:{p}", "x", None):
+            await self.assert_refused(host, None)
+        self.assertIsNone(self.server.god)
+
+    async def test_ws_connect_by_name_or_address(self):
+        sock = await asyncio.wait_for(ws.connect(f"ws://localhost:{self.port}/ws"), TIMEOUT)
+        self.sockets.append(sock)
+        self.assertEqual((await self.hello(sock, role="god"))["role"], "god")
+        # The URL's host goes in Host as written, an IPv6 address in brackets. Each is reached at 127.0.0.1 here,
+        # so the test needs neither IPv6 nor a DNS name of its own.
+        sent: list[bytes] = []
+        real_open = asyncio.open_connection
+
+        async def to_this_server(host, port):
+            reader, writer = await real_open("127.0.0.1", port)
+            write = writer.write
+            writer.write = lambda data: (sent.append(data), write(data))[1]
+            self.writers.append(writer)
+            return reader, writer
+
+        with mock.patch.object(ws.asyncio, "open_connection", to_this_server):
+            sock = await asyncio.wait_for(ws.connect(f"ws://[::1]:{self.port}/ws"), TIMEOUT)
+            self.sockets.append(sock)
+            self.assertIn(f"\r\nHost: [::1]:{self.port}\r\n".encode(), sent[-1])
+            self.assertEqual((await self.hello(sock, role="god"))["role"], "god")
+            with self.assertRaises(ConnectionError) as refused:  # what a controller pointed at a DNS name gets
+                await asyncio.wait_for(ws.connect(f"ws://mypc.local:{self.port}/ws"), TIMEOUT)
+            self.assertIn(f"\r\nHost: mypc.local:{self.port}\r\n".encode(), sent[-1])
+            self.assertIn("403 Forbidden", str(refused.exception))
 
     async def test_static_files_are_served_whatever_the_origin(self):
         reader, writer = await self.open()
@@ -253,42 +289,105 @@ class TestMasking(unittest.TestCase):
             self.assertLess(len(json.dumps(msg, ensure_ascii=False).encode()) * 8, ws.SERVER_MAX_MESSAGE, msg["type"])
 
 
+TOO_LARGE = "message too large: the most the server reads is 65,536 bytes, so it was dropped unread"
+
+
 class TestServerLimit(ServerCase):
     async def test_server_sockets_take_64_kib(self):
         sock = await self.connect()
         await self.hello(sock, role="controller", name="bot", characters=[])
         (server_side,) = self.server._outboxes
-        self.assertEqual(server_side.max_message, ws.SERVER_MAX_MESSAGE)
+        self.assertEqual((server_side.max_message, server_side.max_skipped), (ws.SERVER_MAX_MESSAGE, ws.MAX_MESSAGE))
 
-    async def test_a_frame_one_byte_over_is_dropped_unread(self):
+    async def raw_session(self):
         status, _, reader, writer = await self.upgrade(f"127.0.0.1:{self.port}")
         self.assertEqual(status, 101)
-        writer.write(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.SERVER_MAX_MESSAGE + 1) + os.urandom(4))
-        await writer.drain()
-        rest = await asyncio.wait_for(reader.read(), TIMEOUT)  # reaching EOF is the point
-        self.assertLessEqual(len(rest), 4, "nothing but, at most, a close frame")
+        sock = ws.WebSocket(reader, writer, mask=True)
+        self.sockets.append(sock)
+        return sock, writer
 
-    async def test_fragments_adding_up_to_one_byte_over_are_dropped(self):
-        status, _, reader, writer = await self.upgrade(f"127.0.0.1:{self.port}")
-        self.assertEqual(status, 101)
-        half = ws.SERVER_MAX_MESSAGE // 2
-        writer.write(masked_frame(False, ws.OP_TEXT, b" " * half) + masked_frame(True, ws.OP_CONT, b" " * (half + 1)))
-        await writer.drain()
-        rest = await asyncio.wait_for(reader.read(), TIMEOUT)
-        self.assertLessEqual(len(rest), 4)
+    async def assert_dropped_and_still_open(self, sock: ws.WebSocket) -> None:
+        """The server answered the big message with the size error (no req_id: it never read one), and the
+        connection still works."""
+        reply = json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))
+        self.assertEqual(reply, {"type": "error", "error": TOO_LARGE})
+        welcome = await self.hello(sock, role="god")
+        self.assertEqual((welcome["type"], welcome["role"]), ("welcome", "god"))
 
-    async def test_fragments_adding_up_to_the_limit_are_read(self):
-        status, _, reader, writer = await self.upgrade(f"127.0.0.1:{self.port}")
-        self.assertEqual(status, 101)
+    def padded_hello(self, size: int) -> bytes:
+        """A God hello of exactly `size` bytes, padded inside a string."""
         text = json.dumps({"type": "hello", "role": "god", "pad": ""}).encode()
-        text = text[:-2] + b" " * (ws.SERVER_MAX_MESSAGE - len(text)) + text[-2:]  # pad inside the pad string
-        self.assertEqual(len(text), ws.SERVER_MAX_MESSAGE)
+        return text[:-2] + b" " * (size - len(text)) + text[-2:]
+
+    async def test_a_frame_one_byte_over_gets_an_error_and_the_connection_stays(self):
+        sock, writer = await self.raw_session()
+        writer.write(masked_frame(True, ws.OP_TEXT, self.padded_hello(ws.SERVER_MAX_MESSAGE + 1)))
+        await writer.drain()
+        await self.assert_dropped_and_still_open(sock)
+        self.assertIsNotNone(self.server.god, "the hello after it was read")
+
+    async def test_fragments_adding_up_to_one_byte_over_get_an_error(self):
+        sock, writer = await self.raw_session()
+        text = self.padded_hello(ws.SERVER_MAX_MESSAGE + 1)
         half = len(text) // 2
         writer.write(masked_frame(False, ws.OP_TEXT, text[:half]) + masked_frame(True, ws.OP_CONT, text[half:]))
         await writer.drain()
-        sock = ws.WebSocket(reader, writer, mask=True)
-        self.sockets.append(sock)
+        await self.assert_dropped_and_still_open(sock)
+
+    async def test_fragments_adding_up_to_the_limit_are_read(self):
+        sock, writer = await self.raw_session()
+        text = self.padded_hello(ws.SERVER_MAX_MESSAGE)
+        half = len(text) // 2
+        writer.write(masked_frame(False, ws.OP_TEXT, text[:half]) + masked_frame(True, ws.OP_CONT, text[half:]))
+        await writer.drain()
         self.assertEqual(json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))["type"], "welcome")
+
+    async def test_a_ping_inside_a_dropped_message_gets_its_pong(self):
+        sock, writer = await self.raw_session()
+        text = self.padded_hello(3 * ws.SERVER_MAX_MESSAGE)
+        third = len(text) // 3
+        writer.write(masked_frame(False, ws.OP_TEXT, text[:third], by_byte=False)
+                     + masked_frame(True, ws.OP_PING, b"still there?")
+                     + masked_frame(False, ws.OP_CONT, text[third:2 * third], by_byte=False)
+                     + masked_frame(True, ws.OP_CONT, text[2 * third:], by_byte=False))
+        await writer.drain()
+        fin, opcode, data = await asyncio.wait_for(sock._read_frame(), TIMEOUT)
+        self.assertEqual((fin, opcode, data), (True, ws.OP_PONG, b"still there?"))
+        await self.assert_dropped_and_still_open(sock)
+
+    async def test_megabytes_are_dropped_unread_up_to_4_mib(self):
+        sock, writer = await self.raw_session()
+        writer.write(masked_frame(True, ws.OP_TEXT, b" " * ws.MAX_MESSAGE, by_byte=False))
+        await writer.drain()
+        await self.assert_dropped_and_still_open(sock)
+
+    async def test_past_4_mib_the_connection_ends(self):
+        # In one frame (refused from its header, tested in test_server and test_review_server) or in fragments.
+        sock, writer = await self.raw_session()
+        half = ws.MAX_MESSAGE // 2
+        writer.write(masked_frame(False, ws.OP_TEXT, b" " * half, by_byte=False)
+                     + masked_frame(True, ws.OP_CONT, b" " * (half + 1), by_byte=False))
+        await writer.drain()
+        rest = await asyncio.wait_for(sock.reader.read(), TIMEOUT)  # reaching EOF is the point
+        self.assertLessEqual(len(rest), 4, "nothing but, at most, a close frame")
+
+    async def test_a_huge_prompt_from_god_is_refused_and_god_stays(self):
+        # The God page's prompt box has no length limit: a paste over 64 KiB used to drop God's socket.
+        sock = await self.connect()
+        self.assertEqual((await self.hello(sock, role="god"))["role"], "god")
+        god = self.server.god
+        before = self.sim.agents["tom"].profile.prompt
+        await sock.send(json.dumps({"type": "set_profile", "agent_id": "tom", "prompt": "x" * 70_000, "req_id": 1}))
+        reply = json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))
+        self.assertEqual(reply, {"type": "error", "error": TOO_LARGE})
+        self.assertIs(self.server.god, god, "still God")
+        self.assertEqual(self.sim.agents["tom"].profile.prompt, before, "nothing in it was done")
+        await sock.send(json.dumps({"type": "set_profile", "agent_id": "tom", "prompt": "y" * 2000, "req_id": 2}))
+        while True:
+            reply = json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))
+            if reply.get("req_id") == 2:
+                break
+        self.assertEqual(len(reply["agent"]["profile"]["prompt"]), 1000, "a long prompt is still cut to 1000")
 
 
 class TestClientsReadMore(unittest.IsolatedAsyncioTestCase):
@@ -308,9 +407,16 @@ class TestClientsReadMore(unittest.IsolatedAsyncioTestCase):
             big = "w" * (4 * ws.SERVER_MAX_MESSAGE)
             await sides[0].send(big)
             self.assertEqual(await asyncio.wait_for(client.recv(), TIMEOUT), big)
-            await client.send(big)  # the other way round it is too big
-            with self.assertRaises(ws.ConnectionClosed):
+            await client.send(big)  # the other way round it is too big, and dropped
+            with self.assertRaises(ws.MessageTooBig) as dropped:
                 await asyncio.wait_for(sides[0].recv(), TIMEOUT)
+            self.assertEqual((dropped.exception.size, dropped.exception.limit), (len(big), ws.SERVER_MAX_MESSAGE))
+            await client.send("next")
+            self.assertEqual(await asyncio.wait_for(sides[0].recv(), TIMEOUT), "next")
+            # A client drops nothing: past its 4 MiB the connection ends.
+            await sides[0].send("w" * (ws.MAX_MESSAGE + 1))
+            with self.assertRaises(ws.ConnectionClosed):
+                await asyncio.wait_for(client.recv(), TIMEOUT)
         finally:
             client.abort()
             for s in sides:
@@ -453,6 +559,41 @@ class TestBusyPort(unittest.TestCase):
         lines = done.stderr.strip().splitlines()
         self.assertEqual(len(lines), 1, done.stderr)
         self.assertTrue(lines[0].startswith("Could not listen on 192.0.2.1:0: "), lines[0])
+
+
+class TestStartupMessage(unittest.IsolatedAsyncioTestCase):
+    def test_the_printed_host_passes_the_check(self):
+        for host, bound, shown in (("127.0.0.1", "127.0.0.1", "127.0.0.1"), ("localhost", "127.0.0.1", "localhost"),
+                                   ("LocalHost", "::1", "localhost"), ("0.0.0.0", "0.0.0.0", "localhost"),
+                                   ("::", "::", "localhost"), ("::1", "::1", "[::1]"),
+                                   ("192.168.1.20", "192.168.1.20", "192.168.1.20"),
+                                   ("mypc.local", "192.168.1.20", "192.168.1.20"), ("vm", "127.0.0.1", "127.0.0.1"),
+                                   ("127.1", "127.0.0.1", "127.0.0.1"), ("v6name", "2001:db8::1", "[2001:db8::1]")):
+            self.assertEqual(url_host(host, bound), shown, host)
+            netloc = f"{shown}:8000"
+            self.assertTrue(origin_allowed({"host": netloc, "origin": f"http://{netloc}"}), f"God page for {host}")
+            self.assertTrue(origin_allowed({"host": netloc}), f"a controller for {host}")
+
+    async def test_a_name_for_host_prints_its_address(self):
+        # "127.1" is a name to the check (not an IP literal) that resolves to 127.0.0.1, as "vm" or "mypc.local"
+        # would; printing it would point God at a page whose WebSocket gets 403.
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            task = asyncio.create_task(serve(Simulation(seed=1), "127.1", 0, speed=0))
+            try:
+                await wait_until(lambda: "ws://" in printed.getvalue() or task.done(), 10)
+                page, url = printed.getvalue().splitlines()
+                port = int(page.split(":")[-1].split()[0])
+                self.assertEqual(page, f"GameOfAILife is running. Open http://127.0.0.1:{port} to watch as God.")
+                self.assertEqual(url, f"Controllers connect to ws://127.0.0.1:{port}/ws")
+                sock = await asyncio.wait_for(ws.connect(f"ws://127.0.0.1:{port}/ws"), TIMEOUT)
+                await sock.send(json.dumps({"type": "hello", "role": "god"}))
+                self.assertEqual(json.loads(await asyncio.wait_for(sock.recv(), TIMEOUT))["role"], "god")
+                sock.abort()
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, TIMEOUT)
 
 
 class TestServeStartup(unittest.IsolatedAsyncioTestCase):

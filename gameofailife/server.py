@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 from . import transit
 from .clock import TICKS_PER_REAL_SECOND
 from .sim import Simulation
-from .ws import ConnectionClosed, WebSocket, server_handshake
+from .ws import ConnectionClosed, MessageTooBig, WebSocket, server_handshake
 
 CLIENT_DIR = Path(__file__).resolve().parent.parent / "client"
 FRAME_SECONDS = 0.05
@@ -66,9 +66,13 @@ def local_host(host: str) -> bool:
     """True when a Host header names `localhost` or an IP address (with or without a port): never a DNS name, which
     whoever runs that name's DNS could point at this machine (DNS rebinding)."""
     try:
-        name = urlsplit(f"//{host}").hostname or ""
-    except ValueError:  # an unclosed "[" and the like
+        parts = urlsplit(f"//{host}")
+        _ = parts.port  # a port that is not a number from 0 to 65535 raises ValueError
+    except ValueError:  # also an unclosed "[" and the like
         return False
+    if "@" in parts.netloc or parts.path or parts.query or parts.fragment:
+        return False
+    name = parts.hostname or ""
     if name == "localhost":
         return True
     try:
@@ -79,19 +83,33 @@ def local_host(host: str) -> bool:
 
 
 def origin_allowed(headers: dict[str, str]) -> bool:
-    """Whether a WebSocket upgrade may go ahead (docs/protocol.md, Connecting). A browser always sends `Origin` on
-    one: it must be this server's own address (the page God loaded from here), and that address must be
-    `localhost` or an IP. Without `Origin` the client is not a browser (the Python and Node controllers), so no web
-    page is behind it, and it could send any Host it liked."""
+    """Whether a WebSocket upgrade may go ahead (docs/protocol.md, Connecting). Its Host must be `localhost` or an
+    IP address, whatever the client. A browser also sends `Origin`, and that must be this very address: the page God
+    loaded from here. The Python and Node controllers send no Origin."""
+    host = headers.get("host", "").lower()
+    if not local_host(host):
+        return False
     origin = headers.get("origin")
     if origin is None:
         return True
-    host = headers.get("host", "").lower()
     try:
-        netloc = urlsplit(origin).netloc.lower()
+        return urlsplit(origin).netloc.lower() == host
     except ValueError:
         return False
-    return netloc == host and local_host(host)
+
+
+def url_host(host: str, bound: str) -> str:
+    """The host for the startup message's URLs, for --host `host` listening on address `bound`: one that /ws lets
+    in. Every interface (0.0.0.0) is `localhost` here; a DNS name is the address it resolved to."""
+    if host in ("", "0.0.0.0", "::") or host.lower() == "localhost":
+        return "localhost"
+    for address in (host, bound):
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        return f"[{ip}]" if ip.version == 6 else str(ip)
+    return bound
 
 
 def merge_state(old: dict, new: dict) -> dict:
@@ -513,6 +531,10 @@ class GameServer:
             while True:
                 try:
                     msg = json.loads(await ws.recv())
+                except MessageTooBig as exc:  # read past unparsed, so it has no req_id to answer with
+                    why = f"the most the server reads is {exc.limit:,} bytes, so it was dropped unread"
+                    await self._send(ws, {"type": "error", "error": f"message too large: {why}"})
+                    continue
                 except (ValueError, RecursionError):  # also bad UTF-8, a too-long number, deep nesting
                     await self._send(ws, {"type": "error", "error": "messages must be JSON"})
                     continue
@@ -695,8 +717,9 @@ async def serve(sim: Simulation, host: str, port: int, speed: int = 1) -> None:
                              "Try --port 0 for any free port, or another --port.") from None
         why = os.strerror(exc.errno) if exc.errno and exc.errno > 0 else exc.strerror or str(exc)  # gaierror: < 0
         raise SystemExit(f"Could not listen on {host}:{port}: {why}. Check --host and --port.") from None
-    print(f"GameOfAILife is running. Open http://{host if host != '0.0.0.0' else 'localhost'}:{actual} to watch as God.")
-    print(f"Controllers connect to ws://{host if host != '0.0.0.0' else 'localhost'}:{actual}/ws")
+    shown = url_host(host, server._server.sockets[0].getsockname()[0])
+    print(f"GameOfAILife is running. Open http://{shown}:{actual} to watch as God.")
+    print(f"Controllers connect to ws://{shown}:{actual}/ws")
     try:
         await asyncio.Event().wait()
     finally:

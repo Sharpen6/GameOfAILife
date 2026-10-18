@@ -22,7 +22,7 @@ from gameofailife.server import GameServer
 from gameofailife.sim import Simulation
 
 TIMEOUT = 3.0
-UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+UPGRADE = (b"GET /ws HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
 
 
@@ -736,7 +736,7 @@ class TestSocketsClosed(ServerCase):
         await wait_until(lambda: mine.writer.transport.is_closing())
 
     async def test_oversized_frame_closes_the_socket(self):
-        reader, writer = await self.raw_ws(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.SERVER_MAX_MESSAGE + 1)
+        reader, writer = await self.raw_ws(bytes([0x81, 0x80 | 127]) + struct.pack("!Q", ws.MAX_MESSAGE + 1)
                                            + os.urandom(4))
         rest = await asyncio.wait_for(reader.read(), TIMEOUT)  # reaching EOF is the point
         self.assertLessEqual(len(rest), 4)
