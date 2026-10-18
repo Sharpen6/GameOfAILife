@@ -114,6 +114,9 @@ def _first(name: str) -> str:
 
 # --- who is where ----------------------------------------------------------------------------------------------
 
+_BUCKET: dict = {}  # place id -> dice.sid(place id) % 10, the minute of ten its rooms talk in (a pure function)
+
+
 def _named_place(a):
     """The place a named character's room is in now, or None (asleep, travelling, in hospital, under 3, dead)."""
     if not a.alive or a.age < 3 or a.state == "travelling" or a.activity in SKIP_ACTS:
@@ -195,8 +198,12 @@ def tick(sim) -> None:
     named_at = {}
     for a in sim.agents.values():
         pl = _named_place(a)
-        if pl is not None and dice.sid(pl) % 10 == b:
-            named_at.setdefault(pl, []).append(a)
+        if pl is not None:
+            bucket = _BUCKET.get(pl)
+            if bucket is None:
+                bucket = _BUCKET[pl] = dice.sid(pl) % 10
+            if bucket == b:
+                named_at.setdefault(pl, []).append(a)
     folk = getattr(sim, "folk", None)
     has_folk = folk is not None and folk.n > 0
     mixed = has_folk and not folk.isolated

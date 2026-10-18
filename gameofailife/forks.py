@@ -937,14 +937,27 @@ BUILDERS = ["invite_fork", "work_fork", "hunger_fork", "sleep_fork", "people.pen
 COOLDOWN = {"groceries": 360, "lonely": 150, "free_time": 90, "hunger": 45, "sleep": 20}
 
 
+_BUILDER_MODULES: dict[str, object] = {}  # "housing_forks" -> the module, imported on first use
+
+
 def builders() -> list:
     """BUILDERS resolved to the builder functions, in order, at call time (so a patched builder is used too):
-    a bare name is this module's, "<module>.<fn>" that module's (imported here: it may import this one)."""
+    a bare name is this module's, "<module>.<fn>" that module's (imported here once: it may import this one; the
+    function is still looked up on the module at every call)."""
     import importlib
 
     here = globals()
-    return [getattr(importlib.import_module(f".{name.rpartition('.')[0]}", __package__), name.rpartition(".")[2])
-            if "." in name else here[name] for name in BUILDERS]
+    out = []
+    for name in BUILDERS:
+        mod, _, fn = name.rpartition(".")
+        if not mod:
+            out.append(here[name])
+            continue
+        m = _BUILDER_MODULES.get(mod)
+        if m is None:
+            m = _BUILDER_MODULES[mod] = importlib.import_module(f".{mod}", __package__)
+        out.append(getattr(m, fn))
+    return out
 
 
 def build_fork(sim: Simulation, agent: Agent) -> Fork | None:

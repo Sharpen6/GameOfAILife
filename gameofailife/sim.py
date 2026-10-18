@@ -115,6 +115,7 @@ WANDER_EVERY = 1  # minutes per tile of a stroll in the park (walking pace, so a
 MEET = ("hang_out", "play", "walk_park")  # activities an invite meets at: the host waits doing it, the guest comes to do it
 MEET_TILES = 3  # how near two people outdoors must be for a first meeting (_meet_someone)
 IDLE_FUN = 1.6  # how much faster fun drains while sitting idle (FIXLISTS 8)
+_DECAY_RATES: dict[tuple[str, bool], tuple[tuple[str, float], ...]] = {}  # (activity or "", idle) -> _decay's rates
 RECENT_FORKS = 8  # decisions the fork message's `you.recent` carries, with what came of each
 DAY_OFF_WAKE = 8 * 60  # the alarm before a day off: 08:00 plus a personal 0-89 minutes (FIXLISTS 7)
 NEWS_EVERY = {"fender": 30 * MINUTES_PER_DAY}  # outcome id -> the least time between two of one person's in the news
@@ -436,21 +437,32 @@ class Simulation:
             self._next(agent)
 
     def _decay(self, agent: Agent) -> None:
-        scale = DECAY_SCALE.get(agent.activity if agent.state == "busy" else "", {})
-        idle = agent.state == "busy" and agent.activity == "idle"
-        for n in NEEDS:
-            agent.adjust(n, -NEED_DECAY[n] * scale.get(n, 1.0) * (IDLE_FUN if idle and n == "fun" else 1.0))
+        busy = agent.state == "busy"
+        idle = busy and agent.activity == "idle"
+        key = (agent.activity if busy else "", idle)
+        rates = _DECAY_RATES.get(key)
+        if rates is None:  # each need's change a minute for this activity, worked out once (the same products)
+            scale = DECAY_SCALE.get(key[0], {})
+            rates = _DECAY_RATES[key] = tuple(
+                (n, -NEED_DECAY[n] * scale.get(n, 1.0) * (IDLE_FUN if idle and n == "fun" else 1.0)) for n in NEEDS)
+        needs = agent.needs
+        for n, delta in rates:  # Agent.adjust inlined: max(0.0, min(100.0, v)) gives these same values
+            v = needs[n] + delta
+            needs[n] = 0.0 if v <= 0.0 else 100.0 if v >= 100.0 else v
         if idle and agent.inside == self.home_of(agent):  # waking minutes idle at home (forks.free_time_fork)
             agent.idle_home = getattr(agent, "idle_home", 0) + 1  # type: ignore[attr-defined]
         elif agent.activity == "sleep" or agent.inside is None and agent.state != "deciding":
             agent.idle_home = 0  # type: ignore[attr-defined]  # asleep, or out of the house
-        if agent.needs["hunger"] <= 0:
+        if needs["hunger"] <= 0:
             agent.health -= 0.03
-        if agent.needs["energy"] <= 0:
+        if needs["energy"] <= 0:
             agent.health -= 0.02
-        top = life.max_health(agent)  # 100, less with a chronic condition
-        if min(agent.needs.values()) > 40 and agent.health < top:
-            agent.health = min(top, agent.health + 0.004)
+        # Heal toward life.max_health (100, less with age or a chronic condition, never more): nothing to heal at
+        # 100, so the cap is looked up only below it.
+        if agent.health < 100.0 and min(needs.values()) > 40:
+            top = life.max_health(agent)
+            if agent.health < top:
+                agent.health = min(top, agent.health + 0.004)
 
     def _next(self, agent: Agent) -> None:
         """Start the next planned step, or let the Director find the next decision."""
@@ -691,8 +703,10 @@ class Simulation:
         scale = 1.0  # at home, how good the home is scales what an activity gives
         if (act.gains or agent.activity == "sleep") and agent.activity_place == self.home_of(agent):
             scale = housing.activity_gain_scale(self, agent)
-        for need, gain in act.gains.items():
-            agent.adjust(need, (gain * scale if gain > 0 else gain) / minutes)
+        needs = agent.needs
+        for need, gain in act.gains.items():  # Agent.adjust inlined, as in _decay
+            v = needs[need] + (gain * scale if gain > 0 else gain) / minutes
+            needs[need] = 0.0 if v <= 0.0 else 100.0 if v >= 100.0 else v
         if agent.activity == "sleep":
             agent.adjust("energy", 0.17 * scale)
         elif agent.activity == "hospital":

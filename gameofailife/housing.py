@@ -431,8 +431,16 @@ def adults(sim, hh: Household) -> list[Agent]:
 
 
 def residents(sim, hh: Household) -> int:
-    # --- region --- _person: a townsperson too
-    return sum(1 for m in hh.member_ids if _here(_person(sim, m)))
+    # --- region --- _person: a townsperson too (the cast first, as _person looks; _here inlined)
+    n = 0
+    agents = sim.agents
+    for m in hh.member_ids:
+        p = agents.get(m)
+        if p is None:
+            p = _person(sim, m)
+        if p is not None and p.alive and not getattr(p, "gone", False):
+            n += 1
+    return n
     # --- end region ---
 
 
