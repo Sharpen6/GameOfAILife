@@ -153,7 +153,7 @@
     const ridge = (hh.st.roof === "gable" || hh.st.roof === "hip");
     for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) { add(a, b, 0); add(a, b, ridge ? hh.Hw + 10 : hh.topZ); }
     if (ridge) { const cx = (fx0 + fx1) / 2, cy = (fy0 + fy1) / 2; for (const [a, b] of [[fx0, cy], [fx1, cy], [cx, fy0], [cx, fy1]]) add(a, b, hh.topZ); }
-    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += 4;
+    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += CV.variantOf(p) == null ? 4 : 8; // keyed: room for steps and canopy posts in front (flat)
     const ox = Math.floor(bx0), oy = Math.floor(by0);
     return { ox, oy, w: Math.max(1, Math.ceil(Math.ceil(bx1) - ox)), h: Math.max(1, Math.ceil(Math.ceil(by1) - oy)), height: hh.height, labelZ: hh.labelZ };
   }
@@ -1425,9 +1425,9 @@
         }
         if (f === front) {
           door(ctx, F, du, 0.4, 20, { color: "#2a3a4c", frame: "#f2ede2", glazed: true });
-          const a = Math.max(0.05, du - 1.2), b = Math.min(F.len - 0.05, du + 1.2), r = F.rect(a, b, 0, 0.5);
+          const a = Math.max(0.05, du - 1.2), b = Math.min(F.len - 0.05, du + 1.2), r = F.rect(a, b, 0, 0.28); // the canopy stays inside the sprite box's 0.3-tile margin
           boxAt(g, r[0], r[1], r[2], r[3], 22, 25, "#3a4a5a", "#56667a");
-          for (const u of [a + 0.08, b - 0.12]) { const c = F.rect(u, u + 0.04, 0.44, 0.48); boxAt(g, c[0], c[1], c[2], c[3], 0, 22, "#3a4a5a"); }
+          for (const u of [a + 0.08, b - 0.12]) { const c = F.rect(u, u + 0.04, 0.22, 0.26); boxAt(g, c[0], c[1], c[2], c[3], 0, 22, "#3a4a5a"); }
           wallSign(ctx, F, st.sign, du, H - 2, "#ffffff", st.signBg, 1, { border: "#8ab0d8" });
         }
       }

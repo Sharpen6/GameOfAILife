@@ -126,7 +126,8 @@ function pageRun(arg) {
         st.opaqueMin = Math.min(st.opaqueMin, opaque / (W * H));
         const box = CV.spriteBox(q, look, proj);
         if (box.ox !== b.ox || box.oy !== b.oy || box.w !== W || box.h !== H) { st.boundsBad++; if (st.boundsBad === 1) out.errors.push(`${p.style} bounds ${JSON.stringify(box)} vs ${[b.ox, b.oy, W, H]}`); }
-        if (minX <= 0 || minY <= 0 || maxX >= W - 1) { st.clipBad++; if (st.clipBad === 1) out.errors.push(`${p.style} ${kind} touches the canvas edge: ${[minX, minY, maxX, maxY, W, H]}`); }
+        // (the bottom edge too for a keyed place; v2's in-place sprites keep v2's boxes, steps and all)
+        if (minX <= 0 || minY <= 0 || maxX >= W - 1 || (!inPlace(p) && maxY >= H - 1)) { st.clipBad++; if (st.clipBad === 1) out.errors.push(`${p.style} ${kind} touches the canvas edge: ${[minX, minY, maxX, maxY, W, H]}`); }
         // the roof: the body's centre at heightOf - 2 is opaque, and within 4 px above it there is a pixel of roof
         if (kind === "iso") {
           const bd = CV.bodyOf(q), cx = (bd.x0 + bd.x1) / 2, cy = (bd.y0 + bd.y1) / 2, hz = CV.heightOf(q);
