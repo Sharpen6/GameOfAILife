@@ -10,7 +10,8 @@
 //   night-glow window quad lies inside it, and CV.heightOf is within 4 px of the roof;
 // - each sprite takes <= 6 ms at p95 and <= 10 ms at most (PLAN 6's timing rule: report-only when the 1-minute
 //   load L > 8, else the limits times max(1, L / 4));
-// - every new style is shift-invariant: a place with a variant drawn in place equals its canonical copy at (0, 0);
+// - every new style is shift-invariant: a place with a variant drawn in place equals its canonical copy at (0, 0),
+//   and so does its night glow (art.glow, cached by sprite key); Millbrook's glow equals v2's (scene glowOf);
 // - CV.spriteKey is equal iff its nine parts are: neglected and pristine homes never share a sprite, flats with
 //   different names never do, places of one variant do, and Millbrook places keep their id in the key;
 // - every tile code's CV.groundKey names an art drawer that returns a tw x (th + 24) tile, in iso and flat;
@@ -84,7 +85,22 @@ function samples() {
 
 // Runs in the page.
 function pageRun(arg) {
-  const CV = window.CityView, out = { styles: {}, errors: [], keyFails: [], tileFails: [], shiftFails: [], shiftV2: [], movers: [] };
+  const CV = window.CityView, out = { styles: {}, errors: [], keyFails: [], tileFails: [], shiftFails: [], shiftV2: [], movers: [], glowFails: [], glowN: 0 };
+  const px = c => c ? fnv(c.getContext("2d").getImageData(0, 0, c.width, c.height).data) : 0;
+  // v2's glow (scene.js glowOf): Millbrook's art.glow must match it pixel for pixel
+  const v2Glow = (b, pct) => {
+    const win = b.windows.filter((q, k) => CV.hash(b.id + ":" + k) % 100 < pct);
+    if (!win.length) return null;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const q of win) for (const [x, y] of q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    x0 = Math.floor(x0); y0 = Math.floor(y0);
+    const c = CV.canvas(x1 - x0 + 2, y1 - y0 + 2), q = c.getContext("2d");
+    q.translate(-x0, -y0);
+    for (const w of win) CV.poly(q, w, "#e8a440");
+    q.fillStyle = "#ffd890";
+    for (const w of win) { const cx = (w[0][0] + w[2][0]) / 2, cy = (w[0][1] + w[2][1]) / 2; q.fillRect(Math.round(cx) - 1, Math.round(cy) - 1, 2, 2); }
+    return { c, wx: x0, wy: y0 };
+  };
   const SEASONS = ["spring", "summer", "autumn", "winter"];
   const fnv = d => { let h = 2166136261; for (let i = 0; i < d.length; i++) h = Math.imul(h ^ d[i], 16777619); return h >>> 0; };
   const projs = { iso: CV.makeProj("iso", 256, 192, 0), flat: CV.makeProj("flat", 256, 192, 0) };
@@ -102,14 +118,8 @@ function pageRun(arg) {
       for (const season of (kind === "iso" ? SEASONS : ["summer", "winter"])) for (let stage = 0; stage < 5; stage++) {
         const look = lookFor(p, stage);
         let b;
-        const t0 = performance.now();
         try { b = art.building(q, look, season); } catch (e) { out.errors.push(`${p.style} ${p.id}: ${e && e.stack || e}`); continue; }
-        // the sprite's cost is drawing it plus rasterising it (a one-pixel read forces that); the full read
-        // below is the test's own and is not timed
-        const g = b.c.getContext("2d"); g.getImageData(0, 0, 1, 1);
-        const ms = performance.now() - t0;
-        const W = b.c.width, H = b.c.height, d = g.getImageData(0, 0, W, H).data;
-        if (kind === "iso") st.ms.push(ms);
+        const g = b.c.getContext("2d"), W = b.c.width, H = b.c.height, d = g.getImageData(0, 0, W, H).data;
         st.n++;
         let opaque = 0, minX = W, minY = H, maxX = -1, maxY = -1;
         for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[(y * W + x) * 4 + 3] > 0) { opaque++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
@@ -137,12 +147,35 @@ function pageRun(arg) {
       const same = a.c.width === c.c.width && a.c.height === c.c.height && a.ox - c.ox === o[0] - z[0] && a.oy - c.oy === o[1] - z[1] &&
         fnv(a.c.getContext("2d").getImageData(0, 0, a.c.width, a.c.height).data) === fnv(c.c.getContext("2d").getImageData(0, 0, c.c.width, c.c.height).data);
       if (!same) out.shiftFails.push(p.style + " " + p.id);
+      // night: the glow of the copy in place is the canonical copy's, moved with it
+      for (const pct of [100, a.litShare]) {
+        const ga = arts.iso.glow(a, pct), gc = arts.iso.glow(c, pct);
+        out.glowN++;
+        if (!ga !== !gc || (ga && (ga.c !== gc.c || ga.wx - a.ox !== gc.wx - c.ox || ga.wy - a.oy !== gc.wy - c.oy))) out.glowFails.push(p.style + " " + p.id + " " + pct);
+      }
     } else {
       const look = lookFor(p, 0), moved = Object.assign({}, p, { x: p.x + 7, y: p.y + 3, entry: p.entry ? [p.entry[0] + 7, p.entry[1] + 3] : null });
       const a = arts.iso.building(p, look, "summer"), c = arts.iso.building(moved, look, "summer");
       const same = a.c.width === c.c.width && a.c.height === c.c.height &&
         fnv(a.c.getContext("2d").getImageData(0, 0, a.c.width, a.c.height).data) === fnv(c.c.getContext("2d").getImageData(0, 0, c.c.width, c.c.height).data);
       if (!same) out.shiftV2.push(p.style + " " + p.id);
+      for (const pct of [17, a.litShare, 100]) {
+        const ga = arts.iso.glow(a, pct), gv = v2Glow(a, pct);
+        out.glowN++;
+        if (!ga !== !gv || (ga && (ga.wx !== gv.wx || ga.wy !== gv.wy || ga.c.width !== gv.c.width || ga.c.height !== gv.c.height || px(ga.c) !== px(gv.c)))) out.glowFails.push(p.style + " " + p.id + " v2 " + pct);
+      }
+    }
+  }
+  // timing, in a pass of its own (the checks above allocate a full readback per sprite, and their garbage
+  // collections would land in the timed spans): a sprite's cost is drawing it plus rasterising it, which a
+  // one-pixel read forces
+  for (const p of arg.places) {
+    const st = out.styles[p.style], q = inPlace(p) ? p : CV.canonPlace(p);
+    for (const season of SEASONS) for (let stage = 0; stage < 5; stage++) {
+      const look = lookFor(p, stage), t0 = performance.now();
+      const b = arts.iso.building(q, look, season);
+      b.c.getContext("2d").getImageData(0, 0, 1, 1);
+      st.ms.push(performance.now() - t0);
     }
   }
   // spriteKey: equal iff the nine parts are equal
@@ -231,6 +264,7 @@ function pageRun(arg) {
     if (L > 8) console.log(`  timing report-only (load ${L.toFixed(2)} > 8)`);
     else { check(p95 <= 6 * k, `sprite p95 <= ${(6 * k).toFixed(1)} ms`, p95.toFixed(2)); check(mx <= 10 * k, `sprite max <= ${(10 * k).toFixed(1)} ms`, mx.toFixed(2)); }
     check(!out.shiftFails.length, "every keyed place is shift-invariant", out.shiftFails.slice(0, 8));
+    check(out.glowN > 0 && !out.glowFails.length, `night glow shared by sprite key, and Millbrook's equals v2's (${out.glowN} glows)`, out.glowFails.slice(0, 8));
     if (out.shiftV2.length) console.log(`  (v2 in-place styles not shift-invariant, reported: ${out.shiftV2.join(", ")})`);
     check(!out.keyFails.length, "spriteKey equal iff its nine parts are equal", out.keyFails);
     check(!out.tileFails.length, "every tile code's drawer returns a tw x (th + 24) tile", out.tileFails.slice(0, 8));

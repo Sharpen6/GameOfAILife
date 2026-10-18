@@ -1616,8 +1616,40 @@
       if (look.works) scaffold(ctx);
       const litShare = isHome ? 70 : p.style === "tower" ? 45 : 60;
       return { c: S.c, ox: S.ox, oy: S.oy, windows: ctx.windows, lights: ctx.lights, height: box.height, id: p.id, litShare,
-        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: null };
+        porch: ctx.porch, neon: ctx.neon, smoke: ctx.smoke, beacon: ctx.beacon, labelZ: box.labelZ, key: CV.spriteKey(p, look, season), sid };
     }
+
+    // Night glow: a sprite's lit windows as a small canvas of their own, shared by every copy of a sprite key
+    // (and of a share). Which windows light is hashed from the sid ("style#variant"), so all copies agree; a
+    // Millbrook place hashes its id, which gives v2's glow pixel for pixel. Returns { c, wx, wy } (world px of
+    // the canvas's top-left) or null when no window is lit. share: percent of windows lit (default litShare).
+    const glowCache = new Map();
+    art.glow = function (b, share) {
+      const pct = share == null ? b.litShare : share;
+      const ck = (b.key || "id:" + b.id + "@" + b.ox + "," + b.oy) + "|" + pct;
+      let gl = glowCache.get(ck);
+      if (gl === undefined) {
+        const seed = b.sid || b.id, win = b.windows.filter((q, k) => hash(seed + ":" + k) % 100 < pct);
+        gl = null;
+        if (win.length) {
+          // a keyed sprite's windows relative to its canvas (the same for every copy); Millbrook's in world px, as v2
+          const bx = String(seed).indexOf("#") > 0 ? b.ox : 0, by = bx ? b.oy : 0;
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          const loc = bx ? win.map(q => q.map(([x, y]) => [x - bx, y - by])) : win;
+          for (const q of loc) for (const [x, y] of q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+          x0 = Math.floor(x0); y0 = Math.floor(y0);
+          const c = CV.canvas(x1 - x0 + 2, y1 - y0 + 2), q = c.getContext("2d");
+          q.translate(-x0, -y0);
+          for (const w of loc) CV.poly(q, w, "#e8a440");
+          q.fillStyle = "#ffd890";
+          for (const w of loc) { const cx = (w[0][0] + w[2][0]) / 2, cy = (w[0][1] + w[2][1]) / 2; q.fillRect(Math.round(cx) - 1, Math.round(cy) - 1, 2, 2); }
+          gl = { c, dx: x0 + bx - b.ox, dy: y0 + by - b.oy };
+        }
+        if (glowCache.size >= 4096) glowCache.clear();
+        glowCache.set(ck, gl);
+      }
+      return gl && { c: gl.c, wx: b.ox + gl.dx, wy: b.oy + gl.dy };
+    };
 
     // Pool in a big house's garden (drawn into the ground). Clear blue when kept, green then empty; in
     // winter pale ice, and the derelict one an empty basin with dirty snow in the bottom.
