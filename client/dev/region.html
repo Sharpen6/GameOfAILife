@@ -73,10 +73,10 @@
     setInterval(() => {
       const s = view.scene && view.scene();
       if (!s) return;
-      const c = view.camera(), st = s.stats;
-      debug.textContent = [`zoom ${c.zoom.toFixed(3)} at ${c.x.toFixed(1)}, ${c.y.toFixed(1)}  lod ${s.lod()} level ${s.levelNow || "-"}`,
-        `draw ${st.draw.toFixed(1)} ms  builds ${st.buildMs.toFixed(1)} ms  chunks ${s.chunks.size()} (${(s.chunks.mp / 1e6).toFixed(1)} MP)`,
-        `sprites ${s.sprites.map.size} (${(s.sprites.mp() / 1e6).toFixed(1)} MP) queue ${s.sprites.queue.size}  items ${st.items}`].join("\n");
+      const c = view.camera(), d = s.debug();
+      debug.textContent = [`zoom ${c.zoom.toFixed(3)} at ${c.x.toFixed(1)}, ${c.y.toFixed(1)}  lod ${d.lod} level ${d.level || "-"}${d.phone ? "  phone" : ""}`,
+        `draw ${d.drawMs.toFixed(1)} ms  builds ${d.buildMs.toFixed(1)} ms  chunks ${d.chunks} (${d.chunkMP.toFixed(1)} + ${d.nearMP.toFixed(1)} of ${d.chunkCapMP} MP) pending ${d.pending}`,
+        `sprites ${d.sprites} (${d.spriteMP.toFixed(1)} of ${d.spriteCapMP} MP) queue ${d.queue}  boxes ${d.boxes}  items ${d.items}  statics ${d.statics_builds}`].join("\n");
     }, 250);
   }
   // V1b's fake host (RegionStub) drives the frames when loaded: its town and welcome state, then one frame per
