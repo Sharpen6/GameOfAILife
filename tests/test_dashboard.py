@@ -33,7 +33,7 @@ SECRET_KEYS = {"p", "outcomes", "odds", "probability", "probabilities", "luck_lo
 
 # PLAN 3.8, key by key.
 TOP_KEYS = {"type", "full", "tick", "time", "day", "city", "llm", "districts", "households", "people", "samples"}
-CITY_KEYS = {"population", "start_population", "deaths", "births", "adults", "children", "working", "students",
+CITY_KEYS = {"life", "population", "start_population", "deaths", "births", "adults", "children", "working", "students",
              "retired", "out_of_work", "mood", "health", "needs", "wealth", "homes", "luck", "recent_deaths"}
 WEALTH_KEYS = {"total", "median", "top10_share", "gini", "in_debt"}
 HOMES_KEYS = {"total", "owned", "rented", "for_sale", "for_rent", "lots_by_stage", "neglected_lived_in"}

@@ -511,7 +511,7 @@ Reply:
 |-----------------|--------|
 | `possessions`   | What the character owns: see [Possessions](#possessions). |
 | `attributes`    | `{"age", "health", "mood", "needs": {"hunger", "energy", "social", "fun"}, "reputation", "job": job or null, "traits": {trait: 0..1}}`. Health, mood, needs and reputation are rounded to integers on a 0..100 scale. See [Job](#job). |
-| `relationships` | Object of other character id to `{"kind", "affinity", "trust", "name"}`. `kind` is `partner`, `family`, `friend`, `coworker` or `acquaintance`; `affinity` is -100..100; `trust` is 0..100. |
+| `relationships` | Object of other person id (a character, or a townsperson such as `f17`) to `{"id", "name", "named", "kind", "affinity", "trust", "romance", "married"}`. `named` is false for a townsperson; `kind` is `partner`, `family`, `friend`, `coworker` or `acquaintance` (and the kinds of [Social](#social)); `affinity` is -100..100; `trust` and `romance` are 0..100; `married` is a boolean. |
 | `memory`        | List of up to the last 30 memory strings, each `"<time stamp>: <text>"`. |
 | `inbox`         | List of up to the last 20 `{"time", "from", "text"}`; `from` is a character id. Messages and invites land here. |
 | `world`         | `{"time", "season", "weather", "places": {place id: {"name", "kind", "district", "open": bool}}, "timetable"}`. `district` is a district id (see [Town](#town)); `open` is whether the place is open this hour. See [Timetable](#timetable). |
@@ -710,6 +710,7 @@ Characters without a controller play their profile default.)
 | `agent_id`         | Which of your characters is deciding. |
 | `kind`             | One of `invite`, `work`, `hunger`, `sleep`, `repair`, `payday`, `groceries`, `housing_trouble`, `house_hunt`, `upkeep`, `lonely`, `free_time`. `house_hunt` (buy or rent a better home, haggle, look for a cheaper one, or stay; a run-down house is bought with its renovation, done the day it is bought, and its options say so, as in `"Buy 28 River Road (house, neglected) for $14,550 and do it up ($880)"`; for a year after it has downsized, a household is not offered homes with more bedrooms unless it is crowded; an owner household that has outgrown its home, with everyone retired or two bedrooms to spare, is asked instead whether to downsize when nothing better is on the market, once it has lived there a while (from game day 90 for the households that start in their homes, 120 days after a move for the others), then every few weeks, more invitingly the longer it has had it in mind and while no house has been for sale for two weeks: sell up and buy smaller, sell up and rent, keep looking, or stay; a household that has downsized is not asked again for a year) and `housing_trouble` (the household is in the red after the week's bills, or its home is falling apart and the renovation costs more than it has) are major forks: the Director settles them by habit only on a clear lead, so they reach controllers more often. `repair` is an emergency at home (a burst pipe, a broken boiler, a leaking roof, an electrical fault) and `upkeep` a home that is looking worn (at weekends, and on weekday evenings too in a household's first week in a run-down home it has just moved into). |
 | `question`         | The situation in plain language. |
+| `about`            | Lines on who or what the fork is about, such as `["Lina Amar, 27, nurse at City Hospital."]`; often `[]`. |
 | `options`          | Always exactly 4. `index` is what you send as `choice`; `label` is the option; `cost` is money spent up front; `travel_minutes` (game minutes, by the option's way of travel: a bus trip counts the walk to the stop, the wait, the ride and the walk from it) is present when the option starts somewhere other than where the character is now, and on an option that stops somewhere on the way to work (a coffee first, at a cafe or at home), where it counts the leg on to work too; an option goes by the character's usual way for that trip unless it says otherwise: the car if it is with them, else the bus when one leaving now saves 5 or more minutes on a walk of over 25 minutes, else on foot, and `travel_minutes` is timed by that way; a work fork offers a coffee only when it fits before the shift ("Have a coffee at work" for someone who works at that cafe), otherwise the cup at home or "Grab a bite to eat, then go"; `household: true` is present when the cost comes out of the household's pooled money (its adults' money and savings) rather than the character's own pocket, as for a move or a repair. Outcome odds are never included. Options only send the character to a place that will be open when they get there, and a paid outing only when the place stays open for all of it. If they reach a shut place anyway (for example because the clock ran on while the fork waited for an answer), nothing is served and the rest of the outing is off, though a shift still stands. A paid outing that would no longer fit before closing is called off the same way (`"finds <place> about to close ($N refunded)."`). When that place is the option's first stop, the `cost` comes back and that choice's hidden outcomes are dropped. |
 | `time`             | Game time stamp. |
 | `deadline_seconds` | Always `5.0`, real seconds. |
@@ -728,6 +729,7 @@ Characters without a controller play their profile default.)
 | `you.groceries_at_home` | Meals' worth of groceries in the household's fridge. |
 | `you.goal`         | Savings goal `{"name", "target", "saved"}` or `null`. |
 | `you.recent_memory`| Last 5 memory strings. |
+| `you.life`         | `{"partner", "children", "conditions", "standing", "jobless_days", "debt"}`: see [Life, work and money](#life-work-and-money). |
 
 While a fork is open the character's `state` and `activity` are `"deciding"`
 and the character stands still.
@@ -1039,11 +1041,16 @@ The live snapshot, in the God welcome and every state frame.
 | `plane`   | `{"progress": 0..1, "from": "Riverton", "to": "Lakeside"}` during a flight, else `null`. |
 | `buses`   | The 8 buses: `[{"id", "line", "x", "y", "dir", "at_stop", "riders"}]`. `id` is `1a` to `1d` and `2a` to `2d`; `x`, `y` the road tile; `dir` the heading, `n`, `s`, `e` or `w`; `at_stop` the stop id while it stands at a stop with its doors open, else `null`; `riders` the number of people on board (the characters whose `riding` is that bus). Positions are a pure function of the tick. |
 | `agents`  | Every character, living or dead, see below. |
+| `trains`  | The region's trains, every frame: `[{"id", "line", "track", "i", "x", "y", "dir", "at_station", "riders"}]` (see [Trains](#trains)); `[]` in the `millbrook` world. |
+| `crowd`   | The townsfolk outdoors and not aboard anything, as one flat list of `[i, x, y, k, ...]` quadruples sorted by `i` (see [Townsfolk](#townsfolk)); `[]` with no townsfolk. |
+| `occ`     | Who is in each place, townsfolk and named, in `town.places` order (a list of integers). In the welcome, then in a frame now and then (see [Townsfolk](#townsfolk)); a frame without it means unchanged. |
+| `folk_n`  | How many townsfolk ids there are (`f0` to `f<folk_n - 1>`); 0 with none. |
+| `talks`   | Talks begun in the last 10 game minutes, newest first, at most 20: `[[place_index, a_id, b_id, tone, tick], ...]` (see [Social](#social)); `[]` when nobody is talking. |
 | `lots`    | Only in the welcome and when changed (see [the rule](#state-frame)). Object of residential place id (a house or a block of flats) to `{"condition", "stage", "works", "moving"}`: `condition` 0..100 (a whole number that agrees with the stage), `stage` 0..4 (see [Housing](#housing)), `works` true while builders are on site (a repair, the landlord repainting, or a home bought run-down being done up) and `moving` true while a moving van stands outside after a move (3 game hours). |
 | `homes`   | Only in the welcome and when changed. Object of home id to `{"hh", "owner", "listing", "price", "value", "emergency"}`: `hh` the household id living there or `null` (vacant); `owner` `"landlord"` (let by the landlord), `"market"` (for sale, nobody's yet: a home its owners sold, an estate, or a house the landlord sells when its tenants leave and no other house has been for sale for two weeks) or the owning household's id; `listing` `"for_sale"`, `"for_rent"` or `null` (also while it is under offer); `price` the asking price for sale or the weekly rent to let, else `null`; `value` the market value in dollars (base value x (0.7 + 0.003 x condition), to the nearest $50); `emergency` the kind of a live emergency (`leak`, `boiler`, `roof` or `electrics`) or `null`. |
 
 An agent in `agents`:
-`{"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood", "luck", "controller", "alive", "age", "home", "car", "riding"}`.
+`{"id", "name", "x", "y", "inside", "state", "activity", "vehicle", "mood", "luck", "controller", "alive", "age", "home", "car", "riding", "ill", "stage"}`.
 
 | Field | Meaning |
 |-------|---------|
@@ -1058,6 +1065,8 @@ An agent in `agents`:
 | `home` | The home id of the character's household (see [Homes](#homes)). |
 | `car` | Whether the character owns a car. |
 | `riding` | The bus id while on board, else `null`. While riding, `x` and `y` are the bus's tile. |
+| `ill` | Whether the character has an illness now (see [Life, work and money](#life-work-and-money)). |
+| `stage` | The stage of life: `baby` (under 3), `child` (3 to 12), `teen` (13 to 17), `adult` (18 to 64) or `senior` (65 and over). |
 
 ### Event
 
@@ -1168,6 +1177,7 @@ The reply to `get_agent` and `set_profile`.
 | Field           | Meaning |
 |-----------------|---------|
 | `id`, `name`, `age`, `alive` | Identity. |
+| `kind`          | `"named"` for the 60 characters; a townsperson's page (`get_agent` with an id like `"f17"`) has `"folk"` and the fields of [Townsfolk](#townsfolk). |
 | `state`, `activity` | As in [State](#state). |
 | `place`         | Place id of the current activity, or `null`. |
 | `inside`        | Place id or `null`. |
@@ -1190,6 +1200,7 @@ The reply to `get_agent` and `set_profile`.
 | `inbox`         | Last 10 inbox entries. |
 | `forks`         | Last 10 [decided forks](#decided-fork), oldest first. |
 | `household`     | Names of the people in the character's household. |
+| `life`          | The life block: `{"stage", "birthday", "partner", "children", "friends", "rivals", "conditions", "chronic", "pregnant", "work", "money", "talks"}`, with `work` `{"standing", "warnings", "days_in_job", "jobless_days", "benefit"}` and `money` `{"lifestyle", "debt", "loans"}`; see [Life, work and money](#life-work-and-money). |
 
 ### Home page
 
@@ -1244,6 +1255,7 @@ The welcome's `stats`, the `get_stats` reply and every [`stats` push](#stats-pus
 | `homes` | `{"total", "owned", "rented", "for_sale", "for_rent", "lots_by_stage", "neglected_lived_in"}`: the homes; those lived in by their owners and by tenants; those listed for sale and to let; how many places are at each stage (a list of five counts, `kept` first); and the places at stage 3 or 4 that someone lives in. |
 | `luck` | `{"touched", "raised", "lowered", "mean"}`: the living people whose luck is not 50, above 50 and below 50, and the mean luck (an integer). |
 | `recent_deaths` | Up to 5, newest first: `[{"id", "name", "age", "time", "how"}]`. |
+| `life` | `{"ill_now", "in_hospital", "couples", "births", "deaths", "jobless", "in_debt", "talks_today", "friendships_today"}`, integers: see [Life, work and money](#life-work-and-money). |
 
 `llm`:
 
@@ -1253,6 +1265,49 @@ The welcome's `stats`, the `get_stats` reply and every [`stats` push](#stats-pus
 | `playing`, `thinking` | The living characters a controller plays, and those deciding a fork right now. |
 | `today`, `total` | Fork counts since midnight and since the city began: `{"asked", "in_time", "timeouts", "late", "withdrawn", "against_habit", "avg_seconds"}`: forks sent to a controller; answered in time; timed out; answered late (within 10 s); withdrawn; in-time answers that differ from `profile_choice`; and the mean seconds of the in-time answers, one decimal, or `null` when there were none. A fork still waiting for its answer at midnight counts as asked in the new day too, where it is decided, so `asked` = `in_time` + `timeouts` + `withdrawn` + the forks still waiting, in `today` as in `total`. A late answer to a fork that timed out before midnight still counts in the new day's `late`. |
 | `habit_today`, `default_today` | Forks today that nobody was asked about: decided by habit, and played from the profile of a character no controller plays. |
+
+## Region map
+
+The `region` world's `welcome.town` (the default for `python3 -m gameofailife`; `--world millbrook` is the 80 x 50
+town alone). R1a writes this section.
+
+## Trains
+
+The region's railway: `state.trains` and `town.timetable.train`. R2 writes this section.
+
+## Townsfolk
+
+About 1,000 townsfolk live default lives in the region around Millbrook (`--folk N`, default 1000; none in the
+`millbrook` world). No controller plays them and they never get forks. Their ids are `f0`, `f1`, ... (`f` and
+digits; the 60 named characters' ids have no digits). God may read a townsperson's page with `get_agent` and change
+their luck with `set_luck`, exactly as for a named character.
+
+| Where | Field | Meaning |
+|-------|-------|---------|
+| State | `crowd` | `[i, x, y, k, ...]`: one quadruple per townsperson outdoors and not aboard a train or bus, sorted by `i` (the number in the id). `k` is `mode + 8 x child` (child: under 16); mode 0 walk, 1 run, 2 car, 3 bike, 4 taxi, 5 ambulance, 6 waiting, 7 other outdoors. Car passengers are left out. |
+| State | `occ` | One integer per place in `town.places` order: the townsfolk and named inside it (or strolling in a park). In the welcome; then in a frame once 10 game minutes have passed since the last one sent, at most every 40th frame. |
+| State | `folk_n` | The number of townsfolk ids. |
+| Stats | `folk` | Only with townsfolk: `{"v", "worth", "worth_24h", "mood", "health", "luck"}`: `v` the roster version (it changes on births, deaths, moves and new jobs); the rest lists of `folk_n` integers by index, `null` for the dead or gone. `stats.people` and the richest-person headline stay the 60 named. |
+| Stats | `region` | Only in the `region` world: `{"population", "named", "folk", "births", "deaths", "births_today", "deaths_today", "jobs", "commute", "train", "bus"}` with `jobs` `{"total", "filled", "open"}`, `commute` `{"walk", "car", "bus", "train", "bike"}`, `train` `{"riders_now", "riders_today", "lines": [{"id", "riders_today"}]}` and `bus` `{"riders_now", "riders_today"}`. |
+
+`city` and `districts` in the stats count the townsfolk too (the region's districts follow Millbrook's in the
+`region` world).
+
+## Life
+
+How people talk, love, fall ill, work, earn and die, for the named and the townsfolk alike.
+
+### Social
+
+L1 writes this section (`talks`, the social event tags, texts and invites to townsfolk).
+
+### Life, work and money
+
+L2 writes this section (the `life` block, `you.life`, `stats.city.life`, illness, births, deaths, jobs and money).
+
+## View data
+
+V1b writes this section.
 
 ## Hidden information
 
