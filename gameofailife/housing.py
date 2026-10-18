@@ -773,7 +773,7 @@ def notice_home(sim) -> Home | None:
     NOTICE_SETTLED_DAYS and have a fitting home to let to go to; the longest-standing tenants first (ties: id)."""
     now = sim.clock.tick
     pool = []
-    for h in sim.homes.values():
+    for h in cast_homes(sim):  # region: the 37 only (a townsfolk home is never the cast's landlord's to sell)
         if h.owner != "landlord" or h.tier == "flat" or h.household is None:
             continue
         hh = sim.households[h.household]
@@ -1144,7 +1144,7 @@ def landlord_notices(sim) -> None:
     the next notice waits too). The sale is when the notice runs out however soon the tenants go, so the landlord's
     sales are as far apart as its notices. Then the landlord may give a notice (`_landlord_sells`)."""
     now = sim.clock.tick
-    for home in sim.homes.values():
+    for home in cast_homes(sim):  # region: the 37 only (notice_home gives notice on no other)
         if home.notice is None or home.notice["due"] > now:
             continue
         if home.household is not None:
@@ -1165,9 +1165,10 @@ def _landlord_sells(sim, due: int | None = None) -> None:
     is running and none was given in the last NOTICE_GAP_DAYS (counted from NOTICE_DAYS before its sale,
     `Home.noticed`), the landlord gives notice on one let house (`notice_home`), to move out by `due` when given."""
     now = sim.clock.tick
-    if now < NOTICE_FROM_DAY * DAY or any(h.notice is not None for h in sim.homes.values()) or not house_drought(sim):
+    homes = cast_homes(sim)  # region: the 37 only
+    if now < NOTICE_FROM_DAY * DAY or any(h.notice is not None for h in homes) or not house_drought(sim):
         return
-    if any(h.noticed is not None and now - h.noticed < NOTICE_GAP_DAYS * DAY for h in sim.homes.values()):
+    if any(h.noticed is not None and now - h.noticed < NOTICE_GAP_DAYS * DAY for h in homes):
         return
     home = notice_home(sim)
     if home is not None:

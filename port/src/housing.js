@@ -717,7 +717,7 @@
   function notice_home(sim) {
     const now = sim.clock.tick;
     const pool = [];
-    for (const h of sim.homes.values()) {
+    for (const h of cast_homes(sim)) { // region: the 37 only (a townsfolk home is never the cast's landlord's to sell)
       if (h.owner !== "landlord" || h.tier === "flat" || h.household === null) continue;
       const hh = sim.households.get(h.household);
       if (hh.moved_tick !== null && now - hh.moved_tick < NOTICE_SETTLED_DAYS * DAY) continue;
@@ -1089,7 +1089,7 @@
   // sales are as far apart as its notices. Then the landlord may give a notice (`_landlord_sells`).
   function landlord_notices(sim) {
     const now = sim.clock.tick;
-    for (const home of sim.homes.values()) {
+    for (const home of cast_homes(sim)) { // region: the 37 only (notice_home gives notice on no other)
       if (home.notice === null || home.notice.due > now) continue;
       if (home.household !== null) {
         const hh = sim.households.get(home.household);
@@ -1114,7 +1114,7 @@
   // `Home.noticed`), the landlord gives notice on one let house (`notice_home`), to move out by `due` when given.
   function _landlord_sells(sim, due = null) {
     const now = sim.clock.tick;
-    const homes = Array.from(sim.homes.values());
+    const homes = cast_homes(sim); // region: the 37 only
     if (now < NOTICE_FROM_DAY * DAY || homes.some(h => h.notice !== null) || !house_drought(sim)) return;
     if (homes.some(h => h.noticed !== null && now - h.noticed < NOTICE_GAP_DAYS * DAY)) return;
     const home = notice_home(sim);
