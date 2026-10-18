@@ -1528,7 +1528,9 @@ def new_household(sim, members: list, home_id: str, how: str) -> Household | Non
     hid, n = base, 2
     while hid in sim.households:
         hid, n = f"{base}_{n}", n + 1
-    hh = Household(hid, home_id, float(home.rent) if how == "rent" else 0.0)
+    from .agent import Household as _Household
+
+    hh = _Household(hid, home_id, float(home.rent) if how == "rent" else 0.0)
     sim.households[hid] = hh
     for a in members:
         old = sim.households.get(a.household_id)
