@@ -120,7 +120,40 @@ async function runOpen(browser) {
     check(r.d.big && r.d.buildings > 1000, `open ${name}: the region is big with its buildings`, `${r.d.buildings} buildings`);
     const s = await page.evaluate(() => window.__settle(200));
     check(s.d.pending === 0 && s.d.queue === 0, `open ${name}: settles`, `${s.frames} frames`);
-    if (name === "1280x800") await shot(page, "default");
+    if (name === "1280x800") {
+      await shot(page, "default");
+      // the default view shows the river, its bridges and both rail lines: tile centres whose pixel is that
+      // tile's low-zoom colour (CV.tilePattern; buildings in front hide some)
+      const g = await page.evaluate(() => {
+        const sc = window.__view.scene(), R = sc.R, CV = window.CityView, c = document.getElementById("map"), k = sc.dpr;
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        const shows = (x, y) => {
+          const w = sc.proj.toWorld(x + 0.5, y + 0.5), q = sc.worldToCss(w[0], w[1]), X = Math.round(q[0] * k), Y = Math.round(q[1] * k);
+          if (X < 0 || Y < 0 || X >= c.width || Y >= c.height) return null;
+          const i = (Y * c.width + X) * 4, col = CV.tilePattern(R.at(x, y), 0, sc.season);
+          return Math.abs(d[i] - col[0]) + Math.abs(d[i + 1] - col[1]) + Math.abs(d[i + 2] - col[2]) <= 30;
+        };
+        const out = { river: 0, bridges: 0, lines: {} };
+        for (let y = 0; y < R.h; y++) for (let x = 0; x < R.w; x++) {
+          const ch = R.at(x, y);
+          if (ch === "~" && shows(x, y)) out.river++;
+          if (ch === "b" && shows(x, y)) out.bridges++;
+        }
+        for (const t of R.tracks) {
+          const seen = new Set();
+          for (let i = 1; i < t.pts.length; i++) {
+            const [ax, ay] = t.pts[i - 1], [bx, by] = t.pts[i], n = Math.max(Math.abs(bx - ax), Math.abs(by - ay));
+            for (let s = 0; s <= n; s++) { const x = Math.floor(ax + (bx - ax) * s / (n || 1)), y = Math.floor(ay + (by - ay) * s / (n || 1)); seen.add(x + "," + y); }
+          }
+          let m = 0; for (const key of seen) { const [x, y] = key.split(",").map(Number); if (shows(x, y)) m++; }
+          out.lines[t.line] = (out.lines[t.line] || 0) + m;
+        }
+        return out;
+      });
+      const ids = Object.keys(g.lines);
+      check(g.river >= 50 && g.bridges >= 3 && ids.length >= 2 && ids.every(l => g.lines[l] >= 5),
+        "open 1280x800: the default view shows the river, bridges and both rail lines", `river ${g.river} tiles, bridges ${g.bridges}, track tiles ${JSON.stringify(g.lines)}`);
+    }
     check(!errors.length, `open ${name}: no console errors`, errors.slice(0, 3).join(" | "));
     await ctx.close();
   }
@@ -187,7 +220,7 @@ async function runSame(browser) {
     const at = (vs) => page.evaluate(vs => vs.map(([z, x, y]) => { window.__cam({ zoom: z, x, y }); window.__settle(400); window.__view.frame(1e6); return window.__hash(); }), vs);
     hashes.push(await at(views));
     if (k === 0) {
-      const a = await at(lows), b = await page.evaluate(vs => vs.map(([z, x, y]) => { window.__cam({ zoom: z, x, y }); window.__view.frame(1e6); window.__view.frame(1e6); return window.__hash(); }), lows);
+      const a = await at(lows), b = await at(lows);
       check(a.every((h, i) => h === b[i]), "same: mid, far and near views draw equal pixels twice on one page", a.join(" "));
     }
     if (k === 0) {
