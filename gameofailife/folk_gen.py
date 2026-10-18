@@ -429,8 +429,7 @@ def make_household(sim, folk, j: int, kind: str, room: int, taken: set, rr: Rng)
 def populate(folk, sim, n: int) -> None:
     """Fill `folk.people` and `folk.households` with n townsfolk in the region's homes (folk.md 4)."""
     isolated = bool(getattr(folk, "isolated", False))
-    town = sim.town
-    mb_ids = town.millbrook_ids or frozenset()
+    sim.folk = folk  # people.person(sim, "f<i>") must find the people being made (make_folk assigns it after)
     seed = sim.seed
     geo = Geo(sim)
     taken = named_names(sim)
@@ -1109,7 +1108,7 @@ class GenFolk:
 class GenSim:
     """What populate reads: seed, clock, the region town, homes (v2's and the region's), the cast, a list board."""
 
-    def __init__(self, seed: int = 1, isolated: bool = False):
+    def __init__(self, seed: int = 1, isolated: bool = False, with_cast: bool = True):
         from . import region
         self.seed = seed
         self.dice_seed = seed
@@ -1119,7 +1118,7 @@ class GenSim:
         self.homes = housing.build_homes(self.town)
         add_region_homes(self)
         self.lots = build_lots(self.town, self.homes)
-        self.agents, self.households = cast.build_cast(self.town, self.homes, seed)
+        self.agents, self.households = cast.build_cast(self.town, self.homes, seed) if with_cast else ({}, {})
         housing.init(self)
         self.job_board = ListBoard()
         self.folk_isolated = isolated
