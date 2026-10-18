@@ -1182,8 +1182,8 @@
       const opt = opts[pick];
       const m = now % DAY;
       const pad = x => String(x).padStart(2, "0");
-      p.choose({ time: `${pad(Math.floor(m / 60))}:${pad(m % 60)}`, kind, options: opts.map(o => o.label),
-        choice: pick, by });
+      p.choose({ time: `Day ${Math.floor(now / DAY) + 1} ${pad(Math.floor(m / 60))}:${pad(m % 60)}`, kind,
+        options: opts.map(o => o.label), choice: pick, by });
       this._play(sim, p, now, opt);
     }
 

@@ -424,7 +424,7 @@ for (let i = 0; i < 200; i++) sim.step();
 for (let i = 0; i < 200; i++) sim.set_luck(`f${i}`, 95);
 for (let i = 0; i < 70; i++) sim.step();
 const st = sim.stats_json(true);
-process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts, samples: sim.stats.samples }));
+process.stdout.write(JSON.stringify({ city: st.city, districts: st.districts, region: st.region, samples: sim.stats.samples }));
 """
 
 STATS_FIELDS = ("needs", "luck", "retired", "out_of_work", "wealth", "homes")
@@ -516,6 +516,25 @@ class TestFolkCityStats(unittest.TestCase):
         self.assertEqual(sum(d["vacant"] for d in self.st["districts"]),
                          sum(1 for h in sim.homes.values() if h.household is None))
 
+    def test_region_homes_count_every_home(self):
+        # region.homes has city.homes' keys over every home in the region and every lot they stand on: what the
+        # City tab's Homes KPI, its facts row and the HUD's market chip show in the region world.
+        from gameofailife import housing
+        sim, homes, city = self.sim, self.st["region"]["homes"], self.st["city"]["homes"]
+        every = list(sim.homes.values())
+        self.assertEqual(set(homes), set(city))
+        self.assertEqual(homes["total"], len(every))
+        lived = [h for h in every if h.household is not None]
+        self.assertEqual(homes["owned"], sum(1 for h in lived if h.owner == h.household))
+        self.assertEqual(homes["owned"] + homes["rented"], len(lived))
+        self.assertEqual(sum(homes["lots_by_stage"]), len({h.place for h in every}))
+        listings = [housing.listed(sim, h) for h in every]
+        self.assertEqual((homes["for_sale"], homes["for_rent"]),
+                         (listings.count("for_sale"), listings.count("for_rent")))
+        self.assertGreater(homes["rented"], 300)
+        self.assertGreater(homes["for_rent"], city["for_rent"])
+        self.assertLessEqual(homes["neglected_lived_in"], sum(homes["lots_by_stage"][3:]))
+
     def test_retired_and_out_of_work_count_townsfolk(self):
         city = self.st["city"]
         retired = sum(1 for p in self.folk if p.age >= 65 and p.job is None)
@@ -536,6 +555,7 @@ class TestFolkCityStats(unittest.TestCase):
                 self.assertEqual(js["city"][k], self.st["city"][k], k)
         row = lambda d: (d["id"], d["people"], d["median_worth"], d["homes"], d["vacant"], d["shabby_plus"])  # noqa: E731
         self.assertEqual([row(d) for d in js["districts"]], [row(d) for d in self.st["districts"]])
+        self.assertEqual(js["region"]["homes"], self.st["region"]["homes"])
         self.assertEqual(js["samples"], self.sim.stats.samples)  # the hourly samples, townsfolk included
 
 

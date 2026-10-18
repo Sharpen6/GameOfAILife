@@ -2,7 +2,8 @@
 
 `ctx` is a dict the caller fills: `rain`, `coworkers`, `pupils`, `money`, `family`, `baby`, `health`, `love` (bools)
 and the words `place`, `work`, `kid`, `partner`, `illness`, `headline` (strings or None; `headline` set only for a
-usable news headline). Lines are `“opener” “reply”`, at most 160 characters, three or more per topic and tone class.
+usable news headline; `kid` and `partner` are the listener's, social.talk_ctx). Lines are `“opener” “reply”`, the
+first speaker's then the listener's, at most 160 characters, three or more per topic and tone class.
 No randomness of its own: `u` is a uniform draw, `rng` an Rng (rng.py), both the caller's.
 """
 
@@ -105,12 +106,12 @@ LINES = {
                  ("Give {partner} my love.", "I will, they always ask about you."),
                  ("Family is everything, isn't it?", "It really is.")],
         "pleasant": [("How's the family?", "Busy, but good."),
-                     ("{kid} has a school play next week.", "You must be proud."),
+                     ("Is {kid} in the school play next week?", "Yes, we're so proud."),
                      ("We had everyone over on Sunday.", "Sounds lovely.")],
         "awkward": [("And how's... everyone?", "Fine. Everyone's fine."),
                     ("Still seeing {partner}?", "Yes. Why?"),
                     ("Kids, eh?", "Mm.")],
-        "argument": [("You never help with {kid}.", "I do more than you think!"),
+        "argument": [("You're never there for {kid}.", "I do more than you think!"),
                      ("Your family always comes first.", "They're my family!"),
                      ("We need to talk about your mother.", "Not this again.")],
     },

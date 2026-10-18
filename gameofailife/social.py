@@ -40,10 +40,12 @@ ASK_ROMANCE, ASK_AFFINITY = 30.0, 20.0
 SKIP_ACTS = ("sleep", "hospital", "ward", "dead", "baby")
 WANDER = ("walk_park", "play")
 RING = 12  # a person's talk ring (life.talks)
+FOLK_RING = 5  # a townsperson's (their page's talks)
 TALKS_SHOWN = 20  # state.talks rows
 TALKS_WINDOW = 10  # ... begun in the last 10 game minutes
 DATE_HOUR = 17  # dates are arranged at 17:00 for the evening
 WEDDING_HOUR = 14
+TALK_LOG_GAP = 60  # minutes: a pair's talks reach the News log at most once in this long
 COOL = {"crush": 5, "asked_out": 3, "date": 2, "move_in": 14, "propose": 30, "proposal": 30,
         "relationship_trouble": 7, "partner_split": 7, "friend_in_need": 7, "borrow": 7}
 
@@ -64,6 +66,7 @@ class SocialState:
         self.place_index = {}  # place id -> index in town.places
         self.kind = {}  # place id -> talk class of a non-home place
         self.loans = []  # rows when sim.life has none
+        self.logged = {}  # "lo|hi" -> tick of the pair's last talk in the News log (TALK_LOG_GAP)
 
 
 def _ds(sim) -> int:
@@ -406,7 +409,19 @@ def converse(sim, a, b, cls, place_id, t, rr) -> str | None:
             _flirt(sim, a, b, ra, rb, place_id)
     if people.is_named(a) or people.is_named(b):
         _named_talk(sim, a, b, ra, tone, cls, place_id)
+    else:
+        _folk_talk(sim, a, b, tone, place_id)
     return tone
+
+
+def _folk_talk(sim, a, b, tone, place_id) -> None:
+    """Two townsfolk's talk in both their rings (FOLK_RING): who, where and how it went; no words are drawn."""
+    stamp = sim.clock.stamp()
+    for x, y in ((a, b), (b, a)):
+        if x.life is not None:
+            x.life.talks.append({"time": stamp, "with": y.id, "name": y.name, "topic": None, "tone": tone,
+                                 "text": None, "place": place_id})
+            del x.life.talks[:-FOLK_RING]
 
 
 def on_affinity(sim, a_id, b_id, before, after) -> None:
@@ -438,6 +453,10 @@ def on_affinity(sim, a_id, b_id, before, after) -> None:
             text = f"{a.name} and {b.name} have become friends."
             sim.event(text, who, tag="new_friend", importance=1, agents=[other.id], place=_where_of(who))
             other.remember(sim.clock.stamp(), text)
+        else:  # two townsfolk: no News, but each page remembers it
+            stamp = sim.clock.stamp()
+            a.remember(stamp, f"Became friends with {b.name}.")
+            b.remember(stamp, f"Became friends with {a.name}.")
     elif (was is FRIEND or was is PARTNER) and before >= 0 > after and (named_a or named_b):
         who, other = (a, b) if named_a else (b, a)
         sim.event(f"{a.name} and {b.name} have fallen out.", who, tag="falling_out", importance=1,
@@ -503,7 +522,7 @@ def _told(p, headline) -> bool:
     if life is None:
         return False
     for t in life.talks:
-        if t["topic"] == "news" and headline in t["text"]:
+        if t["topic"] == "news" and headline in t["text"]:  # a townsfolk-only talk has neither
             return True
     return False
 
@@ -517,15 +536,21 @@ def _kid_of(sim, p):
     return None
 
 
+def _family_of(sim, x, y):
+    """x's partner who is not y, and x's child: what y can ask x about."""
+    q = partner_of(sim, x)
+    return (q if q is not None and q is not y else None), _kid_of(sim, x)
+
+
 def talk_ctx(sim, a, b, ra, cls, place_id) -> dict:
+    """The words of a talk between a and b. The lines' {kid} and {partner} are the listener's: b's when b has a
+    child, else a's when a has one, else b's, else a's partner (one not in the talk). When they are a's, `swap` is
+    set and b speaks first (_named_talk), so nobody asks after their own child or sends love to their own date."""
     day = sim.clock.day
-    partner = None  # someone's partner who is not in the talk
-    for x, y in ((a, b), (b, a)):
-        q = partner_of(sim, x)
-        if q is not None and q is not y:
-            partner = q
-            break
-    kid = _kid_of(sim, a) or _kid_of(sim, b)
+    pb, kb = _family_of(sim, b, a)
+    pa, ka = _family_of(sim, a, b)
+    swap = kb is None and (ka is not None or (pb is None and pa is not None))
+    partner, kid = (pa, ka) if swap else (pb, kb)  # the listener's partner (not in the talk) and child
     life_mod = _life_mod()
     ill = (life_mod.ill(a) or life_mod.ill(b) or _recent(a, ("discharged",), 7, day)
            or _recent(b, ("discharged",), 7, day))
@@ -557,6 +582,7 @@ def talk_ctx(sim, a, b, ra, cls, place_id) -> dict:
         "kid": _first(kid.name) if kid is not None else None,
         "partner": _first(partner.name) if partner is not None else None,
         "illness": illness,
+        "swap": swap,
     }
 
 
@@ -573,14 +599,21 @@ def _named_talk(sim, a, b, ra, tone, cls, place_id) -> None:
     where = f" at {place.name}" if place is not None and cls != "home" else " at home" if cls == "home" else ""
     stamp = sim.clock.stamp()
     for x, y in ((a, b), (b, a)):
-        if people.is_named(x) and x.life is not None:
+        if x.life is not None:  # a townsperson keeps the talk with a named too, in their shorter ring
             x.life.talks.append({"time": stamp, "with": y.id, "name": y.name, "topic": tp, "tone": tone,
                                  "text": text, "place": place_id})
-            del x.life.talks[:-RING]
+            del x.life.talks[:-(RING if people.is_named(x) else FOLK_RING)]
     if tone == "argument" or (cls != "home" and (tone == "warm" or tp in ("news", "love") or ctx["baby"])):
+        lo, hi = (a.id, b.id) if a.id < b.id else (b.id, a.id)
+        logged = sim.social.logged
+        key = f"{lo}|{hi}"
+        if sim.clock.tick - logged.get(key, -TALK_LOG_GAP) < TALK_LOG_GAP:
+            return  # one logged talk a pair an hour: the talk itself happened and stays in the ring
+        logged[key] = sim.clock.tick
         who, other = (a, b) if people.is_named(a) else (b, a)
         verb = "argue about" if tone == "argument" else "chat about"
-        sim.event(f"{a.name} and {b.name} {verb} {TOPIC_WORDS[tp]}{where}: {text}", who, tag="talk",
+        first, second = (b, a) if ctx["swap"] and tp == "family" else (a, b)  # the speaker first
+        sim.event(f"{first.name} and {second.name} {verb} {TOPIC_WORDS[tp]}{where}: {text}", who, tag="talk",
                   agents=[other.id], place=place_id, remember=False)
 
 
@@ -714,6 +747,10 @@ def start_dating(sim, a, b) -> None:
         who, other = (a, b) if people.is_named(a) else (b, a)
         sim.event(f"{a.name} and {b.name} are going out!", who, tag="partner", agents=[other.id],
                   place=_where_of(who))
+    stamp = sim.clock.stamp()
+    for x, y in ((a, b), (b, a)):
+        if not people.is_named(x):  # a townsperson's page remembers it (the named's memory has the News line)
+            x.remember(stamp, f"Started going out with {y.name}.")
     _jealousy(sim, a, b)
     _jealousy(sim, b, a)
 
@@ -1093,6 +1130,15 @@ def _dates(sim) -> None:
             date_roll(sim, a, b)
 
 
+def first_date_day(sim, a_id, b_id) -> int:
+    """The day a couple's next date falls on, as _dates arranges them (every third day, at DATE_HOUR): today
+    until DATE_HOUR, else from tomorrow."""
+    day = sim.clock.day + (1 if sim.clock.minute_of_day >= DATE_HOUR * 60 else 0)
+    while (dice.sid(a_id) + dice.sid(b_id) + day) % 3:
+        day += 1
+    return day
+
+
 def date_roll(sim, a, b) -> str:
     """One date: s' = .2 + compat + .004 (aff - 50); warm at odds(.5 + s'), bad at odds(.1 - .5 s')."""
     ra, rb = a.relationships.get(b.id), b.relationships.get(a.id)
@@ -1264,8 +1310,8 @@ def _incidents(sim, classes) -> None:
             _count(sim, "incidents")
             if people.is_named(a) or people.is_named(b):
                 who, other = (a, b) if people.is_named(a) else (b, a)
-                why = ("over a missed shift" if cls == "work" else "over a broken pencil case" if cls == "school"
-                       else "over the noise on the stairs")
+                why = ("over a missed shift" if cls == "work" else "over the timetable" if cls == "school"
+                       else "over the noise on the stairs")  # a school's pair is two of its staff (adults only)
                 sim.event(f"{_first(a.name)} and {_first(b.name)} fall out {why} at {place.name}.", who, tag="row",
                           agents=[other.id], place=place_id)
 

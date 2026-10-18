@@ -604,6 +604,32 @@ class ConditionTest(unittest.TestCase):
         self.night()
         self.assertEqual(sim.texts("falling_apart", place="main_28"), ["28 Main Street is close to falling apart."])
 
+    def test_a_home_hovering_at_the_shabby_line_is_announced_once(self):
+        # 28 Main Street dips below 60, gets a little upkeep back over it and dips again: one "looking shabby", not
+        # one a dip. Only a climb back to NEWS_RESET (or to kept) makes a later dip news again. The JS port agrees.
+        sim = self.sim
+        lot = sim.lots["main_28"]
+        for c in (59.5, 61.0, 59.0, 63.0, 59.5):
+            lot.condition = c
+            housing._stage_news(sim, lot)
+        self.assertEqual(sim.texts("shabby", place="main_28"), ["28 Main Street is looking shabby."])
+        self.assertEqual(lot.reported, 2)
+        for c in (housing.NEWS_RESET + 0.5, 59.5):
+            lot.condition = c
+            housing._stage_news(sim, lot)
+        self.assertEqual(sim.texts("shabby", place="main_28"), ["28 Main Street is looking shabby."] * 2)
+        if NODE:
+            js = r"""
+            const G = require(process.argv[1]).load();
+            const sim = new G.sim.Simulation(1), H = G.housing, lot = sim.lots.get("main_28");
+            for (const c of [59.5, 61.0, 59.0, 63.0, 59.5, H.NEWS_RESET + 0.5, 59.5]) { lot.condition = c; H._stage_news(sim, lot); }
+            process.stdout.write(JSON.stringify(sim.history.filter(e => e.tag === "shabby" && e.place === "main_28").map(e => e.text)));
+            """
+            run = subprocess.run([NODE, "-e", js, str(ROOT / "port" / "tools" / "engine.cjs")], capture_output=True,
+                                 text=True, timeout=120)
+            self.assertEqual(run.returncode, 0, run.stderr[-2000:])
+            self.assertEqual(json.loads(run.stdout), ["28 Main Street is looking shabby."] * 2)
+
     def test_rentals_and_empty_homes_are_silent(self):
         sim = self.sim
         sim.lots["river_12"].condition = 40.3  # for sale

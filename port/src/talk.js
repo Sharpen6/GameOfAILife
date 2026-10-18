@@ -135,7 +135,7 @@
       ],
       pleasant: [
         ["How's the family?", "Busy, but good."],
-        ["{kid} has a school play next week.", "You must be proud."],
+        ["Is {kid} in the school play next week?", "Yes, we're so proud."],
         ["We had everyone over on Sunday.", "Sounds lovely."],
       ],
       awkward: [
@@ -144,7 +144,7 @@
         ["Kids, eh?", "Mm."],
       ],
       argument: [
-        ["You never help with {kid}.", "I do more than you think!"],
+        ["You're never there for {kid}.", "I do more than you think!"],
         ["Your family always comes first.", "They're my family!"],
         ["We need to talk about your mother.", "Not this again."],
       ],

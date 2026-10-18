@@ -154,7 +154,17 @@
         extra: _life("friends", q) }),
       Option(`Turn ${x} down flat`, STAY, { tags: { social: -0.5 }, base: -0.2 - keen, extra: _life("flat", q) }),
     ];
-    return _fork(sim, agent, "asked_out", `${x} asks you out on Friday.`, opts, q);
+    return _fork(sim, agent, "asked_out", `${x} asks you out ${_date_when(sim, agent, q)}.`, opts, q);
+  }
+
+  const DAY_FULL = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+  // When the first date would be (social.first_date_day): "tonight", "tomorrow evening" or "on Wednesday".
+  function _date_when(sim, a, b) {
+    const day = S().first_date_day(sim, a.id, b.id);
+    if (day === sim.clock.day) return "tonight";
+    if (day === sim.clock.day + 1) return "tomorrow evening";
+    return `on ${DAY_FULL[day % 7]}`;
   }
 
   function date_fork(sim, agent, ctx) {
@@ -496,5 +506,6 @@
   Object.assign(G.people.EFFECTS, { life_rel: _life_rel, life_rom: _life_rom });
 
   G.social_forks = { DAY, KINDS, STAY, about, crush_fork, asked_out_fork, date_fork, move_in_fork, propose_fork,
-    proposal_fork, relationship_trouble_fork, partner_split_fork, friend_in_need_fork, _place_together };
+    proposal_fork, relationship_trouble_fork, partner_split_fork, friend_in_need_fork, _place_together, DAY_FULL,
+    _date_when };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

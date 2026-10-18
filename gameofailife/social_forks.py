@@ -162,7 +162,20 @@ def asked_out_fork(sim, agent, ctx):
                extra=_life("friends", q)),
         Option(f"Turn {x} down flat", STAY, tags={"social": -0.5}, base=-0.2 - keen, extra=_life("flat", q)),
     ]
-    return _fork(sim, agent, "asked_out", f"{x} asks you out on Friday.", opts, q)
+    return _fork(sim, agent, "asked_out", f"{x} asks you out {_date_when(sim, agent, q)}.", opts, q)
+
+
+DAY_FULL = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _date_when(sim, a, b) -> str:
+    """When the first date would be (social.first_date_day): "tonight", "tomorrow evening" or "on Wednesday"."""
+    day = social.first_date_day(sim, a.id, b.id)
+    if day == sim.clock.day:
+        return "tonight"
+    if day == sim.clock.day + 1:
+        return "tomorrow evening"
+    return f"on {DAY_FULL[day % 7]}"
 
 
 def date_fork(sim, agent, ctx):

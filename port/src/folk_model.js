@@ -84,7 +84,7 @@
       this.worked_day = -1;
       this.out_day = -1; // the day of their last outing (folk.OUTING_BONUS)
       this.fav = {}; // LEISURE key -> [place ids] nearest first
-      this.choices = []; // last CHOICES_KEEP {time, kind, options, choice, by}
+      this.choices = []; // last CHOICES_KEEP {time ("Day 12 21:45"), kind, options, choice, by}
       this.inbox = []; // last INBOX_KEEP messages
       this.commute = null; // [place, minutes, mode] | null
       this.skill = 0.0; // job matching (generation)

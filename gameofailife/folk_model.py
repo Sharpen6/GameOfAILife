@@ -109,7 +109,7 @@ class Person:
         self.worked_day = -1
         self.out_day = -1  # the day of their last outing (folk.OUTING_BONUS)
         self.fav = {}  # LEISURE key -> [place ids] nearest first
-        self.choices = []  # last CHOICES_KEEP {time, kind, options, choice, by}
+        self.choices = []  # last CHOICES_KEEP {time ("Day 12 21:45"), kind, options, choice, by}
         self.inbox = []  # last INBOX_KEEP messages
         self.commute = None  # (place, minutes, mode) | None
         self.skill = 0.0  # job matching (generation)

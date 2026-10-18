@@ -159,12 +159,14 @@ def _wealth_block(people: list[_Person]) -> dict:
             "in_debt": sum(1 for p in people if p.agent.is_adult and p.cash + p.savings < 0)}
 
 
-def _homes_block(sim: Simulation) -> dict:
+def _homes_block(sim: Simulation, homes: list | None = None) -> dict:
     """city.homes: the cast's 37 homes (housing.cast_homes) and the 22 lots they stand on. The region world keeps
     this block to the 37, the market the named live in (house_drought and market_json are v2-only too); the
-    region's 575 homes and their lots count in their districts (_districts)."""
+    region's homes and their lots count in their districts (_districts) and, all of them, in region.homes
+    (`homes` = every home: region_block)."""
     from . import housing
-    homes = housing.cast_homes(sim)
+    if homes is None:
+        homes = housing.cast_homes(sim)
     places = {h.place for h in homes}
     by_stage = [0] * len(housing.STAGES)
     lived_in = {h.place for h in homes if h.household is not None}
@@ -470,8 +472,8 @@ def stats_json(sim: Simulation, full: bool = False) -> dict:
 
 
 def region_block(sim: Simulation, city: dict) -> dict:
-    """`stats.region` (view.md 4.3), region world only: everyone, the jobs board, how people get to work, and the
-    trains and buses now and today. Folk-side numbers come from `Folk.region_parts(sim)` when the townsfolk have it
+    """`stats.region` (view.md 4.3), region world only: everyone, the jobs board, how people get to work, the
+    trains and buses now and today, and every home in the region (`homes`, city.homes' keys over all of them). Folk-side numbers come from `Folk.region_parts(sim)` when the townsfolk have it
     ({folk, commute: {walk, car, bus, train, bike}, train_riders_today, train_lines_today: {line id: n},
     bus_riders_today}); otherwise they are 0."""
     named = sum(1 for a in sim.agents.values() if a.alive)
@@ -497,6 +499,7 @@ def region_block(sim: Simulation, city: dict) -> dict:
                             for line in ((sim.town.rail or {}).get("lines") or [])]},
         "bus": {"riders_now": sum(1 for a in sim.agents.values() if a.alive and a.riding),
                 "riders_today": int(fp.get("bus_riders_today", 0))},
+        "homes": _homes_block(sim, list(sim.homes.values())),
     }
 
 

@@ -134,10 +134,11 @@
 
   // city.homes: the cast's 37 homes (housing.cast_homes) and the 22 lots they stand on. The region world keeps
   // this block to the 37, the market the named live in (house_drought and market_json are v2-only too); the
-  // region's 575 homes and their lots count in their districts (_districts).
-  function _homes_block(sim) {
+  // region's homes and their lots count in their districts (_districts) and, all of them, in region.homes
+  // (`homes` = every home: region_block).
+  function _homes_block(sim, homes = null) {
     const { STAGES, stage_of, listed, cast_homes } = G.housing;
-    const homes = cast_homes(sim);
+    if (homes === null) homes = cast_homes(sim);
     const places = new Set(homes.map(h => h.place));
     const by_stage = STAGES.map(() => 0);
     const lived_in = new Set(homes.filter(h => h.household !== null).map(h => h.place));
@@ -460,6 +461,7 @@
         lines: (((sim.town.rail || {}).lines) || []).map(line => ({ id: line.id, riders_today: pyInt(lines[line.id] ?? 0) })) },
       bus: { riders_now: count(Array.from(sim.agents.values()), a => a.alive && a.riding),
         riders_today: pyInt(fp.bus_riders_today ?? 0) },
+      homes: _homes_block(sim, Array.from(sim.homes.values())),
     };
   }
 

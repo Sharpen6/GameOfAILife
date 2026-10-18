@@ -607,9 +607,10 @@
       chips.push(["mood", `Mood <b>${c.mood}</b>${d != null ? `<span class="dash-md ${dirClass(d)}">${arrow}<span class="dash-long">${num}</span></span>` : ""}`,
         d != null ? `Mood ${c.mood}, ${d >= 0 ? "up" : "down"} ${Math.abs(d)} in 24 h` : `Mood ${c.mood}`]);
       chips.push(["wealth", `<b>${compact(c.wealth.total)}</b>`, `Total wealth ${money(c.wealth.total)}: open the ranking`]);
-      if (c.homes) {
-        chips.push(["homes", `${c.homes.for_sale} for sale · ${c.homes.for_rent} to let`, "Homes on the market"]);
-        const ng = (c.homes.lots_by_stage[3] || 0) + (c.homes.lots_by_stage[4] || 0);
+      const hs = homesStats();
+      if (hs) {
+        chips.push(["homes", `${hs.for_sale} for sale · ${hs.for_rent} to let`, "Homes on the market"]);
+        const ng = (hs.lots_by_stage[3] || 0) + (hs.lots_by_stage[4] || 0);
         chips.push(["neglect", `<span class="${ng ? "warn" : ""}">${ng} neglected</span>`, "Buildings at stage neglected or derelict: show condition on the map"]);
       }
     }
@@ -1407,9 +1408,10 @@
     tiles.push(kpi("Population", c.population, `${c.deaths ? plural(c.deaths, "death") : "no deaths"}${born} · health ${c.health}`, "people"));
     tiles.push(kpi("Mood", c.mood, d != null ? `<span class="${dirClass(d)}">${deltaNum(d)}</span> in 24 h` : "the mean of everyone's needs", "city:needs"));
     tiles.push(kpi("Wealth", compact(c.wealth.total), `top 10% hold ${c.wealth.top10_share}%`, "people"));
-    if (c.homes) {
-      const ng = (c.homes.lots_by_stage[3] || 0) + (c.homes.lots_by_stage[4] || 0);
-      tiles.push(kpi("Homes", `${c.homes.owned}<small>owned</small>`, `${c.homes.for_sale} for sale · ${c.homes.for_rent} to let · ${ng} neglected`, "city:homes"));
+    const hs = homesStats();
+    if (hs) {
+      const ng = (hs.lots_by_stage[3] || 0) + (hs.lots_by_stage[4] || 0);
+      tiles.push(kpi("Homes", `${hs.owned}<small>owned</small>`, `${hs.for_sale} for sale · ${hs.for_rent} to let · ${ng} neglected`, "city:homes"));
     } else tiles.push(kpi("Homes", "–", "no housing data yet", "city:homes"));
     tiles.push(kpi("Jobs", `${c.working}<small>working</small>`, `${c.students} at school · ${c.retired} retired · ${c.out_of_work} out of work`, "people"));
     if (S.host.kind === "browser") tiles.push(kpi("AI", "Off", "habit and profiles only", "llm", "muted"));
@@ -1448,8 +1450,16 @@
   function stageChip(stage, condition) {
     return `<span class="dash-stage s${stage}"><i></i>${STAGE_NAME[stage] || "?"}${condition != null ? ` ${round(condition)}` : ""}</span>`;
   }
+  // The homes the City tab and the HUD count: every home in the region world (stats.region.homes), the cast's
+  // 37 in Millbrook (stats.city.homes), so the numbers agree with the stage bar and the market list (S.lots and
+  // S.town.homes, every home the town has).
+  function homesStats() {
+    const st = S.stats;
+    if (!st) return null;
+    return (st.region && st.region.homes) || (st.city && st.city.homes) || null;
+  }
   function homesHtml() {
-    const h = S.stats.city.homes;
+    const h = homesStats();
     if (!h) return "<h3>Homes</h3><div class=\"dash-empty\">No housing data yet.</div>";
     const lots = Object.entries(S.lots);
     const counts = [0, 0, 0, 0, 0];

@@ -46,6 +46,7 @@ LANDLORD_RESTORE = 85  # ... back up to this
 VACANT_DECAY = 0.7  # per day, any tier, nobody living there
 MARKET_FLOOR = 20  # a home held for sale never drops below "neglected"
 NEWS_SETTLE_DAYS = 1  # a home's poor stage is not news until its household has lived there this long
+NEWS_RESET = 65  # a worn lot's announced stage resets only from this condition up (stage 0 always): no repeats
 LANDLORD_SELLS_DAYS = 14  # with no other house for sale this long, the landlord sells a let house left empty
 NOTICE_FROM_DAY = 120  # from this game day, while no house is for sale (house_drought), the landlord sells a let house
 NOTICE_DAYS = 14  # ... with notice: the tenants have this long to move out, and then it goes on the market ...
@@ -1367,7 +1368,8 @@ def _stage_news(sim, lot: Lot, homes: list[Home] | None = None) -> None:
     # --- end region ---
     """Announce a newly reached shabby, neglected or derelict stage, or a return to kept, for an owner-occupied
     home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
-    poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
+    poor stages is announced once; it resets when the lot gets back to stage 0, or to stage 1 at NEWS_RESET or
+    more, so a home hovering about the shabby line is not announced each time it dips. "Looks as good as new" comes
     when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
     silent. So is a home whose household moved in less than NEWS_SETTLE_DAYS ago: a poor stage it reaches then
     is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
@@ -1387,7 +1389,8 @@ def _stage_news(sim, lot: Lot, homes: list[Home] | None = None) -> None:
                 _event(sim, f"{home.name} looks as good as new.", "restored", lot.place,
                        agents=[a.id for a in _members(sim, sim.households[home.household])])
             lot.worst = 0
-        lot.reported = st
+        if st == 0 or lot.condition >= NEWS_RESET:
+            lot.reported = st
     elif st > lot.reported:
         if home and _just_moved_in(sim, sim.households[home.household]):
             return  # not news yet

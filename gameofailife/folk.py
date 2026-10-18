@@ -1167,8 +1167,8 @@ class Folk:
         self.counters["choices"] += 1
         opt = opts[pick]
         m = now % DAY
-        p.choose({"time": f"{m // 60:02d}:{m % 60:02d}", "kind": kind, "options": [o.label for o in opts],
-                  "choice": pick, "by": by})
+        p.choose({"time": f"Day {now // DAY + 1} {m // 60:02d}:{m % 60:02d}", "kind": kind,
+                  "options": [o.label for o in opts], "choice": pick, "by": by})
         self._play(sim, p, now, opt)
 
     def _play(self, sim, p, now: int, opt: Option) -> None:

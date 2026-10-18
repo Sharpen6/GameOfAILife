@@ -1507,7 +1507,7 @@ job at Millbrook's places or a seat at Millbrook's school.
 | State | `occ` | One integer per place in `town.places` order: the townsfolk and named inside it (or strolling in a park). In the welcome; then in a frame once 10 game minutes have passed since the last one sent, at most every 40th frame. |
 | State | `folk_n` | The number of townsfolk ids. |
 | Stats | `folk` | Only with townsfolk: `{"v", "worth", "worth_24h", "mood", "health", "luck"}`: `v` the roster version (it changes on births, deaths, moves and new jobs); the rest lists of `folk_n` integers by index, `null` for the dead or gone. `stats.people` and the richest-person headline stay the 60 named. |
-| Stats | `region` | Only in the `region` world: `{"population", "named", "folk", "births", "deaths", "births_today", "deaths_today", "jobs", "commute", "train", "bus"}` with `jobs` `{"total", "filled", "open"}`, `commute` `{"walk", "car", "bus", "train", "bike"}`, `train` `{"riders_now", "riders_today", "lines": [{"id", "riders_today"}]}` and `bus` `{"riders_now", "riders_today"}`. |
+| Stats | `region` | Only in the `region` world: `{"population", "named", "folk", "births", "deaths", "births_today", "deaths_today", "jobs", "commute", "train", "bus", "homes"}` with `jobs` `{"total", "filled", "open"}`, `commute` `{"walk", "car", "bus", "train", "bike"}`, `train` `{"riders_now", "riders_today", "lines": [{"id", "riders_today"}]}`, `bus` `{"riders_now", "riders_today"}` and `homes` `city.homes`' keys over every home in the region and the lots they stand on (`city.homes` keeps to the cast's 37). |
 
 `city` and `districts` in the stats count the townsfolk too (the region's districts follow Millbrook's in the
 `region` world): the counts (`population`, `adults`, `children`, `working`, `students`, `retired`, `out_of_work`),
@@ -1529,8 +1529,9 @@ is true once they have left the region, `job` as on a named page (a townsperson 
 its `hours`, or 15 or 30 minutes before or after, finishing as much earlier or later; the region's schools but
 Riverton High start at 08:30; Millbrook's jobs and school keep their hours),
 `commute` `[work place id, minutes, mode]` or `null`, `home` `{"id", "name", "place"}`,
-`household` their household's living members' names, `choices` the settled choices of their life so far
-(the named get forks instead), `life` as on a named page (see [Life](#life)). A named character's page has
+`household` their household's living members' names, `memory` their last 10 notable moments (`"Day 3 Wed 11:00:
+Became friends with ..."`, a date, a food parcel, lateness), `choices` their last 5 settled choices
+`[{"time", "kind", "options", "choice", "by"}]` (`time` `"Day 12 21:45"`; the named get forks instead), `life` as on a named page (see [Life](#life)). A named character's page has
 `"kind": "named"`.
 
 ## Life
@@ -1561,11 +1562,14 @@ fades.
 **Talk lines.** A named character's last 12 talks are kept for their page (see [Life, work and money](#life-work-and-money)
 for where the page shows them) as `{"time", "with", "name", "topic", "tone", "text", "place"}`: `topic` one of
 `weather`, `work`, `school`, `money`, `family`, `health`, `news`, `love`; `tone` `warm`, `pleasant`, `awkward` or
-`argument`; `text` the two lines, `“...” “...”`, at most 160 characters. A `news` talk may quote a recent headline,
-never the richest-person headline or a controller's.
+`argument`; `text` the two lines, `“...” “...”`, at most 160 characters: the first speaker's, then the other's (a
+line about a child or a partner asks after the listener's). A `news` talk may quote a recent headline,
+never the richest-person headline or a controller's. A townsperson keeps their last 5 talks the same way; a talk
+between two townsfolk has `topic` and `text` `null` (no words are drawn for it).
 
 **Events** (see [Event](#event)). Every social event carries `place` and `agents`. Talks and flirts are events only
-with a named character, and then only for arguments and for warm, news, love or baby talk away from home.
+with a named character, and then only for arguments and for warm, news, love or baby talk away from home, at most one
+a pair an hour (a talk event names the first speaker first).
 
 | Tag | Importance | When |
 |-----|------------|------|

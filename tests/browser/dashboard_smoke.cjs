@@ -344,6 +344,29 @@ async function rules(browser, base) {
 
   await majorBurst(page, "desktop", 3 + 2);
 
+  // In the region world the HUD's market chip, the Homes KPI and the homes facts row count every home in the
+  // region (stats.region.homes), as the stage bar and the market list do, not the cast's 37 (stats.city.homes).
+  await page.keyboard.press("1");
+  const homes = await page.evaluate(() => {
+    const st = JSON.parse(JSON.stringify(window.__lastStats));
+    st.region = Object.assign({}, st.region || {}, { homes: { total: 612, owned: 70, rented: 381, for_sale: 16, for_rent: 145,
+      lots_by_stage: [68, 95, 35, 1, 0], neglected_lived_in: 1 } });
+    Dash.stats(st);
+    const out = { hud: document.querySelector('#hud [data-k="homes"]').innerText.replace(/\s+/g, " "),
+      tile: [...document.querySelectorAll("#dash-city .dash-kpi")].map(k => k.innerText.replace(/\s+/g, " ")).find(t => /^homes /i.test(t)),
+      facts: (document.querySelector("#dash-city .dash-facts") || {}).innerText };
+    Dash.stats(Object.assign({}, window.__lastStats, { full: true }));
+    out.after = document.querySelector('#hud [data-k="homes"]').innerText.replace(/\s+/g, " ");
+    out.city = `${window.__lastStats.city.homes.for_sale} for sale · ${window.__lastStats.city.homes.for_rent} to let`;
+    return out;
+  });
+  check(homes.hud === "16 for sale · 145 to let", "region: the HUD's market chip counts the region's homes", homes);
+  check(/70 owned/.test(homes.tile || "") && /16 for sale · 145 to let · 1 neglected/.test(homes.tile || ""),
+    "region: the Homes KPI counts the region's homes", homes);
+  check(/70\s*owned/.test(homes.facts || "") && /381\s*rented/.test(homes.facts || "") && /145\s*to let/.test(homes.facts || ""),
+    "region: the homes facts row counts the region's homes", homes);
+  check(homes.after === homes.city, "Millbrook: the market chip counts city.homes", homes);
+
   // The fixture follows PLAN 3.7: agents[0] == agent whenever agent is set (welcome backlogs and frames).
   const bad = await page.evaluate(() => new Promise(resolve => {
     const h = DASH_FIXTURE.createHost({ seed: 11, speed: 16, frameMs: 20 }), seen = [];

@@ -29,11 +29,13 @@
   const SKIP_ACTS = ["sleep", "hospital", "ward", "dead", "baby"];
   const WANDER = ["walk_park", "play"];
   const RING = 12; // a person's talk ring (life.talks)
+  const FOLK_RING = 5; // a townsperson's (their page's talks)
   const TALKS_SHOWN = 20; // state.talks rows
   const TALKS_WINDOW = 10; // ... begun in the last 10 game minutes
   const TALKS_KEEP = 40; // sim.social.talks
   const DATE_HOUR = 17; // dates are arranged at 17:00 for the evening
   const WEDDING_HOUR = 14;
+  const TALK_LOG_GAP = 60; // minutes: a pair's talks reach the News log at most once in this long
   const COOL = { crush: 5, asked_out: 3, date: 2, move_in: 14, propose: 30, proposal: 30,
     relationship_trouble: 7, partner_split: 7, friend_in_need: 7, borrow: 7 };
 
@@ -56,6 +58,7 @@
       this.place_index = new Map(); // place id -> index in town.places
       this.kind = new Map(); // place id -> talk class of a non-home place
       this.loans = []; // rows when sim.life has none
+      this.logged = new Map(); // "lo|hi" -> tick of the pair's last talk in the News log (TALK_LOG_GAP)
     }
   }
 
@@ -368,7 +371,19 @@
       }
     }
     if (P().is_named(a) || P().is_named(b)) _named_talk(sim, a, b, ra, tone, cls, place_id);
+    else _folk_talk(sim, a, b, tone, place_id);
     return tone;
+  }
+
+  // Two townsfolk's talk in both their rings (FOLK_RING): who, where and how it went; no words are drawn.
+  function _folk_talk(sim, a, b, tone, place_id) {
+    const stamp = sim.clock.stamp();
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!nil(x.life)) {
+        x.life.talks.push({ time: stamp, with: y.id, name: y.name, topic: null, tone, text: null, place: place_id });
+        keepLast(x.life.talks, FOLK_RING);
+      }
+    }
   }
 
   // Kinds after a's affinity toward b moved from `before` to `after` (life.md 5.1.6): named pairs through
@@ -398,6 +413,10 @@
         const text = `${a.name} and ${b.name} have become friends.`;
         sim.event(text, who, null, { tag: "new_friend", importance: 1, agents: [other.id], place: _where_of(who) });
         other.remember(sim.clock.stamp(), text);
+      } else { // two townsfolk: no News, but each page remembers it
+        const stamp = sim.clock.stamp();
+        a.remember(stamp, `Became friends with ${b.name}.`);
+        b.remember(stamp, `Became friends with ${a.name}.`);
       }
     } else if ((was === FRIEND || was === PARTNER) && before >= 0 && 0 > after && (named_a || named_b)) {
       const [who, other] = named_a ? [a, b] : [b, a];
@@ -462,7 +481,7 @@
   function _told(p, headline) {
     const life = p.life;
     if (nil(life)) return false;
-    for (const t of life.talks) if (t.topic === "news" && t.text.includes(headline)) return true;
+    for (const t of life.talks) if (t.topic === "news" && t.text.includes(headline)) return true; // folk-only: neither
     return false;
   }
 
@@ -478,14 +497,21 @@
 
   const MONEY_TAGS = ["laid_off", "job_lost", "in_red", "raise", "windfall"];
 
+  // x's partner who is not y, and x's child: what y can ask x about.
+  function _family_of(sim, x, y) {
+    const q = partner_of(sim, x);
+    return [q !== null && q !== y ? q : null, _kid_of(sim, x)];
+  }
+
+  // The words of a talk between a and b. The lines' {kid} and {partner} are the listener's: b's when b has a
+  // child, else a's when a has one, else b's, else a's partner (one not in the talk). When they are a's, `swap` is
+  // set and b speaks first (_named_talk), so nobody asks after their own child or sends love to their own date.
   function talk_ctx(sim, a, b, ra, cls, place_id) {
     const day = sim.clock.day;
-    let partner = null; // someone's partner who is not in the talk
-    for (const [x, y] of [[a, b], [b, a]]) {
-      const q = partner_of(sim, x);
-      if (q !== null && q !== y) { partner = q; break; }
-    }
-    const kid = _kid_of(sim, a) || _kid_of(sim, b);
+    const [pb, kb] = _family_of(sim, b, a);
+    const [pa, ka] = _family_of(sim, a, b);
+    const swap = kb === null && (ka !== null || (pb === null && pa !== null));
+    const [partner, kid] = swap ? [pa, ka] : [pb, kb]; // the listener's partner (not in the talk) and child
     const lm = _life_mod();
     const ill = Boolean(lm.ill(a) || lm.ill(b) || _recent(a, ["discharged"], 7, day) || _recent(b, ["discharged"], 7, day));
     let illness = null;
@@ -513,6 +539,7 @@
       kid: kid !== null ? _first(kid.name) : null,
       partner: partner !== null ? _first(partner.name) : null,
       illness,
+      swap,
     };
   }
 
@@ -528,15 +555,21 @@
     const where = !nil(place) && cls !== "home" ? ` at ${place.name}` : cls === "home" ? " at home" : "";
     const stamp = sim.clock.stamp();
     for (const [x, y] of [[a, b], [b, a]]) {
-      if (P().is_named(x) && !nil(x.life)) {
+      if (!nil(x.life)) { // a townsperson keeps the talk with a named too, in their shorter ring
         x.life.talks.push({ time: stamp, with: y.id, name: y.name, topic: tp, tone, text, place: place_id });
-        keepLast(x.life.talks, RING);
+        keepLast(x.life.talks, P().is_named(x) ? RING : FOLK_RING);
       }
     }
     if (tone === "argument" || (cls !== "home" && (tone === "warm" || tp === "news" || tp === "love" || ctx.baby))) {
+      const key = a.id < b.id ? `${a.id}|${b.id}` : `${b.id}|${a.id}`;
+      const logged = sim.social.logged;
+      const last = logged.has(key) ? logged.get(key) : -TALK_LOG_GAP;
+      if (sim.clock.tick - last < TALK_LOG_GAP) return; // one logged talk a pair an hour: the talk stays in the ring
+      logged.set(key, sim.clock.tick);
       const [who, other] = P().is_named(a) ? [a, b] : [b, a];
       const verb = tone === "argument" ? "argue about" : "chat about";
-      sim.event(`${a.name} and ${b.name} ${verb} ${TOPIC_WORDS[tp]}${where}: ${text}`, who, null,
+      const [first, second] = ctx.swap && tp === "family" ? [b, a] : [a, b]; // the speaker first
+      sim.event(`${first.name} and ${second.name} ${verb} ${TOPIC_WORDS[tp]}${where}: ${text}`, who, null,
         { tag: "talk", agents: [other.id], place: place_id, remember: false });
     }
   }
@@ -661,6 +694,11 @@
       const [who, other] = P().is_named(a) ? [a, b] : [b, a];
       sim.event(`${a.name} and ${b.name} are going out!`, who, null,
         { tag: "partner", agents: [other.id], place: _where_of(who) });
+    }
+    const stamp = sim.clock.stamp();
+    for (const [x, y] of [[a, b], [b, a]]) {
+      // a townsperson's page remembers it (the named's memory has the News line)
+      if (!P().is_named(x)) x.remember(stamp, `Started going out with ${y.name}.`);
     }
     _jealousy(sim, a, b);
     _jealousy(sim, b, a);
@@ -1026,6 +1064,14 @@
     }
   }
 
+  // The day a couple's next date falls on, as _dates arranges them (every third day, at DATE_HOUR): today
+  // until DATE_HOUR, else from tomorrow.
+  function first_date_day(sim, a_id, b_id) {
+    let day = sim.clock.day + (sim.clock.minute_of_day >= DATE_HOUR * 60 ? 1 : 0);
+    while ((D().sid(a_id) + D().sid(b_id) + day) % 3) day += 1;
+    return day;
+  }
+
   // One date: s' = .2 + compat + .004 (aff - 50); warm at odds(.5 + s'), bad at odds(.1 - .5 s').
   function date_roll(sim, a, b) {
     const ra = a.relationships.get(b.id), rb = b.relationships.get(a.id);
@@ -1198,8 +1244,8 @@
         _count(sim, "incidents");
         if (P().is_named(a) || P().is_named(b)) {
           const [who, other] = P().is_named(a) ? [a, b] : [b, a];
-          const why = cls === "work" ? "over a missed shift" : cls === "school" ? "over a broken pencil case"
-            : "over the noise on the stairs";
+          const why = cls === "work" ? "over a missed shift" : cls === "school" ? "over the timetable"
+            : "over the noise on the stairs"; // a school's pair is two of its staff (adults only)
           sim.event(`${_first(a.name)} and ${_first(b.name)} fall out ${why} at ${place.name}.`, who, null,
             { tag: "row", agents: [other.id], place: place_id });
         }
@@ -1460,12 +1506,12 @@
 
   G.social = {
     TALK_P, STRANGER_W, CLASS_OF_KIND, STEP, SOCIAL_GAIN, TONE_CODE, TALKS_A_DAY, CANDIDATES, FIRST_AFFINITY,
-    FRIEND_AT, RIVAL_AT, RIVAL_OFF, REL_CAP, CHEM_MIN, ASK_ROMANCE, ASK_AFFINITY, RING, TALKS_SHOWN, TALKS_WINDOW,
-    DATE_HOUR, WEDDING_HOUR, COOL, FOLK_TEXTS, TOPIC_WORDS, SocialState,
+    FRIEND_AT, RIVAL_AT, RIVAL_OFF, REL_CAP, CHEM_MIN, ASK_ROMANCE, ASK_AFFINITY, RING, FOLK_RING, TALKS_SHOWN, TALKS_WINDOW,
+    DATE_HOUR, WEDDING_HOUR, TALK_LOG_GAP, COOL, FOLK_TEXTS, TOPIC_WORDS, SocialState,
     init, tick, converse, on_affinity, bump, trait_gap, compat, talk_ctx, partner_of, attracted, eligible, chemistry,
-    ask_out, folk_answer, start_dating, end_couple, move_in, with_kids, vacate, engage, date_roll, lend, message_folk, invite_folk,
+    ask_out, folk_answer, start_dating, end_couple, move_in, with_kids, vacate, engage, first_date_day, date_roll, lend, message_folk, invite_folk,
     pick_companion, talks_json, seed_story, _cool, _set_cool, _rooms, _run_room, _nightly, _dates, _lending,
     _incidents, _weddings, _folk_texts, _crushes, _rebuild_couples, _named_place, _ensure, _drop, _evict, _count,
-    _home_day, _dating_day, _mover, _leave_home, _closest_eligible, _headline, _named_talk, _upkeep,
+    _home_day, _dating_day, _mover, _leave_home, _closest_eligible, _headline, _named_talk, _upkeep, _family_of, _folk_talk,
   };
 })(globalThis.GameOfAILife || (globalThis.GameOfAILife = {}));

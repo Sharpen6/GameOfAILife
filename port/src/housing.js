@@ -35,6 +35,7 @@
   const VACANT_DECAY = 0.7; // per day, any tier, nobody living there
   const MARKET_FLOOR = 20; // a home held for sale never drops below "neglected"
   const NEWS_SETTLE_DAYS = 1; // a home's poor stage is not news until its household has lived there this long
+  const NEWS_RESET = 65; // a worn lot's announced stage resets only from this condition up (stage 0 always): no repeats
   const LANDLORD_SELLS_DAYS = 14; // with no other house for sale this long, the landlord sells a let house left empty
   const NOTICE_FROM_DAY = 120; // from this game day, while no house is for sale (house_drought), the landlord sells a let house
   const NOTICE_DAYS = 14; // ... with notice: the tenants have this long to move out, and then it goes on the market ...
@@ -1310,7 +1311,8 @@
 
   // Announce a newly reached shabby, neglected or derelict stage, or a return to kept, for an owner-occupied
   // home (housing.md 7.2). `lot.reported` is the worst stage announced, so a home bouncing between two of the
-  // poor stages is announced once; it resets when the lot gets back to stage 0-1. "Looks as good as new" comes
+  // poor stages is announced once; it resets when the lot gets back to stage 0, or to stage 1 at NEWS_RESET or
+  // more, so a home hovering about the shabby line is not announced each time it dips. "Looks as good as new" comes
   // when a home that had reached stage 2+ (`lot.worst`) climbs back to stage 0. Rentals and vacant homes are
   // silent. So is a home whose household moved in less than NEWS_SETTLE_DAYS ago: a poor stage it reaches then
   // is announced only if it is still there afterwards (it stays unreported), so a fixer-upper renovated on its
@@ -1333,7 +1335,7 @@
         }
         lot.worst = 0;
       }
-      lot.reported = st;
+      if (st === 0 || lot.condition >= NEWS_RESET) lot.reported = st;
     } else if (st > lot.reported) {
       if (home && _just_moved_in(sim, sim.households.get(home.household))) return; // not news yet
       if (home && STAGE_NEWS[st]) {
@@ -1652,7 +1654,7 @@
 
   G.housing = {
     TIERS, STAGES, STAGE_COMFORT, LANDLORD, LANDLORD_FLOOR, LANDLORD_RESTORE, VACANT_DECAY, MARKET_FLOOR,
-    NEWS_SETTLE_DAYS, LANDLORD_SELLS_DAYS, NOTICE_FROM_DAY, NOTICE_DAYS, NOTICE_GAP_DAYS, NOTICE_SETTLED_DAYS,
+    NEWS_SETTLE_DAYS, NEWS_RESET, LANDLORD_SELLS_DAYS, NOTICE_FROM_DAY, NOTICE_DAYS, NOTICE_GAP_DAYS, NOTICE_SETTLED_DAYS,
     NOTICE_MIN_DAYS, NOTICE_HOUR, WINTER_DECAY, CROWD_DECAY, EMERGENCY_DECAY, PROPERTY_TAX, SALE_FEE, MOVING_COST,
     CALLOUT, RENO_FACTOR, RESERVE_WEEKS, MOVE_GAP_DAYS, DOWNSIZE_SHARE, DOWNSIZE_CONDITION, SPARE_BEDROOMS, CAR_SALE,
     EMERGENCY_DAYS, LIVING_PER_PERSON, LIVING_PER_RETIREE, ARREARS_PROGRESS, HARDSHIP_REPAY, FORCED_CROWDING,
