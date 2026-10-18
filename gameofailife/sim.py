@@ -1467,7 +1467,7 @@ class Simulation:
         # Convert every trait before changing any, so a bad value raises with the profile untouched.
         new = {t: round(max(0.0, min(1.0, float(v))), 3)
                for t, v in (traits if isinstance(traits, dict) else {}).items() if t in agent.profile.traits}
-        agent.profile.traits.update(new)
+        agent.profile.set_traits(new)  # where learning starts from now on
         if isinstance(prompt, str) and prompt.strip():
             agent.profile.prompt = prompt.strip()[:1000]
             agent.profile.prompt_edited = True

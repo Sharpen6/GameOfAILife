@@ -431,7 +431,7 @@ Director plays when no controller answers.
 |------------|---------|
 | `agent_id` | Character id. |
 | `prompt`   | Optional string. If non-blank it replaces the prompt (trimmed, cut to 1000 characters) and marks the prompt as hand-edited, so it stops being rewritten automatically. `null` or blank leaves the prompt alone. |
-| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. A value that cannot be read as a number (for example `"lots"` or `null`) gets a `bad message` error, and then no trait changes. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. |
+| `traits`   | Optional object of trait name to number. Known traits are `thrift`, `family`, `social`, `diligence`, `health`, `adventure`; values are clamped to 0..1. Unknown names are ignored. A value that cannot be read as a number (for example `"lots"` or `null`) gets a `bad message` error, and then no trait changes. If traits change and the prompt was never hand-edited, the prompt is regenerated from the traits. Traits set here are where learning starts from afterwards (learning moves a trait at most 0.25 from them). |
 
 Reply: `{"type": "agent", "agent": { ...agent page... }}` with the updated page.
 Unknown id: `{"type": "error", "error": "unknown character"}`.
@@ -974,8 +974,12 @@ running while the game is paused.
 1. **0 to 5 s.** A valid `choose` is played at once:
    `accepted: true, applied: true`. The fork is decided by `"model"`, the reason
    is kept, the answer's seconds go in `answer_seconds`, and the profile learns
-   from the choice (traits move a little towards the option's style, and the
-   prompt is regenerated unless it was hand-edited).
+   from the choice (traits move a little towards what sets the option apart from
+   the fork's other options, and the prompt is regenerated unless it was
+   hand-edited). Each lesson first eases every trait 3% of the way back to where
+   it started, and learning never moves a trait more than 0.25 from there, so a
+   controller's steady style shows while mixed choices leave the character
+   itself.
 2. **At 5 s** without an answer, the Director plays the profile default. The
    fork is decided by `"timeout"` and God sees it in the next state frame.
 3. **5 to 10 s.** The first `choose` for a fork decided by timeout is not

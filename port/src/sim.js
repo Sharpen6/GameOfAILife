@@ -1552,7 +1552,7 @@
       for (const [t, v] of Object.entries(isDict ? traits : {})) {
         if (hasOwn(agent.profile.traits, t)) fresh[t] = pyRound(pyClamp(pyFloat(v), 0.0, 1.0), 3);
       }
-      Object.assign(agent.profile.traits, fresh);
+      agent.profile.set_traits(fresh); // where learning starts from now on
       if (typeof prompt === "string" && pyStrip(prompt)) {
         agent.profile.prompt = cut(pyStrip(prompt), 1000);
         agent.profile.prompt_edited = true;
