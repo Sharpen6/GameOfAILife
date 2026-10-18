@@ -21,7 +21,7 @@ integrator deletes this file. Full suite on this HEAD: see "Full suite" at the e
   ("... is fixed.", "... is never properly fixed.") go to the residents' memory, never `sim.event` (PLAN 2.8).
 - `folk_model.js`: `Person.position` reads `town.places` as the Map it is, so `p.x` / `p.y` and the `at` of folk
   events match Python (they were [0, 0] in the port).
-- Tests: `tests.test_folk_gen` (20) and `tests.test_folk_money` (11, including a three-week Python/Node rehearsal
+- Tests: `tests.test_folk_gen` (17) and `tests.test_folk_money` (11, including a three-week Python/Node rehearsal
   of folk_life compared person by person, with memory, the luck log and positions).
 
 ## Cut (in the brief's order)
