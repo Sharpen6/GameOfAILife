@@ -226,7 +226,7 @@
     for (const s of town.stops) stopAt.set(s.y * W + s.x, s);
     const junctionSet = new Set(town.junctions.map(([x, y]) => y * W + x));
 
-    const NEW_CODES = "=rSHhF";
+    const NEW_CODES = CV.groundKey ? "#bx=rSHhF~" : "=rSHhF"; // the region's streets, rails, highways, farms, water: V2's tiles
     const stageOf = p => { if (p.kind !== "home") return 0; const l = scene.looks[p.id]; return l ? l.stage | 0 : 0; };
     function groundSprite(x, y) {
       const c = tiles[y][x], i = y * W + x, v = variant[i], s = scene.season;
@@ -722,7 +722,7 @@
       const p = rec.p, look = rec.decor ? {} : scene.looks[p.id] || {};
       const t0 = performance.now();
       const s = rec.B.variant == null ? art.building(p, look, scene.season)
-        : art.building(Object.assign({}, rec.B.kp, { id: rec.B.sid, x: 0, y: 0, entry: p.entry ? [p.entry[0] - p.x, p.entry[1] - p.y] : null }), look, scene.season);
+        : art.building(CV.canonPlace ? CV.canonPlace(rec.B.kp) : Object.assign({}, rec.B.kp, { id: rec.B.sid, x: 0, y: 0, entry: p.entry ? [p.entry[0] - p.x, p.entry[1] - p.y] : null }), look, scene.season);
       const e = { c: s.c, s, used: frameNo, mp: s.c.width * s.c.height, inPlace: rec.B.variant == null, season: scene.season, ms: performance.now() - t0 };
       sprites.set(key, e); spriteMP += e.mp; scene.stats.spriteBuilds++;
       evictSprites();
@@ -1913,8 +1913,7 @@
         const p = places[i];
         if (p.kind === "home") lotItems(add, p, i);
         const B = R.buildingAt(p.x, p.y);
-        if (B && B.rec) B.rec.b.glows = null;
-        invalidateLow(p.x - 2, p.y - 2, p.x + p.w + 2, p.y + p.h + 2);
+        if (B && B.rec) B.rec.b.glows = null; // (low chunks: setLooks invalidates them when the stage, and so the ground, changes)
       }
       const keep = statics.filter(it => !(idx.has(it.ref) && LOT_KINDS.has(it.kind)));
       const fresh = add.filter(it => LOT_KINDS.has(it.kind));

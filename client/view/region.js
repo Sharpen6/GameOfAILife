@@ -73,7 +73,8 @@
     const buildings = [];
     const add = (p, decor) => {
       const mill = !decor && p.x + p.w <= mb[0] + mb[2] && p.y + p.h <= mb[1] + mb[3] && p.x >= mb[0] && p.y >= mb[1];
-      const variant = p.variant != null ? p.variant : mill ? null : fnv(p.id) % 8;
+      // V2's rule (buildings.js CV.variantOf) when loaded: p.variant, else null in Millbrook, else a hash of the id
+      const variant = p.variant != null ? p.variant : mill ? null : CV.variantOf ? CV.variantOf(p) : fnv(p.id) % 8;
       buildings.push({ p, i: buildings.length, decor, variant, sid: variant == null ? p.id : p.style + "#" + variant });
     };
     for (const p of town.places || []) if (p.kind !== "park") add(p, false);

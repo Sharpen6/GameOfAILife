@@ -1,59 +1,14 @@
 // CityView low-zoom painters (view.md 3.4): CV.lowGround fills a chunk's ground through the inverse projection,
 // CV.boxBuilding draws a building as lit walls and a roof (with window rows) at any scale, CV.lowLights draws its
-// lit windows for the night layer, CV.tilePattern is the colour of a tile code at low zoom. Until V2's art API
-// lands (v3-art-api) this file also holds fallbacks for CV.spriteBox, spriteKey, paletteOf, heightOf and
-// signTextOf with protoR's bounds; each is defined only when V2's is missing. Classic script; no random numbers.
+// lit windows for the night layer, CV.tilePattern is the colour of a tile code at low zoom. Geometry and colours
+// come from V2's API (CV.spriteBox, paletteOf, heightOf; buildings.js). Classic script; no random numbers.
 "use strict";
 (function () {
   const CV = window.CityView = window.CityView || {};
   const shade = (c, k) => CV.color.shade(c, k);
   const hash2 = (a, b) => CV.hash2(a, b);
-  const fnv = s => CV.fnv ? CV.fnv(s) : CV.color.hash(String(s));
   let isoDefault = null;
   const projOr = proj => proj || isoDefault || (isoDefault = CV.makeIso(1, 1, 0));
-  const sidOf = p => p.variant == null ? p.id : p.style + "#" + p.variant;
-
-  // --- V2 API fallbacks (view.md 4.5) --------------------------------------------------------------------
-  // spriteBox: art.building's bounds as pure geometry (protoR, 0 mismatches over 1,031 buildings).
-  if (!CV.spriteBox) CV.spriteBox = function (p, look, proj) {
-    const P = projOr(proj), STYLE = CV.STYLE || {};
-    const st = STYLE[p.style] || STYLE.house || { floorPx: 26, roof: "gable", roofPx: 30 };
-    const floors = Math.max(1, p.floors || (CV.FLOORS && CV.FLOORS[p.style]) || 1);
-    const flatTop = st.roof === "flat" || st.roof === "glass" || st.roof === "saw";
-    const Hh = floors * st.floorPx + (p.style === "house" ? 0 : 4) + (st.fascia || 0);
-    const Hw = Hh + (flatTop ? 4 : 0);
-    const extra = (st.roofPx || 0) + (p.style === "factory" ? 96 : p.style === "city_hall" ? 70 : p.style === "tower" ? 62 : p.style === "apartments" ? 34 : p.style === "school" ? 26 : p.style === "diner" ? 30 : 16);
-    const topZ = Hw + extra;
-    const fx0 = p.x - 0.25, fy0 = p.y - 0.25, fx1 = p.x + p.w + 0.25, fy1 = p.y + p.h + 0.25;
-    let bx0 = 1e9, bx1 = -1e9, by0 = 1e9, by1 = -1e9;
-    for (const [a, b] of [[fx0, fy0], [fx1, fy0], [fx1, fy1], [fx0, fy1]]) for (const z of [0, topZ]) {
-      const q = P.toWorld(a, b, z);
-      if (q[0] < bx0) bx0 = q[0]; if (q[0] > bx1) bx1 = q[0]; if (q[1] < by0) by0 = q[1]; if (q[1] > by1) by1 = q[1];
-    }
-    bx0 -= 6; bx1 += 6; by0 -= 6; by1 += 4;
-    const ox = Math.floor(bx0), oy = Math.floor(by0), roofTop = Hw + (st.roofPx || 0);
-    return { ox, oy, w: Math.ceil(bx1) - ox, h: Math.ceil(by1) - oy, height: roofTop, labelZ: roofTop + (p.style === "city_hall" ? 50 : p.style === "factory" ? 20 : 10) };
-  };
-  if (!CV.signTextOf) CV.signTextOf = p => p.style === "apartments" || p.style === "residential_tower" ? String(p.name || "").split(" ")[0].toUpperCase()
-    : p.style === "tower" && /brightline/i.test(p.name || "") ? "BRIGHTLINE" : "";
-  const lookSigOf = look => !look ? "-" : [look.stage | 0, look.works ? 1 : 0, (look.units || []).map(u => (u.vacant ? "v" : "o") + (u.listing ? "l" : "")).join("")].join(":");
-  CV.lookSigOf = CV.lookSigOf || lookSigOf;
-  if (!CV.spriteKey) CV.spriteKey = (p, look, season) => [p.style, p.w, p.h, p.floors, p.face, p.variant == null ? p.id : p.variant, lookSigOf(look), season, CV.signTextOf(p)].join("|");
-  const HOUSE_PAINT = ["#f2dfbd", "#cfe0ea", "#efcab2", "#d6e6c6", "#f3e6a8", "#ecd0dc", "#e4ddcf", "#c3d7ec"];
-  const HOUSE_ROOF = ["#a8463a", "#8a4a32", "#5a5f6a", "#7a3f2e", "#6a5040"];
-  // styles V2 adds (until it lands): a wall colour and roof kind each, so boxes read by district
-  const EXTRA = { shop: ["#e6d2b8", "flat"], restaurant: ["#ecd8c0", "flat"], row_houses: [null, "gable"], warehouse: ["#a9a596", "gable"],
-    residential_tower: ["#9a5a44", "flat"], station: ["#d8d0c0", "flat"], hotel: ["#c9c2b4", "flat"], stadium: ["#c8ccd2", "flat"],
-    cinema: ["#5a4a6a", "flat"], library: ["#cdbb9a", "flat"], police: ["#5a6a8a", "flat"], fire_station: ["#b84a3a", "flat"],
-    mall: ["#d6d0c6", "flat"], clubhouse: ["#e6dcc6", "gable"] };
-  if (!CV.paletteOf) CV.paletteOf = function (p) {
-    const STYLE = CV.STYLE || {}, st = STYLE[p.style], ex = EXTRA[p.style], h0 = fnv(sidOf(p));
-    const wall = st && st.wall ? (Array.isArray(st.wall) ? st.wall[h0 % st.wall.length] : st.wall) : ex && ex[0] ? ex[0] : HOUSE_PAINT[h0 % HOUSE_PAINT.length];
-    const kind = st ? (st.roof === "gable" || st.roof === "hip" ? "gable" : "flat") : ex ? ex[1] : "gable";
-    const roof = st && st.roofC ? st.roofC : kind === "gable" ? HOUSE_ROOF[(h0 >>> 4) % HOUSE_ROOF.length] : shade(wall, 0.62);
-    return { wall, roof, roof_kind: kind, glass: p.style === "tower" ? "#9cc4e4" : "#8fb3d9", trim: "#ffffff" };
-  };
-  if (!CV.heightOf) CV.heightOf = (p, proj) => CV.spriteBox(p, null, proj).height;
 
   // --- low-zoom ground --------------------------------------------------------------------------------
   // Colour of a tile code at low zoom, by season (area averages of the L1 tiles, measured once by eye).

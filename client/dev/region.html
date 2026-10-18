@@ -79,7 +79,29 @@
         `sprites ${s.sprites.map.size} (${(s.sprites.mp() / 1e6).toFixed(1)} MP) queue ${s.sprites.queue.size}  items ${st.items}`].join("\n");
     }, 250);
   }
-  const start = () => { if (q.get("manual") === "1") return; window.__setTown(); view.start(); };
+  // V1b's fake host (RegionStub) drives the frames when loaded: its town and welcome state, then one frame per
+  // game minute (speed: minutes per second); __step(n) advances n ticks by hand (the smoke tests)
+  let stub = null, tick = state.tick;
+  window.__step = n => {
+    if (!stub) return null;
+    let fr = null;
+    for (let k = 0; k < (n || 1); k++) { tick++; fr = stub.frame(tick); view.setState(fr.state, fr.speed || 1); }
+    return fr;
+  };
+  const start = () => {
+    if (window.RegionStub) {
+      try {
+        stub = window.__stubHost = window.RegionStub(RG, { season: state.season, weather: state.weather, speed: 1 });
+        const w = stub.welcome(tick);
+        Object.assign(town, w.town);
+        Object.assign(state, w.state);
+      } catch (e) { stub = null; console.warn("region_stub.js did not start:", e && e.message); }
+    }
+    if (q.get("manual") === "1") return;
+    window.__setTown(); view.start();
+    const speed = +(q.get("speed") || 1);
+    if (stub && q.get("freeze") !== "1") setInterval(() => window.__step(1), Math.max(16, 1000 / speed));
+  };
   // V1b's fake host, when it exists, drives the state (crowd, trains, talks); without it the page still runs
   if (q.get("stub") !== "0") {
     const s = document.createElement("script");
