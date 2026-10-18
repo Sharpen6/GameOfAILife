@@ -236,6 +236,8 @@
       for (const ln of this.lines.values()) for (const s of ln.stations) if (!this.exits.has(s)) this.exits.set(s, ln.exits[s]);
       this.serving = new Map(this.order.map(s => [s, Array.from(this.lines.values()).filter(ln => ln.stations.includes(s))]));
       this.hubs = this.order.filter(s => this.serving.get(s).length > 1); // where riders change lines
+      this.plans = new Map(); // "s|t" -> _plans(this, s, t)
+      this.pair_worst = new Map(); // "s|t" -> the least worst wait + ride over the plans, or null
     }
   }
 
@@ -386,6 +388,16 @@
 
   // Ways from station s to station t: [[line, track, s, t]] on one line, or two rides changing at a hub.
   function _plans(r, s, t) {
+    const key = `${s}|${t}`;
+    let got = r.plans.get(key);
+    if (got === undefined) {
+      got = _find_plans(r, s, t);
+      r.plans.set(key, got);
+    }
+    return got;
+  }
+
+  function _find_plans(r, s, t) {
     for (const ln of r.serving.get(s)) {
       if (ln.stations.includes(t)) return [[[ln, ln.track_for(s, t), s, t]]];
     }
@@ -460,14 +472,27 @@
     for (const [am, , s] of _access(r, net, a, car)) {
       for (const [em, , t] of _egress(r, net, b)) {
         if (s === t) continue;
-        for (const plan of _plans(r, s, t)) {
-          let m = am + em + TRANSFER_MINUTES * (plan.length - 1);
-          for (const [ln, track, x, y] of plan) m += ln.worst(track, x, y);
-          if (best === null || m < best) best = m;
-        }
+        const w = _pair_worst(r, s, t);
+        if (w !== null && (best === null || am + w + em < best)) best = am + w + em;
       }
     }
     return _store(cache, key, best);
+  }
+
+  // The least, over the plans from station s to t, of their worst waits and rides plus any transfer.
+  function _pair_worst(r, s, t) {
+    const key = `${s}|${t}`;
+    let got = r.pair_worst.get(key);
+    if (got === undefined) {
+      got = null;
+      for (const plan of _plans(r, s, t)) {
+        let m = TRANSFER_MINUTES * (plan.length - 1);
+        for (const [ln, track, x, y] of plan) m += ln.worst(track, x, y);
+        if (got === null || m < got) got = m;
+      }
+      r.pair_worst.set(key, got);
+    }
+    return got;
   }
 
   G.rail = {
