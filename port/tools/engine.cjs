@@ -10,6 +10,7 @@ const SRC = path.join(__dirname, "..", "src");
 
 function load() {
   if (globalThis.GameOfAILife && globalThis.GameOfAILife.sim) return globalThis.GameOfAILife;
+  (globalThis.GameOfAILife || (globalThis.GameOfAILife = {})).REGION_DATA = JSON.parse(fs.readFileSync(path.join(SRC, "..", "..", "gameofailife", "data", "region.json"), "utf8")); // region.md 9
   const spec = JSON.parse(fs.readFileSync(path.join(SRC, "engine.json"), "utf8"));
   for (const name of [...spec.engine, ...spec.host]) {
     const file = path.join(SRC, name);
