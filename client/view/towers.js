@@ -29,6 +29,8 @@
       g.drawImage(t.c, 0, 0);
       g.restore();
     }
+    // world px per u along a face (iso 32, flat 48 for a south face), to size glow quads like the painted windows
+    const ppu = F => Math.abs(F.at(F.len, 0)[0] - F.at(0, 0)[0]) / F.len || 32;
     const glowBays = (ctx, F, z0, z1, n) => { for (let i = 0; i < n; i++) ctx.windows.push(quad(F, (i + 0.15) * F.len / n, (i + 0.85) * F.len / n, z0, z1)); };
 
     // --- office tower ------------------------------------------------------------------------------------------
@@ -122,7 +124,14 @@
             }
           }
         });
-        glowBays(ctx, F, 6, H - 4, n);
+        { // one glow quad a painted window
+          const k = ppu(F), half = 4.5 / k;
+          for (let fl = 0; fl < floors; fl++) for (let i = 0; i < n; i++) {
+            const u = (i + 0.5) * F.len / n;
+            if (isDoor && fl === 0 && Math.abs(u - F.len / 2) * k < 18) continue;
+            ctx.windows.push(quad(F, u - half, u + half, fl * fh + 6, fl * fh + fh - 3));
+          }
+        }
         if (isDoor) {
           const mid = F.len / 2;
           B.door(ctx, F, mid, 0.34, 19, { color: "#3a4a5a", frame: "#cfc8bb", glazed: true, step: true, boarded: stage >= 3 });
@@ -158,7 +167,7 @@
           }
           q.fillStyle = shade(wall, 1.1); q.fillRect(0, 0, W, 3); q.fillRect(0, 0, 3, Ht); q.fillRect(W - 3, 0, 3, Ht);
         });
-        glowBays(ctx, F, fh + 5, H - 4, n);
+        { const k = ppu(F), half = 5 / k; for (let fl = 1; fl < floors; fl++) for (let i = 0; i < n; i++) { const u = (i + 0.5) * F.len / n; ctx.windows.push(quad(F, u - half, u + half, fl * fh + 5, fl * fh + fh - 4)); } }
         if (f === ctx.p.face) {
           const uc = B.entryU(ctx, F);
           B.door(ctx, F, uc, 0.5, 16, { color: "#2a3a4c", frame: "#c9a14a", glazed: true });
